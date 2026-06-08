@@ -1602,7 +1602,7 @@ if tab_planilla:
                                 
                                 <div style="text-align: right; margin-top: 40px;">
                                     <div class="signature-line"></div>
-                                    <span style="font-size:13px; font-weight:bold; color:#4a5568;">Administración de Propiedades</span>
+                                    <span style="font-size:13px; font-weight:bold; color:#4a5568;">{st.session_state.get('nombre_empresa', 'Mi Empresa')}</span>
                                 </div>
                                 
                                 <div class="footer-stamp">
