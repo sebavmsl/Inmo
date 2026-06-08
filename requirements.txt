@@ -8,7 +8,6 @@ import dateutil.relativedelta
 import re
 import urllib.parse
 import bcrypt
-
 import sqlite3
 import requests
 from io import BytesIO
