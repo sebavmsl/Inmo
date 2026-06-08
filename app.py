@@ -29,7 +29,6 @@ footer {visibility: hidden;}
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-
 # 1. Definimos qué columnas esperamos para cada tabla (puedes ampliarlo)
 ESQUEMAS_VALIDOS = {
     "propiedades": ['alias_propiedad', 'calle', 'numero', 'departamento', 'propietario', 'ciudad', 'provincia', 'tipo', 'nis', 'cuenta_gas', 'finca', 'cuenta_ooss', 'nro_padron'],
@@ -913,9 +912,22 @@ pestanas_maestras = {
 # --- AQUÍ VA EL BLOQUE QUE ME PREGUNTAS ---
 # Es el encargado de filtrar qué elementos de 'pestanas_maestras' 
 # son visibles para el usuario según su rol o permisos guardados en sesión.
-if rol_actual in ["superadmin", "admin"]:
+if rol_actual == "superadmin":
+    # Superadmin: acceso total a todas las pestañas sin restricción
     pestanas_visibles_nombres = list(pestanas_maestras.keys()) + ["⚙️ Panel de Gestión"]
     pestanas_visibles_claves = list(pestanas_maestras.values()) + ["panel_gestion"]
+elif rol_actual == "admin":
+    # Admin: acceso al Panel de Gestión siempre + solo las pestañas que tenga habilitadas en BD
+    permisos_usuario = st.session_state.get("permisos_usuario", [])
+    pestanas_visibles_nombres = []
+    pestanas_visibles_claves = []
+    for nombre, clave in pestanas_maestras.items():
+        if clave in permisos_usuario:
+            pestanas_visibles_nombres.append(nombre)
+            pestanas_visibles_claves.append(clave)
+    # Panel de Gestión siempre visible para admin
+    pestanas_visibles_nombres.append("⚙️ Panel de Gestión")
+    pestanas_visibles_claves.append("panel_gestion")
 elif rol_actual == "propietario":
     # Propietario: acceso de solo lectura a Dashboard, Planilla e Historial de Caja
     _pestanas_propietario = ["dashboard", "planilla", "historial_pagos", "gastos"]
