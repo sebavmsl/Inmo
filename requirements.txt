@@ -1,13 +1,13 @@
-import streamlit as st
-import pandas as pd
-import os
-import secrets
-import logging
-import dateutil.relativedelta
-import re
-import urllib.parse
-import bcrypt
-import sqlite3
-import requests
+streamlit as st
+pandas as pd
+os
+secrets
+logging
+dateutil.relativedelta
+re
+urllib.parse
+bcrypt
+sqlite3
+requests
 from datetime import datetime
 from io import BytesIO
