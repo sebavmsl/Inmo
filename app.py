@@ -19,6 +19,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
 st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
 
+# 2. Inyección de CSS para ocultar elementos
+hide_streamlit_style = """
+<style>
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+footer {visibility: hidden;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 
 # 1. Definimos qué columnas esperamos para cada tabla (puedes ampliarlo)
 ESQUEMAS_VALIDOS = {
