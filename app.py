@@ -1,29 +1,166 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
+import os
+import secrets
+import logging
 from datetime import datetime
 import dateutil.relativedelta
 import re
 import urllib.parse
+import bcrypt
+
+import sqlite3
+import requests
+from io import BytesIO
+
+# Configuración de logging (reemplaza los print() de depuración)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+# 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
+st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
+
+
+# 1. Definimos qué columnas esperamos para cada tabla (puedes ampliarlo)
+ESQUEMAS_VALIDOS = {
+    "propiedades": ['alias_propiedad', 'calle', 'numero', 'departamento', 'propietario', 'ciudad', 'provincia', 'tipo', 'nis', 'cuenta_gas', 'finca', 'cuenta_ooss', 'nro_padron'],
+    "inquilinos": ['apellidos', 'nombres', 'dni', 'telefono', 'email'],
+    "contratos": [
+        'alias_propiedad', 'dni_inquilino', 'estado', 'inicio_contrato', 'fin_contrato',
+        'calc_duracion', 'act_contrato', 'indice', 'monto_inicial', 'alquiler',
+        'prox_actualizacion', 'mes_contrato', 'mes_actualizacion_contrato', 'servicios',
+        'honorarios', 'monto_honorarios', 'cuota_honorarios', 'honorarios_pagados',
+        'tipo_de_garantie', 'monto_garantia', 'garantia', 'garantia_pagada',
+        'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad',
+        'ooss', 'servicios_total', 'cochera', 'alquiler_cobrado', 'total_pagado'
+    ]
+}
+
+def crear_db_central():
+    """
+    Crea la base de datos central leyendo el nombre desde secrets.toml.
+    Si la clave no existe, usa 'central.db' como fallback y advierte en el log.
+    """
+    try:
+        nombre_db = st.secrets["database"]["archivo_central"]
+    except (KeyError, FileNotFoundError):
+        nombre_db = "central.db"
+        logging.warning(
+            "No se encontró 'database.archivo_central' en secrets.toml. "
+            "Usando 'central.db' como fallback."
+        )
+
+    with sqlite3.connect(nombre_db) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS empresas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre_comercial TEXT NOT NULL,
+                archivo_db TEXT NOT NULL UNIQUE
+            )
+        ''')
+
+        # Incluye password_hash, archivo_db y rol
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS usuarios_central (
+                username TEXT PRIMARY KEY,
+                password_hash TEXT NOT NULL,
+                nombre_empresa TEXT NOT NULL,
+                archivo_db TEXT NOT NULL,
+                rol TEXT NOT NULL DEFAULT 'user',
+                apellidos TEXT,
+                nombres TEXT
+            )
+        ''')
+
+        conn.commit()
+
+    logging.info("Base de datos central creada/verificada exitosamente.")
+
+def limpiar_nombre_archivo(nombre_comercial):
+    """Convierte 'Inmobiliaria Alvear S.A.' en 'Inmobiliaria_Alvear_SA.db'"""
+    # Reemplazar espacios por guiones bajos
+    nombre = nombre_comercial.replace(" ", "_")
+    # Remover cualquier caracter que no sea letra, número o guion bajo
+    nombre_limpio = re.sub(r'[^a-zA-Z0-9_]', '', nombre)
+    return f"{nombre_limpio}.db"
+
+
+
+
 
 # =====================================================================
-# 1. BASE DE DATOS: CONFIGURACIÓN RELACIONAL E HISTORIAL DE PAGOS
+# 1. BASE DE DATOS: CONFIGURACIÓN MULTI-TENANT Y ENRUTAMIENTO
 # =====================================================================
+
+def conectar_db_central():
+    """Conecta a la base de datos central leyendo el nombre desde secrets.toml.
+    Si la clave no está configurada, usa 'central.db' como fallback."""
+    try:
+        nombre_db = st.secrets["database"]["archivo_central"]
+    except (KeyError, FileNotFoundError):
+        nombre_db = "central.db"
+        logging.warning(
+            "No se encontró 'database.archivo_central' en secrets.toml. "
+            "Usando 'central.db' como fallback."
+        )
+    return sqlite3.connect(nombre_db)
+
 def conectar_db():
-    return sqlite3.connect('sistema_alquileres_v3.db')
-
-def inicializar_tablas():
-    conn = conectar_db()
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA foreign_keys = ON;")
+    """Conecta a la base de datos de la empresa actual."""
+    # Determinamos la ruta
+    if "empresa_db" in st.session_state and st.session_state.empresa_db:
+        ruta = st.session_state.empresa_db
+    else:
+        try:
+            ruta = st.secrets["database"]["default_empresa"]
+        except (KeyError, FileNotFoundError):
+            ruta = "data.db"
+            logging.warning(
+                "No se encontró 'database.default_empresa' en secrets.toml. "
+                "Usando 'data.db' como fallback."
+            )
     
+    conn = sqlite3.connect(ruta)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    
+    # Verificamos si la tabla de contratos existe. Si no, creamos todo.
+    cursor = conn.cursor()
+    cursor.execute("SELECT count(name) FROM sqlite_master WHERE type='table' AND name='contratos'")
+    if cursor.fetchone()[0] == 0:
+        crear_tablas_empresa(conn)
+        
+    return conn
+
+def inicializar_nueva_empresa(ruta_db):
+    """Crea directorios, archivo y tablas. Llamar solo al registrar empresa."""
+    nombre_directorio = os.path.dirname(ruta_db)
+    if nombre_directorio and not os.path.exists(nombre_directorio):
+        os.makedirs(nombre_directorio, exist_ok=True)
+    
+    conn = sqlite3.connect(ruta_db)
+    crear_tablas_empresa(conn) # Inyecta las tablas aquí
+    conn.close()
+
+def crear_tablas_empresa(conn):
+    """Estructura de forma estricta todas las tablas necesarias dentro de una conexión activa de empresa."""
+    cursor = conn.cursor()
+    
+    # Tabla 0: usuarios de app
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS permisos_usuario (
+            username TEXT NOT NULL,
+            pestana TEXT NOT NULL,
+            PRIMARY KEY (username, pestana)
+        )
+    ''')
     # Tabla 1: Inquilinos
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS inquilinos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             apellidos TEXT NOT NULL,
             nombres TEXT NOT NULL,
-            dni TEXT,             
+            dni TEXT UNIQUE,             
             telefono TEXT,
             email TEXT,            
             UNIQUE(apellidos, nombres)
@@ -32,14 +169,23 @@ def inicializar_tablas():
     
     # Tabla 2: Propiedades
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS propiedades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            alias_propiedad TEXT NOT NULL UNIQUE,
-            calle TEXT NOT NULL,
-            numero TEXT NOT NULL,
-            departamento TEXT 
-        )
-    ''')
+    CREATE TABLE IF NOT EXISTS propiedades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alias_propiedad TEXT NOT NULL UNIQUE,
+        calle TEXT NOT NULL,
+        numero TEXT NOT NULL,
+        departamento TEXT, 
+        propietario TEXT,
+        ciudad TEXT,
+        provincia TEXT,
+        tipo TEXT,
+        nis TEXT,               -- NUEVO
+        cuenta_gas TEXT,        -- NUEVO
+        finca TEXT,             -- NUEVO
+        cuenta_ooss TEXT,       -- NUEVO
+        nro_padron TEXT         -- NUEVO
+    )
+''')
     
     # Tabla 3: Contratos
     cursor.execute('''
@@ -67,6 +213,9 @@ def inicializar_tablas():
             monto_garantia REAL,
             garantia TEXT,
             garantia_pagada REAL,
+            cuotas_deposito INTEGER DEFAULT 1,
+            cuotas_deposito_pagadas INTEGER DEFAULT 0,
+            cuotas_honorarios_pagadas INTEGER DEFAULT 0,
             imp_inmobiliario REAL,
             expensas REAL,
             edesal REAL,
@@ -82,7 +231,7 @@ def inicializar_tablas():
         )
     ''')
     
-    # Tabla 4 (MEJORA 1): Historial de Pagos Reales (Caja)
+    # Tabla 4: Historial de Pagos Reales (Caja)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS pagos_historial (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,35 +243,523 @@ def inicializar_tablas():
             fecha_pago TEXT NOT NULL,
             metodo_pago TEXT NOT NULL,
             comentarios TEXT,
+            monto_expensas REAL DEFAULT 0,
+            monto_edesal REAL DEFAULT 0,
+            monto_gas REAL DEFAULT 0,
+            monto_municipalidad REAL DEFAULT 0,
+            monto_cochera REAL DEFAULT 0,
+            monto_ooss REAL DEFAULT 0,
+            monto_imp_inmobiliario REAL DEFAULT 0,
+            monto_honorarios REAL DEFAULT 0,
+            monto_garantia REAL DEFAULT 0,
+            monto_abonado REAL DEFAULT 0,
+            saldo_pendiente REAL DEFAULT 0,
+            saldos_anteriores REAL DEFAULT 0,
             FOREIGN KEY (contrato_id) REFERENCES contratos(codigo)
         )
     ''')
     conn.commit()
-    conn.close()
 
+
+def obtener_todas_las_empresas():
+    """Devuelve todas las empresas registradas en el sistema (Exclusivo para el Superadmin)."""
+    try:
+        # El gestor 'with' asegura el cierre de la conexión pase lo que pase
+        with conectar_db_central() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT nombre_empresa, archivo_db FROM usuarios_central")
+            return cursor.fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+def obtener_permisos_desde_db(username, ruta_db):
+    if not os.path.exists(ruta_db):
+        return []
+    try:
+        with sqlite3.connect(ruta_db) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (username,))
+            return [row[0] for row in cursor.fetchall()]
+    except Exception:
+        return []
+
+def inicializar_tablas():
+    # 1. Inicializar Base de Datos Central limpia
+    conn_central = conectar_db_central()
+    cursor_central = conn_central.cursor()
+    
+    cursor_central.execute('''
+        CREATE TABLE IF NOT EXISTS usuarios_central (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            nombre_empresa TEXT NOT NULL,
+            archivo_db TEXT NOT NULL,
+            rol TEXT NOT NULL DEFAULT 'user',
+            apellidos TEXT,
+            nombres TEXT
+        )
+    ''')
+    conn_central.commit()
+    conn_central.close()
+
+    # 2. Inicializar la base de datos de la empresa (SÓLO si el usuario ya se autenticó)
+    if "autenticado" in st.session_state and st.session_state.autenticado:
+        conn = conectar_db()
+
+        # ── Migraciones: agregar columnas nuevas sin romper BDs existentes ──
+        for migration in [
+            "ALTER TABLE contratos ADD COLUMN cuotas_deposito INTEGER DEFAULT 1",
+            "ALTER TABLE contratos ADD COLUMN cuotas_deposito_pagadas INTEGER DEFAULT 0",
+            "ALTER TABLE contratos ADD COLUMN cuotas_honorarios_pagadas INTEGER DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_expensas REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_edesal REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_gas REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_municipalidad REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_cochera REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_ooss REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_imp_inmobiliario REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_honorarios REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_garantia REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_abonado REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN saldo_pendiente REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN saldos_anteriores REAL DEFAULT 0",
+        ]:
+            try:
+                conn.execute(migration)
+                conn.commit()
+                logging.info(f"Migración aplicada: {migration}")
+            except Exception:
+                pass  # La columna ya existe — no es un error
+
+        conn.close()
+
+# 🏢 EJECUTAR INICIALIZACIÓN AUTOMÁTICA (Creará central.db de manera segura sin romper)
 inicializar_tablas()
+
+# =====================================================================
+# FUNCIONES AUXILIARES FALTANTES (PARA LA PESTAÑA DE CARGA)
+# =====================================================================
+
+def obtener_nombre_por_id(inquilino_id):
+    """Obtiene el nombre completo de un inquilino por su ID"""
+    if not inquilino_id:
+        return None
+    try:
+        with conectar_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT apellidos, nombres FROM inquilinos WHERE id = ?", (inquilino_id,))
+            resultado = cursor.fetchone()
+        if resultado:
+            return f"{resultado[0]}, {resultado[1]}"
+        return None
+    except Exception:
+        return None
+
+
+def obtener_ultimo_contrato():
+    """Obtiene el último contrato creado/modificado"""
+    try:
+        with conectar_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM contratos ORDER BY codigo DESC LIMIT 1")
+            resultado = cursor.fetchone()
+            if resultado:
+                columnas = [desc[0] for desc in cursor.description]
+                return dict(zip(columnas, resultado))
+        return None
+    except Exception:
+        return None
+
+
+def cargar_datos_iniciales_contrato(propiedad_id):
+    """Carga los datos del último contrato de una propiedad"""
+    try:
+        with conectar_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM contratos 
+                WHERE propiedad_id = ? 
+                ORDER BY codigo DESC LIMIT 1
+            ''', (propiedad_id,))
+            resultado = cursor.fetchone()
+            if resultado:
+                columnas = [desc[0] for desc in cursor.description]
+                return dict(zip(columnas, resultado))
+        return None
+    except Exception:
+        return None
+
+
+def buscar_inquilino_por_id(inquilino_id, lista_inquilinos, dict_inquilinos):
+    """Encuentra el índice de un inquilino en la lista por su ID"""
+    for idx, nombre in enumerate(lista_inquilinos):
+        if dict_inquilinos.get(nombre) == inquilino_id:
+            return idx
+    return 0
+
+
+def crear_formulario_editar_inquilino(id_inq_edit, datos_inq):
+    """Crea un formulario de edición de inquilino"""
+    with st.form(f"form_editar_inquilino_{id_inq_edit}"):
+        st.markdown(f"**Editando ID Interno: {id_inq_edit}**")
+        
+        edit_apellido = st.text_input("Apellidos:", value=datos_inq[0] if datos_inq[0] else "")
+        edit_nombre = st.text_input("Nombres:", value=datos_inq[1] if datos_inq[1] else "")
+        edit_dni = st.text_input("DNI / CUIT:", value=datos_inq[2] if datos_inq[2] else "")
+        edit_tel = st.text_input("Teléfono:", value=datos_inq[3] if datos_inq[3] else "")
+        edit_email = st.text_input("Email:", value=datos_inq[4] if datos_inq[4] else "")
+        
+        if st.form_submit_button("💾 Guardar Cambios Inquilino", type="primary"):
+            if not edit_apellido or not edit_nombre:
+                st.error("Apellidos y Nombres son obligatorios.")
+            else:
+                conn = conectar_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute('''
+                        UPDATE inquilinos 
+                        SET apellidos = ?, nombres = ?, dni = ?, telefono = ?, email = ?
+                        WHERE id = ?
+                    ''', (edit_apellido, edit_nombre, edit_dni, edit_tel, edit_email, id_inq_edit))
+                    
+                    conn.commit()
+                    st.success(f"✅ Inquilino actualizado correctamente!")
+                    st.rerun()
+                except sqlite3.IntegrityError as e:
+                    st.error(f"Error de integridad de datos: {e}")
+                except Exception as e:
+                    st.error(f"Error al actualizar inquilino: {e}")
+                finally:
+                    conn.close()
+
+
+def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
+    """Crea un formulario de edición de propiedad"""
+    with st.form(f"form_editar_propiedad_{id_prop_edit}"):
+        st.markdown(f"**Editando ID Interno: {id_prop_edit}**")
+        
+        edit_alias = st.text_input("Alias de la Propiedad:", value=datos_prop[0] if datos_prop[0] else "")
+        edit_calle = st.text_input("Calle / Av:", value=datos_prop[1] if datos_prop[1] else "")
+        edit_numero = st.text_input("Número:", value=datos_prop[2] if datos_prop[2] else "")
+        edit_depto = st.text_input("Departamento / Piso / Bloque (Opcional):", value=datos_prop[3] if datos_prop[3] else "")
+        
+        if st.form_submit_button("💾 Guardar Cambios Propiedad", type="primary"):
+            if not edit_alias or not edit_calle or not edit_numero:
+                st.error("Alias, Calle y Número son obligatorios.")
+            else:
+                conn = conectar_db()
+                cursor = conn.cursor()
+                try:
+                    cursor.execute('''
+                        UPDATE propiedades 
+                        SET alias_propiedad = ?, calle = ?, numero = ?, departamento = ?
+                        WHERE id = ?
+                    ''', (edit_alias, edit_calle, edit_numero, edit_depto, id_prop_edit))
+                    
+                    conn.commit()
+                    st.success(f"✅ Propiedad actualizada correctamente!")
+                    st.rerun()
+                except sqlite3.IntegrityError as e:
+                    st.error(f"Error de integridad de datos: {e}")
+                except Exception as e:
+                    st.error(f"Error al actualizar propiedad: {e}")
+                finally:
+                    conn.close()
+
+# =====================================================================
+# 2. LÓGICA DE AUTENTICACIÓN (BCRYPT UNIFICADO)
+# =====================================================================
+
+def verificar_usuario(username, password):
+    """
+    Verifica las credenciales de un usuario usando Bcrypt.
+    Primero busca en secrets.toml (Superadmin maestro) y luego en central.db.
+    Devuelve un diccionario con los datos del usuario si es correcto, o None si falla.
+    """
+    username_clean = username.strip()
+    
+    # -----------------------------------------------------------------
+    # CONTROL 1: Validar contra el Superadmin en secrets.toml
+    # -----------------------------------------------------------------
+    try:
+        if username_clean == st.secrets["superadmin"]["username"]:
+            stored_hash = st.secrets["superadmin"]["password_hash"].encode('utf-8')
+            if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
+                return {
+                    "nombre_empresa": "Panel de Control Global", 
+                    "archivo_db": "central.db", 
+                    "rol": "superadmin"
+                }
+            return None
+    except Exception:
+        # Si no tienes configurado el secrets.toml pasa de largo al control de la BD
+        pass
+
+    # -----------------------------------------------------------------
+    # CONTROL 2: Validar contra los usuarios comunes en la BD central
+    # -----------------------------------------------------------------
+    conn = conectar_db_central()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT password_hash, nombre_empresa, archivo_db, rol 
+        FROM usuarios_central 
+        WHERE username = ?
+    ''', (username_clean,))
+    
+    row = cursor.fetchone()
+    conn.close()
+    
+    if row:
+        password_db = row[0]  # El hash Bcrypt guardado en la base de datos
+        
+        # Comparamos la contraseña ingresada contra el hash de la base de datos
+        if bcrypt.checkpw(password.encode('utf-8'), password_db.encode('utf-8')):
+            return {
+                "nombre_empresa": row[1],
+                "archivo_db": row[2],
+                "rol": row[3]
+            }
+            
+    return None
+
+# =====================================================================
+# INITIALIZACIÓN DE SESIÓN E INTERFAZ DE LOGIN (CON SUPERADMIN MAESTRO)
+# =====================================================================
+
+# Homologamos las variables de sesión para que todo el script use las mismas
+# Homologamos las variables de sesión para que todo el script use las mismas
+if "autenticado" not in st.session_state:
+    st.session_state.autenticado = False
+if "username" not in st.session_state:
+    st.session_state.username = ""
+if "nombre_empresa" not in st.session_state:
+    st.session_state.nombre_empresa = ""
+if "empresa_db" not in st.session_state:
+    st.session_state.empresa_db = None
+if "rol" not in st.session_state:
+    st.session_state.rol = "user"
+if "propiedad_activa" not in st.session_state:
+    st.session_state.propiedad_activa = None
+if "datos_contrato" not in st.session_state:
+    st.session_state.datos_contrato = None
+if "permisos_usuario" not in st.session_state:
+    st.session_state.permisos_usuario = []
+
+# Forzar compatibilidad con los nombres viejos que usas en el resto del script
+st.session_state.usuario_actual = st.session_state.username
+st.session_state.empresa_actual_nombre = st.session_state.nombre_empresa
+st.session_state.usuario_rol = st.session_state.rol
+
+# Interfaz de Login si el usuario no está autenticado
+if not st.session_state.autenticado:
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader("🔑 Control de Acceso - Multi-Empresa")
+        
+        user_input = st.text_input("Usuario:")
+        pass_input = st.text_input("Contraseña:", type="password")
+        
+        # El botón DEBE estar dentro del contenedor para no generar conflictos de flujo
+        if st.button("Ingresar", type="primary", use_container_width=True):
+            if user_input and pass_input:
+                
+                # Todo se unifica aquí de manera segura usando Bcrypt
+                datos_sesion = verificar_usuario(user_input, pass_input)
+                
+                if datos_sesion:
+                    st.session_state.autenticado = True
+                    st.session_state.username = user_input.strip()
+                    st.session_state.rol = datos_sesion["rol"]
+                    st.session_state.nombre_empresa = datos_sesion["nombre_empresa"]
+                    st.session_state.empresa_db = datos_sesion["archivo_db"]
+                    
+                    # Sincronización de variables de UI
+                    st.session_state.usuario_actual = user_input.strip()
+                    st.session_state.empresa_actual_nombre = datos_sesion["nombre_empresa"]
+                    st.session_state.usuario_rol = datos_sesion["rol"]
+                    
+                    st.session_state.permisos_usuario = obtener_permisos_desde_db(
+                        user_input.strip(), 
+                        datos_sesion["archivo_db"]
+                    )
+
+                    st.success(f"¡Bienvenido {user_input}!")
+                    st.rerun()
+                else:
+                    st.error("❌ Usuario o contraseña incorrectos")
+            else:
+                st.warning("⚠️ Por favor complete todos los campos")
+        
+        st.caption("Solicite su acceso a 'contacto@controlz.net.ar'.")
+    st.stop() # Frena por completo el renderizado del dashboard si no pasas el login
+
+
 
 # =====================================================================
 # FUNCIONES AUXILIARES DE LÓGICA Y PARSEO
 # =====================================================================
 def obtener_datos_desplegables():
-    conn = conectar_db()
-    propiedades = pd.read_sql_query('''
-        SELECT id, alias_propiedad, calle, numero, departamento 
-        FROM propiedades
-    ''', conn)
-    inquilinos = pd.read_sql_query("SELECT id, apellidos, nombres FROM inquilinos", conn)
-    conn.close()
+    try:
+        with conectar_db() as conn:
+            propiedades = pd.read_sql_query('''
+                SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo
+                FROM propiedades
+            ''', conn)
+            inquilinos = pd.read_sql_query("SELECT id, apellidos, nombres FROM inquilinos", conn)
+    except Exception as e:
+        logging.error(f"Error al obtener datos desplegables: {e}")
+        return {}, {}
     
     dict_propiedades = {}
     for _, row in propiedades.iterrows():
         dir_completa = f"{row['calle']} {row['numero']}"
-        if row['departamento'] and row['departamento'].strip():
+        if isinstance(row['departamento'], str) and row['departamento'].strip():
             dir_completa += f", Depto: {row['departamento']}"
         dict_propiedades[f"{row['alias_propiedad']} ({dir_completa})"] = row['id']
         
     dict_inquilinos = {f"{row['apellidos']}, {row['nombres']}": row['id'] for _, row in inquilinos.iterrows()}
     return dict_propiedades, dict_inquilinos
+
+# =====================================================================
+# FUNCIONES DE CÁLCULO AUTOMÁTICO DE ÍNDICES (ICL e IPC)
+# =====================================================================
+
+@st.cache_data(ttl=3600)
+def _obtener_icl_bcra_xls(año: int) -> dict:
+    """
+    Descarga el XLS del ICL publicado por el BCRA para el año dado.
+    Columna 7 = fecha (formato 20260101), columna 8 = valor ICL.
+    Los datos reales arrancan en la fila 26 (las anteriores son encabezados).
+    Retorna dict {"YYYY-MM-DD": valor_float}.
+    Cache de 1 hora.
+    """
+    url = f"https://www.bcra.gob.ar/pdfs/PublicacionesEstadisticas/icl{año}.xls"
+    try:
+        resp = requests.get(url, timeout=15, verify=False)
+        resp.raise_for_status()
+        df_raw = pd.read_excel(BytesIO(resp.content), header=None)
+        resultado = {}
+        for _, row in df_raw.iterrows():
+            try:
+                fecha_raw = str(row.iloc[7]).strip()
+                valor_raw = row.iloc[8]
+                # La celda de fecha tiene formato YYYYMMDD (ej: 20260101)
+                if len(fecha_raw) != 8 or not fecha_raw.isdigit():
+                    continue
+                fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
+                valor = float(valor_raw)
+                resultado[fecha.strftime("%Y-%m-%d")] = valor
+            except Exception:
+                continue
+        return resultado
+    except Exception as e:
+        logging.warning(f"[ICL] No se pudo obtener XLS del BCRA para {año}: {e}")
+        return {}
+
+
+@st.cache_data(ttl=3600)
+def _obtener_ipc_indec() -> dict:
+    """
+    Descarga el IPC Nivel General mensual desde la API pública de datos.gob.ar (INDEC).
+    La serie 145.3_INGNACUAL_DICI_M_38 devuelve variaciones mensuales (ej: 0.0158 = 1.58%).
+    Las acumulamos en un índice base=1 desde el primer dato disponible.
+    Retorna dict {"YYYY-MM-DD": indice_acumulado_float}.
+    """
+    url = (
+        "https://apis.datos.gob.ar/series/api/series/"
+        "?ids=145.3_INGNACUAL_DICI_M_38"
+        "&limit=1000&format=json"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        puntos = [(p[0], p[1]) for p in data.get("data", []) if p[1] is not None]
+        if not puntos:
+            return {}
+        # Acumular: indice[0] = 1, indice[n] = indice[n-1] * (1 + variacion[n])
+        resultado = {}
+        indice_acum = 1.0
+        for fecha_str, variacion in puntos:
+            indice_acum *= (1.0 + float(variacion))
+            resultado[fecha_str] = indice_acum
+        return resultado
+    except Exception as e:
+        logging.warning(f"[IPC] No se pudo obtener IPC de datos.gob.ar: {e}")
+        return {}
+
+
+def _buscar_valor_mas_cercano(fecha_target: datetime, data: dict, dias_max: int = 45) -> float | None:
+    """
+    Busca en `data` (dict YYYY-MM-DD → float) el valor más cercano a `fecha_target`,
+    retrocediendo hasta `dias_max` días. Útil para ICL (diario) e IPC (mensual).
+    """
+    for delta in range(0, dias_max + 1):
+        clave = (fecha_target - dateutil.relativedelta.relativedelta(days=delta)).strftime("%Y-%m-%d")
+        if clave in data:
+            return data[clave]
+    return None
+
+
+def calcular_valor_actualizado_icl(
+    monto_inicial: float,
+    fecha_inicio: datetime,
+    meses_intervalo: int
+) -> float | None:
+    """
+    Calcula el nuevo valor de alquiler con ICL del BCRA.
+    Fórmula: valor_nuevo = monto_inicial × (ICL_fecha_actualiz / ICL_fecha_inicio)
+    """
+    try:
+        fecha_actualizacion = fecha_inicio + dateutil.relativedelta.relativedelta(months=meses_intervalo)
+        años = {fecha_inicio.year, fecha_actualizacion.year}
+        icl_data: dict = {}
+        for año in años:
+            icl_data.update(_obtener_icl_bcra_xls(año))
+
+        if not icl_data:
+            return None
+
+        icl_inicio  = _buscar_valor_mas_cercano(fecha_inicio, icl_data, dias_max=10)
+        icl_actual  = _buscar_valor_mas_cercano(fecha_actualizacion, icl_data, dias_max=10)
+
+        if icl_inicio and icl_actual and icl_inicio > 0:
+            return round(monto_inicial * (icl_actual / icl_inicio), 2)
+        return None
+    except Exception as e:
+        logging.warning(f"[ICL] Error calculando: {e}")
+        return None
+
+
+def calcular_valor_actualizado_ipc(
+    monto_inicial: float,
+    fecha_inicio: datetime,
+    meses_intervalo: int
+) -> float | None:
+    """
+    Calcula el nuevo valor de alquiler con IPC del INDEC (datos.gob.ar).
+    El IPC es mensual: usa el índice del mes de inicio y del mes de actualización.
+    Fórmula: valor_nuevo = monto_inicial × (IPC_mes_actualiz / IPC_mes_inicio)
+    """
+    try:
+        fecha_actualizacion = fecha_inicio + dateutil.relativedelta.relativedelta(months=meses_intervalo)
+        ipc_data = _obtener_ipc_indec()
+
+        if not ipc_data:
+            return None
+
+        # El IPC en la API viene con fecha al primer día del mes ("YYYY-MM-01")
+        ipc_inicio  = _buscar_valor_mas_cercano(fecha_inicio, ipc_data, dias_max=45)
+        ipc_actual  = _buscar_valor_mas_cercano(fecha_actualizacion, ipc_data, dias_max=45)
+
+        if ipc_inicio and ipc_actual and ipc_inicio > 0:
+            return round(monto_inicial * (ipc_actual / ipc_inicio), 2)
+        return None
+    except Exception as e:
+        logging.warning(f"[IPC] Error calculando: {e}")
+        return None
+
 
 def limpiar_string_a_float(texto_num):
     if not texto_num:
@@ -143,1193 +780,2554 @@ def limpiar_string_a_float(texto_num):
     except ValueError:
         return 0.0
 
-# =====================================================================
-# INTERFAZ DE USUARIO GENERAL (Streamlit)
-# =====================================================================
-st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
-st.title("🏢 Sistema Avanzado de Gestión de Alquileres e Historial de Caja")
 
-tab_dashboard, tab_planilla, tab_pagos, tab_historial_pagos, tab_carga, tab_auxiliares = st.tabs([
-    "📈 Tablero de Control",
-    "📊 Planilla de Contratos", 
-    "💰 Registrar / Emitir Recibo",
-    "🗄️ Historial de Caja",
-    "📝 Carga de Contratos", 
-    "⚙️ Cargar Inquilinos / Propiedades"
-])
+def verificar_contrato_existente(propiedad_id):
+    """Verifica si ya existe un contrato activo para una propiedad dada.
+    Retorna (codigo, estado) del contrato más reciente, o None si no existe."""
+    try:
+        with conectar_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT codigo, estado FROM contratos WHERE propiedad_id = ? ORDER BY codigo DESC LIMIT 1",
+                (propiedad_id,)
+            )
+            return cursor.fetchone()
+    except Exception as e:
+        logging.warning(f"Error al verificar contrato existente para propiedad {propiedad_id}: {e}")
+        return None
+
+
+
+# Barra superior con información del operador, Empresa activa automática y botón de Salida
+top_col1, top_col2 = st.columns([7, 3])
+with top_col1:
+    st.title("🏢 Sistema Avanzado de Gestión de Alquileres")
+with top_col2:
+    st.markdown(
+        f"<p style='text-align: right; margin-bottom: 5px;'>"
+        f"🏢 Empresa: <b>{st.session_state.empresa_actual_nombre.upper()}</b><br>"
+        f"👤 Operador: <b>{st.session_state.usuario_actual.upper()}</b>"
+        f"</p>", 
+        unsafe_allow_html=True
+    )
+    if st.button("🔒 Cerrar Sesión", use_container_width=True):
+        st.session_state.autenticado = False
+        st.session_state.usuario_actual = ""
+        st.session_state.empresa_actual_nombre = ""
+        st.session_state.empresa_db = None
+        st.rerun()
+
+
+# =====================================================================
+# CONFIGURACIÓN DINÁMICA DE PESTAÑAS SEGÚN PERMISOS Y ROL
+# =====================================================================
+
+# 1. Definición del rol actual
+rol_actual = st.session_state.get("usuario_rol", "user")
+
+# 2. Definición maestra de pestañas
+pestanas_maestras = {
+    "📈 Tablero de Control": "dashboard",
+    "📊 Planilla de Contratos": "planilla", 
+    "💰 Registrar / Emitir Recibo": "pagos",
+    "🗄️ Historial de Caja": "historial_pagos",
+    "📝 Carga de Contratos": "carga", 
+    "⚙️ Cargar Inquilinos / Propiedades": "auxiliares"
+}
+
+# --- AQUÍ VA EL BLOQUE QUE ME PREGUNTAS ---
+# Es el encargado de filtrar qué elementos de 'pestanas_maestras' 
+# son visibles para el usuario según su rol o permisos guardados en sesión.
+if rol_actual in ["superadmin", "admin"]:
+    pestanas_visibles_nombres = list(pestanas_maestras.keys()) + ["⚙️ Panel de Gestión"]
+    pestanas_visibles_claves = list(pestanas_maestras.values()) + ["panel_gestion"]
+else:
+    # Lee de la sesión (donde los guardamos en el login)
+    permisos_usuario = st.session_state.get("permisos_usuario", [])
+    
+    # Inicializamos las listas de visualización
+    pestanas_visibles_nombres = []
+    pestanas_visibles_claves = []
+    
+    for nombre, clave in pestanas_maestras.items():
+        if clave in permisos_usuario:
+            pestanas_visibles_nombres.append(nombre)
+            pestanas_visibles_claves.append(clave)
+
+
+# =====================================================================
+# RENDERIZADO EFECTIVO DE LAS PESTAÑAS EN STREAMLIT (CORREGIDO)
+# =====================================================================
+
+# Dibujamos en la interfaz las pestañas calculadas UNA SOLA VEZ
+tabs_creados = st.tabs(pestanas_visibles_nombres)
+
+# Inicializamos de forma segura todas las variables de control en None
+tab_dashboard = None
+tab_planilla = None
+tab_pagos = None
+tab_historial_pagos = None
+tab_carga = None
+tab_auxiliares = None
+tab_superadmin = None
+
+# Asignación limpia y controlada basada en las claves activas
+if "dashboard" in pestanas_visibles_claves:
+    tab_dashboard = tabs_creados[pestanas_visibles_claves.index("dashboard")]
+
+if "planilla" in pestanas_visibles_claves:
+    tab_planilla = tabs_creados[pestanas_visibles_claves.index("planilla")]
+
+if "pagos" in pestanas_visibles_claves:
+    tab_pagos = tabs_creados[pestanas_visibles_claves.index("pagos")]
+
+if "historial_pagos" in pestanas_visibles_claves:
+    tab_historial_pagos = tabs_creados[pestanas_visibles_claves.index("historial_pagos")]
+
+if "carga" in pestanas_visibles_claves:
+    tab_carga = tabs_creados[pestanas_visibles_claves.index("carga")]
+
+if "auxiliares" in pestanas_visibles_claves:
+    tab_auxiliares = tabs_creados[pestanas_visibles_claves.index("auxiliares")]
+
+# AQUÍ: tab_superadmin se activa perfectamente tanto para 'superadmin' como para 'admin'
+if "panel_gestion" in pestanas_visibles_claves:
+    tab_superadmin = tabs_creados[pestanas_visibles_claves.index("panel_gestion")]
 
 # =====================================================================
 # MEJORA 2: TABLERO DE CONTROL (DASHBOARD INTERACTIVO Y ALERTAS)
 # =====================================================================
-with tab_dashboard:
-    st.subheader("⚡ Alertas Estratégicas y Métricas Generales")
-    
-    conn = conectar_db()
-    query_dash = '''
-        SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
-               c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
-        FROM contratos c
-        JOIN propiedades p ON c.propiedad_id = p.id
-        JOIN inquilinos i ON c.inquilino_id = i.id
-        WHERE c.estado = 'Activo'
-    '''
-    df_dash = pd.read_sql_query(query_dash, conn)
-    df_pagos_totales = pd.read_sql_query("SELECT monto_total FROM pagos_historial", conn)
-    conn.close()
-    
-    # Cálculos para los KPIs
-    total_activos = len(df_dash)
-    caja_historica = df_pagos_totales['monto_total'].sum() if not df_pagos_totales.empty else 0.0
-    
-    vencen_pronto = 0
-    actualizan_este_mes = 0
-    lista_alertas_vencimiento = []
-    lista_alertas_actualizacion = []
-    
-    fecha_hoy = datetime.now().date()
-    
-    for _, row in df_dash.iterrows():
-        # Verificación de vencimiento de contrato (60 días)
-        try:
-            fin_dt = datetime.strptime(row['fin_contrato'], "%d/%m/%Y").date()
-            dias_para_vencer = (fin_dt - fecha_hoy).days
-            if 0 <= dias_para_vencer <= 60:
-                vencen_pronto += 1
-                lista_alertas_vencimiento.append(f"⚠️ El contrato de **{row['inquilino']}** ({row['alias_propiedad']}) vence en **{dias_para_vencer} días** ({row['fin_contrato']}).")
-        except:
-            pass
-            
-        # Verificación si es mes de actualización
-        opciones_meses = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-        frecuencia = opciones_meses.get(row['act_contrato'], 6)
-        mes_vivo = row['mes_contrato'] or 1
-        if ((mes_vivo - 1) % frecuencia) == 0:
-            actualizan_este_mes += 1
-            lista_alertas_actualizacion.append(f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {row['act_contrato']}.")
+if tab_dashboard:
+    with tab_dashboard:
+        st.subheader("⚡ Alertas Estratégicas y Métricas Generales")
+        query_dash = '''
+            SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
+                c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
+            FROM contratos c
+            JOIN propiedades p ON c.propiedad_id = p.id
+            JOIN inquilinos i ON c.inquilino_id = i.id
+            WHERE c.estado = 'Activo'
+        '''
+        
+        st.write(f"Conectando a la base de datos: {st.session_state.empresa_db}")
+        conn = conectar_db()
+        
+        df_dash = pd.read_sql_query(query_dash, conn)
+        df_pagos_totales = pd.read_sql_query("SELECT monto_total FROM pagos_historial", conn)
+        conn.close()
+        
+        total_activos = len(df_dash)
+        caja_historica = df_pagos_totales['monto_total'].sum() if not df_pagos_totales.empty else 0.0
+        
+        vencen_pronto = 0
+        actualizan_este_mes = 0
+        lista_alertas_vencimiento = []
+        lista_alertas_actualizacion = []
+        
+        fecha_hoy = datetime.now().date()
+        
+        for _, row in df_dash.iterrows():
+            try:
+                try:
+                    fin_dt = datetime.strptime(row['fin_contrato'], "%Y-%m-%d").date()
+                except ValueError:
+                    fin_dt = datetime.strptime(row['fin_contrato'], "%d/%m/%Y").date()
+                dias_para_vencer = (fin_dt - fecha_hoy).days
+                if 0 <= dias_para_vencer <= 60:
+                    vencen_pronto += 1
+                    lista_alertas_vencimiento.append(f"⚠️ El contrato de **{row['inquilino']}** ({row['alias_propiedad']}) vence en **{dias_para_vencer} días** ({row['fin_contrato']}).")
+            except:
+                pass
+                
+            opciones_meses = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+            frecuencia = opciones_meses.get(row['act_contrato'], 6)
+            mes_vivo = row['mes_contrato'] or 1
+            if ((mes_vivo - 1) % frecuencia) == 0:
+                actualizan_este_mes += 1
+                lista_alertas_actualizacion.append(f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {row['act_contrato']}.")
 
-    # Mostrar métricas principales
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    kpi1.metric("Contratos Activos", total_activos)
-    kpi2.metric("Ajustes este Mes", actualizan_este_mes, delta=f"{actualizan_este_mes} requeridos", delta_color="inverse" if actualizan_este_mes > 0 else "normal")
-    kpi3.metric("Próximos Vencimientos (60d)", vencen_pronto, delta=f"{vencen_pronto} alertas", delta_color="off")
-    kpi4.metric("Recaudación Total de Caja", f"$ {caja_historica:,.2f}")
-    
-    st.markdown("---")
-    col_al1, col_al2 = st.columns(2)
-    
-    with col_al1:
-        st.markdown("##### 📅 Alertas de Vencimiento de Plazos")
-        if lista_alertas_vencimiento:
-            for alerta in lista_alertas_vencimiento:
-                st.warning(alerta)
-        else:
-            st.success("✅ No hay contratos por vencer en los próximos 60 días.")
-            
-    with col_al2:
-        st.markdown("##### 📈 Alertas de Actualización de Valores (Índices)")
-        if lista_alertas_actualizacion:
-            for alerta in lista_alertas_actualizacion:
-                st.info(alerta)
-        else:
-            st.success("✅ Todos los contratos se encuentran en períodos normales de facturación.")
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("Contratos Activos", total_activos)
+        kpi2.metric("Ajustes este Mes", actualizan_este_mes, delta=f"{actualizan_este_mes} requeridos", delta_color="inverse" if actualizan_este_mes > 0 else "normal")
+        kpi3.metric("Próximos Vencimientos (60d)", vencen_pronto, delta=f"{vencen_pronto} alertas", delta_color="off")
+        kpi4.metric("Recaudación Total de Caja", f"$ {caja_historica:,.2f}")
+        
+        st.markdown("---")
+        col_al1, col_al2 = st.columns(2)
+        
+        with col_al1:
+            st.markdown("##### 📅 Alertas de Vencimiento de Plazos")
+            if lista_alertas_vencimiento:
+                for alerta in lista_alertas_vencimiento:
+                    st.warning(alerta)
+            else:
+                st.success("✅ No hay contratos por vencer en los próximos 60 días.")
+                
+        with col_al2:
+            st.markdown("##### 📈 Alertas de Actualización de Valores (Índices)")
+            if lista_alertas_actualizacion:
+                for alerta in lista_alertas_actualizacion:
+                    st.info(alerta)
+            else:
+                st.success("✅ Todos los contratos se encuentran en períodos normales de facturación.")
+
+
 
 # =====================================================================
 # PESTAÑA 2: VISUALIZACIÓN DE PLANILLA (RESULTADOS CON JOIN)
 # =====================================================================
-with tab_planilla:
-    st.subheader("Historial y Estado de Contratos")
-    
-    col_f1, col_f2 = st.columns([2, 1])
-    with col_f1:
-        busqueda = st.text_input("🔍 Buscar por Inquilino, Calle o Alias:", placeholder="Ej: Pérez o Mitre", key="buscar_planilla")
-    with col_f2:
-        filtro_estado = st.multiselect("Filtrar por Estado:", ["Activo", "Finalizado", "Cancelado", "Vencido"], default=["Activo"], key="filtro_estado_planilla")
-    
-    conn = conectar_db()
-    try:
-        # AGREGADO: c.monto_inicial AS [MONTO INICIAL] en el SELECT
-        query = '''
-            SELECT 
-                c.codigo AS [CÓDIGO],
-                p.alias_propiedad AS [ALIAS PROPIEDAD],
-                (i.apellidos || ', ' || i.nombres) AS [INQUILINO],
-                (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS [PROPIEDAD],
-                c.estado AS [ESTADO],
-                c.inicio_contrato AS [INICIO_CONTRATO],
-                c.fin_contrato AS [FIN_CONTRATO],
-                c.calc_duracion AS [CALC_DURACION],
-                c.monto_inicial AS [MONTO INICIAL],
-                c.alquiler AS [ALQUILER],
-                c.servicios_total AS [SERVICIOS_TOTAL],
-                c.total_pagado AS [TOTAL_ESTIMADO]
-            FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
-            ORDER BY c.codigo DESC
-        '''
-        df = pd.read_sql_query(query, conn)
+if tab_planilla:
+    with tab_planilla:
+        st.subheader("Historial y Estado de Contratos")
+
+        col_f1, col_f2 = st.columns([2, 1])
+        with col_f1:
+            busqueda = st.text_input("🔍 Buscar por Inquilino, Calle o Alias:", placeholder="Ej: Pérez o Mitre", key="buscar_planilla")
+        with col_f2:
+            filtro_estado = st.multiselect("Filtrar por Estado:", ["Activo", "Finalizado", "Cancelado", "Vencido"], default=["Activo"], key="filtro_estado_planilla")
         
-        if not df.empty:
-            if busqueda:
-                df = df[
-                    df['INQUILINO'].str.contains(busqueda, case=False, na=False) | 
-                    df['PROPIEDAD'].str.contains(busqueda, case=False, na=False) |
-                    df['ALIAS PROPIEDAD'].str.contains(busqueda, case=False, na=False)
-                ]
-            if filtro_estado:
-                df = df[df['ESTADO'].isin(filtro_estado)]
-            
+        conn = conectar_db()
+        try:
+            # AGREGADO: c.monto_inicial AS [MONTO INICIAL] en el SELECT
+            query = '''
+                SELECT 
+                    c.codigo AS [CÓDIGO],
+                    p.alias_propiedad AS [ALIAS PROPIEDAD],
+                    (i.apellidos || ', ' || i.nombres) AS [INQUILINO],
+                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS [PROPIEDAD],
+                    c.estado AS [ESTADO],
+                    c.inicio_contrato AS [INICIO_CONTRATO],
+                    c.fin_contrato AS [FIN_CONTRATO],
+                    c.calc_duracion AS [CALC_DURACION],
+                    c.monto_inicial AS [MONTO INICIAL],
+                    c.alquiler AS [ALQUILER],
+                    c.servicios_total AS [SERVICIOS_TOTAL],
+                    c.total_pagado AS [TOTAL_ESTIMADO]
+                FROM contratos c
+                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN inquilinos i ON c.inquilino_id = i.id
+                ORDER BY c.codigo DESC
+            '''
+            df = pd.read_sql_query(query, conn)
+
+            # 2. AGREGA ESTAS LÍNEAS PARA VOLVER A PONER LAS BARRAS:
+            if not df.empty:
+                # Pasamos las fechas a texto y cambiamos guiones por las barras de tu CSV
+                df['INICIO_CONTRATO'] = df['INICIO_CONTRATO'].astype(str).str.replace('-', '/')
+                df['FIN_CONTRATO'] = df['FIN_CONTRATO'].astype(str).str.replace('-', '/')
+                if 'PROX_ACTUALIZACION' in df.columns:
+                    df['PROX_ACTUALIZACION'] = df['PROX_ACTUALIZACION'].astype(str).str.replace('-', '/')
+
+            # 3. Se muestra la tabla en la app ya corregida
             st.dataframe(df, use_container_width=True, hide_index=True)
-        else:
-            st.info("No se registran contratos en la base de datos bajo los criterios de búsqueda.")
-    except Exception as e:
-        st.error(f"Error de lectura en la planilla general: {e}")
-    finally:
-        conn.close()
 
-
-# =====================================================================
-# PESTAÑA 3: CONTROL DE COBRANZAS, HISTORIAL DE CAJA Y RECIBO PDF/WHATSAPP
-# =====================================================================
-with tab_pagos:
-    st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
-    
-    conn = conectar_db()
-    # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
-    query_activos = '''
-        SELECT 
-            c.codigo, p.alias_propiedad, 
-            (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS propiedad_dir,
-            i.apellidos, i.nombres, i.telefono, i.email,
-            c.prox_actualizacion, c.alquiler, c.indice, c.act_contrato, c.calc_duracion,
-            c.mes_contrato, c.monto_honorarios, c.honorarios_pagados, c.monto_garantia, c.garantia, c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
-            c.servicios, c.inicio_contrato, c.monto_inicial
-        FROM contratos c
-        JOIN propiedades p ON c.propiedad_id = p.id
-        JOIN inquilinos i ON c.inquilino_id = i.id
-        WHERE c.estado = 'Activo'
-        ORDER BY c.codigo DESC
-    '''
-    
-    df_activos = pd.read_sql_query(query_activos, conn)
-    conn.close()
-    
-    # --- PROCESAMIENTO DINÁMICO DEL ALQUILER ACTUALIZADO ---
-    dict_activos = {}
-    for _, r in df_activos.iterrows():
-        datos_dict = r.to_dict()
-        
-        texto_servicios = str(r['servicios'])
-        match_alquiler = re.search(r'\[Alq\.Actualizado:\s*\$?([\d\.,]+)', texto_servicios)
-        
-        if match_alquiler:
-            valor_actualizado_parseado = limpiar_string_a_float(match_alquiler.group(1))
-            if valor_actualizado_parseado > 0:
-                datos_dict['alquiler'] = valor_actualizado_parseado
+            if not df.empty:
+                if busqueda:
+                    df = df[
+                        df['INQUILINO'].str.contains(busqueda, case=False, na=False) | 
+                        df['PROPIEDAD'].str.contains(busqueda, case=False, na=False) |
+                        df['ALIAS PROPIEDAD'].str.contains(busqueda, case=False, na=False)
+                    ]
+                if filtro_estado:
+                    df = df[df['ESTADO'].isin(filtro_estado)]
                 
-        key_desplegable = f"Cod: {r['codigo']} | {r['alias_propiedad']} - Inquilino: {str(r['apellidos']).upper()}, {str(r['nombres']).title()}"
-        dict_activos[key_desplegable] = datos_dict
-    
-    if not dict_activos:
-        st.info("No se registran contratos en estado 'Activo' para liquidar pagos.")
-    else:
-        contrato_seleccionado = st.selectbox("Seleccione el Contrato Activo a liquidar:", options=list(dict_activos.keys()), key="sb_pago_activo")
-        c_datos = dict_activos[contrato_seleccionado]
-
-        st.markdown("### 📝 Datos de la Liquidación Actual")
-        
-        # --- REPLICACIÓN DE ALERTAS DE ACTUALIZACIÓN ---
-        try:
-            inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%d/%m/%Y").date()
-            duracion_meses = int(c_datos['calc_duracion'] or 0)
-            fin_contrato_dt = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=duracion_meses)
-            
-            opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-            act_contrato_sel = c_datos['act_contrato']
-            meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
-            
-            fecha_hoy = datetime.now().date()
-            prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-            
-            while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
-                prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                
-            necesita_renovacion = prox_actualizacion_calculada > fin_contrato_dt
-            
-            diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato_dt)
-            total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
-            if total_meses_transcurridos < 0: total_meses_transcurridos = 0
-            mes_actual_contrato_vivo = total_meses_transcurridos + 1
-            
-            es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
-            
-            if necesita_renovacion:
-                st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
-            elif es_mes_de_actualizacion:
-                st.warning(f"⚠️ **AVISO:** El inquilino está en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_sel}', **corresponde aplicar una actualización del monto** en este periodo.")
+                st.dataframe(df, use_container_width=True, hide_index=True)
             else:
-                st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
-                
+                st.info("No se registran contratos en la base de datos bajo los criterios de búsqueda.")
         except Exception as e:
-            st.error(f"No se pudieron calcular las alertas de período para este contrato: {e}")
+            st.error(f"Error de lectura en la planilla general: {e}")
+        finally:
+            conn.close()
 
-        # 2. SECCIÓN DE COLUMNAS E INPUTS NUMÉRICOS (EDICIÓN DE MONTOS)
-        st.markdown("#### 🔧 Ajustar montos para el período actual")
-        ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
-        
-        val_base_expensas = float(c_datos['expensas'] or 0.0)
-        val_base_edesal = float(c_datos['edesal'] or 0.0)
-        val_base_gas = float(c_datos['gas'] or 0.0)
-        val_base_municipalidad = float(c_datos['municipalidad'] or 0.0)
-        val_base_cochera = float(c_datos['cochera'] or 0.0)
-        
-        monto_expensas = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, value=val_base_expensas, step=500.0)
-        monto_edesal = ed_col2.number_input("⚡ Luz (EDESAL) ($):", min_value=0.0, value=val_base_edesal, step=500.0)
-        monto_gas = ed_col3.number_input("🔥 Gas Natural ($):", min_value=0.0, value=val_base_gas, step=500.0)
-        monto_municipalidad = ed_col4.number_input("🏛️ Tasas Municipales ($):", min_value=0.0, value=val_base_municipalidad, step=200.0)
-        monto_cochera = ed_col5.number_input("🚗 Alquiler Cochera ($):", min_value=0.0, value=val_base_cochera, step=1000.0)
 
-        # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
-        st.markdown("#### 📑 Conceptos Especiales de Contrato")
-        ed_col_esp1, ed_col_esp2 = st.columns(2)
+    # =====================================================================
+    # PESTAÑA 3: CONTROL DE COBRANZAS, HISTORIAL DE CAJA Y RECIBO PDF/WHATSAPP
+    # =====================================================================
+    
+    if tab_pagos:
+        if "pago_impactado" not in st.session_state:
+            st.session_state.pago_impactado = False
+        if "contrato_impactado_id" not in st.session_state:
+            st.session_state.contrato_impactado_id = None
+        with tab_pagos:
+            st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
         
-        # Lógica de Honorarios
-        total_honorarios_inquilino = float(c_datos['monto_inicial'] or 0.0)
-        pagado_honorarios_inquilino = float(c_datos['honorarios_pagados'] or 0.0)
-        saldo_honorarios_inquilino = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
-        
-        monto_honorarios_pago = ed_col_esp1.number_input(
-            "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):", 
-            min_value=0.0, 
-            value=saldo_honorarios_inquilino, 
-            step=1000.0, 
-            help=f"Comisión Pactada Inquilino: ${total_honorarios_inquilino:.2f}. Pagado a la fecha: ${pagado_honorarios_inquilino:.2f}. Saldo restante: ${saldo_honorarios_inquilino:.2f}"
-        )
-        
-        # Lógica de Garantía REFORMADA (Sincronizada con el campo 'garantia' de la carga)
-        val_teorico_garantia = float(c_datos['monto_garantia'] or 0.0)
-        try:
-            pagado_garantia_inquilino = float(c_datos['garantia'] or 0.0)
-        except ValueError:
-            pagado_garantia_inquilino = 0.0
-            
-        saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
-        
-        monto_garantia_pago = ed_col_esp2.number_input(
-            "🛡️ Respaldo con Monto Depositado (Garantía) ($):", 
-            min_value=0.0, 
-            value=saldo_garantia_inquilino, 
-            step=5000.0, 
-            help=f"Monto de garantía estipulado: ${val_teorico_garantia:.2f}. Depositado a la fecha: ${pagado_garantia_inquilino:.2f}. Saldo faltante: ${saldo_garantia_inquilino:.2f}"
-        )
-
-        # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
-        detalles_recibo_servicios = []
-        desglose_pantalla_pdf = []
-        
-        if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']):
-            detalles_recibo_servicios.append(f" - Imp. Inmobiliario: $ {c_datos['imp_inmobiliario']:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "📌 Impuesto Inmobiliario Provincial", "Monto": c_datos['imp_inmobiliario']})
-            
-        if monto_expensas > 0:
-            detalles_recibo_servicios.append(f" - Expensas Consorcio: $ {monto_expensas:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "🏢 Expensas Consorcio", "Monto": monto_expensas})
-            
-        if monto_edesal > 0:
-            detalles_recibo_servicios.append(f" - Luz (EDESAL): $ {monto_edesal:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "⚡ Energía Eléctrica (EDESAL)", "Monto": monto_edesal})
-            
-        if monto_gas > 0:
-            detalles_recibo_servicios.append(f" - Gas Natural: $ {monto_gas:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "🔥 Gas Natural", "Monto": monto_gas})
-            
-        if monto_municipalidad > 0:
-            detalles_recibo_servicios.append(f" - Tasas Municipales: $ {monto_municipalidad:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "🏛️ Tasas Municipales", "Monto": monto_municipalidad})
-            
-        if c_datos['ooss'] and c_datos['ooss'] > 0:
-            detalles_recibo_servicios.append(f" - Obras Sanitarias (OO.SS): $ {c_datos['ooss']:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "💧 Obras Sanitarias (OO.SS)", "Monto": c_datos['ooss']})
-            
-        if monto_cochera > 0:
-            detalles_recibo_servicios.append(f" - Alquiler Cochera: $ {monto_cochera:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "🚗 Alquiler Cochera Complementaria", "Monto": monto_cochera})
-
-        if monto_honorarios_pago > 0:
-            detalles_recibo_servicios.append(f" - Honorarios Inmobiliaria: $ {monto_honorarios_pago:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "💼 Honorarios Inmobiliaria (Comisión de Contrato)", "Monto": monto_honorarios_pago})
-            
-        if monto_garantia_pago > 0:
-            detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
-            desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
-
-        # Sumatoria dinámica de la parte variable de servicios modificada en pantalla + los nuevos conceptos
-        val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
-        val_ooss = float(c_datos['ooss'] or 0.0)
-        
-        monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
-
-        cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
-        val_base_alq = float(c_datos['alquiler'] or 0.0)
-        monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0)
-        
-        # Muestra el total consolidado de conceptos adicionales de forma informativa
-        cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
-        
-        total_pago_real = monto_alq_pago + monto_serv_pago
-        cp_col3.number_input("TOTAL A RECAUDAR ($):", value=total_pago_real, disabled=True)
-        metodo_pago = cp_col4.selectbox("Método de Pago:", ["Transferencia Bancaria", "Efectivo", "Depósito", "Cheque"])
-        
-        # 3. CONSTRUCCIÓN DE LA TABLA REACTIVA
-        with st.expander("🔍 Ver conceptos consolidados del PDF oficial", expanded=True):
-            st.markdown("Los siguientes conceptos e importes son los que se computarán de forma exacta en el comprobante:")
-            
-            items_vista = [{"Concepto Asociado": "Valor Locativo Neto (Alquiler Base)", "Monto": f"$ {monto_alq_pago:,.2f}"}]
-            for item in desglose_pantalla_pdf:
-                items_vista.append({"Concepto Asociado": item["Concepto"], "Monto": f"$ {item['Monto']:,.2f}"})
-                
-            st.table(pd.DataFrame(items_vista))
-
-        mes_periodo_texto = st.text_input("Especificar Período Liquidado (Mes / Año):", value=datetime.now().strftime("%B %Y").capitalize())
-        comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
-        
-        # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
-        if st.button("📥 Impactar Cobro en Caja Histórica", type="primary"):
             conn = conectar_db()
-            cursor = conn.cursor()
-            try:
-                # 1. Guarda el registro en el historial de cobros con los montos recalculados
-                cursor.execute('''
-                    INSERT INTO pagos_historial (contrato_id, periodo, monto_alquiler, monto_servicios, monto_total, fecha_pago, metodo_pago, comentarios)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, total_pago_real, datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, comentarios_pago))
+        # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
+            query_activos = '''
+                SELECT 
+                    c.codigo, p.alias_propiedad, 
+                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS propiedad_dir,
+                    i.apellidos, i.nombres, i.telefono, i.email,
+                    c.prox_actualizacion, c.alquiler, c.indice, c.act_contrato, c.calc_duracion,
+                    c.fin_contrato,
+                    c.mes_contrato, c.monto_honorarios, c.honorarios_pagados, c.monto_garantia, c.garantia, c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
+                    c.servicios, c.inicio_contrato, c.monto_inicial
+                FROM contratos c
+                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN inquilinos i ON c.inquilino_id = i.id
+                WHERE c.estado = 'Activo'
+                ORDER BY c.codigo DESC
+            '''
+            
+            df_activos = pd.read_sql_query(query_activos, conn)
+            conn.close()
+            
+            # --- PROCESAMIENTO DINÁMICO DEL ALQUILER ACTUALIZADO ---
+            dict_activos = {}
+            for _, r in df_activos.iterrows():
+                datos_dict = r.to_dict()
                 
-                # 2. Avanzar automáticamente el contador del mes vivo del contrato
-                nuevo_mes_vivo = (c_datos['mes_contrato'] or 1) + 1
-                cursor.execute("UPDATE contratos SET mes_contrato = ? WHERE codigo = ?", (nuevo_mes_vivo, c_datos['codigo']))
+                texto_servicios = str(r['servicios'])
+                match_alquiler = re.search(r'\[Alq\.Actualizado:\s*\$?([\d\.,]+)', texto_servicios)
                 
-                # 3. Pisar el valor del alquiler base con el monto recién cobrado
-                cursor.execute("UPDATE contratos SET alquiler = ? WHERE codigo = ?", (monto_alq_pago, c_datos['codigo']))
-                
-                # 4. MODIFICACIÓN EXPLICITA: Acumula el cobro de honorarios directamente sobre lo que ya pagó el Inquilino
-                nuevos_honorarios_acumulados = pagado_honorarios_inquilino + monto_honorarios_pago
-                
-                # 4b. NUEVA MODIFICACIÓN SÉNCRO: Acumula el cobro de garantía directamente sobre el Monto Depositado a la Fecha ('garantia')
-                nueva_garantia_acumulada = pagado_garantia_inquilino + monto_garantia_pago
-                
-                # 5. Guardar los valores actualizados de manera persistente en la base de datos
-                cursor.execute('''
-                    UPDATE contratos 
-                    SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?, honorarios_pagados = ?, garantia = ?, servicios_total = ?
-                    WHERE codigo = ?
-                ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera, nuevos_honorarios_acumulados, str(nueva_garantia_acumulada), monto_serv_pago, c_datos['codigo']))
-                
-                conn.commit()
-                st.success(f"✔️ Cobro de {mes_periodo_texto} guardado de manera permanente en el Historial de Caja. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
-                st.info(f"🔄 Los honorarios pagados acumulados del inquilino subieron a: $ {nuevos_honorarios_acumulados:,.2f}")
-                st.info(f"🛡️ El monto de garantía depositado a la fecha subió a: $ {nueva_garantia_acumulada:,.2f}")
-
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error al procesar el impacto en caja: {e}")
-            finally:
-                conn.close()
-
-        st.markdown("---")
-        st.markdown("### 🚀 Generador Inteligente de Comprobantes (WhatsApp & PDF Profesional)")
-        
-        txt_alquiler_fmt = f"$ {monto_alq_pago:,.2f}"
-        txt_servicios_fmt = f"$ {monto_serv_pago:,.2f}"
-        txt_total_fmt = f"$ {total_pago_real:,.2f}"
-        servicios_str_whatsapp = "\n".join(detalles_recibo_servicios) if detalles_recibo_servicios else " - No se registran conceptos adicionales."
-        
-        mes_actual_num = c_datos['mes_contrato'] or 1
-        meses_totales_contrato = c_datos['calc_duracion'] or 0
-        periodo_numerico_pdf = f"Mes {mes_actual_num} de {meses_totales_contrato}"
-
-        plantilla_texto = (
-            f"¡Hola {c_datos['nombres']}! 👋 Te acercamos el detalle de liquidación correspondiente al período *{mes_periodo_texto}* para la propiedad ubicada en *{c_datos['propiedad_dir']}*.\n\n"
-            f"🔹 *Concepto Alquiler:* {txt_alquiler_fmt}\n"
-            f"🔹 *Conceptos Adicionales / Servicios / Especiales:* {txt_servicios_fmt}\n"
-            f"{servicios_str_whatsapp}\n\n"
-            f"💰 *TOTAL ABONADO:* *{txt_total_fmt}* ({metodo_pago})\n\n"
-            f"📌 El presente sirve como comprobante de pago definitivo para los conceptos descritos. ¡Muchas gracias por tu responsabilidad!"
-        )
-        
-        texto_final_recibo = st.text_area(
-            "Cuerpo de la Notificación comercial:", 
-            value=plantilla_texto.replace("\\n", "\n"), 
-            height=200
-        )
-        
-        btn_c1, btn_c2 = st.columns(2)
-        
-        with btn_c1:
-            tel_inquilino = str(c_datos['telefono'] or "").strip()
-            if tel_inquilino:
-                tel_whatsapp = "54" + tel_inquilino if len(tel_inquilino) == 10 and not tel_inquilino.startswith("54") else tel_inquilino
-                texto_url = urllib.parse.quote(texto_final_recibo)
-                st.markdown(f'<a href="https://wa.me/{tel_whatsapp}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📲 Despachar Recibo por WhatsApp</button></a>', unsafe_allow_html=True)
+                if match_alquiler:
+                    valor_actualizado_parseado = limpiar_string_a_float(match_alquiler.group(1))
+                    if valor_actualizado_parseado > 0:
+                        datos_dict['alquiler'] = valor_actualizado_parseado
+                        
+                key_desplegable = f"Cod: {r['codigo']} | {r['alias_propiedad']} - Inquilino: {str(r['apellidos']).upper()}, {str(r['nombres']).title()}"
+                dict_activos[key_desplegable] = datos_dict
+            
+            if not dict_activos:
+                st.info("No se registran contratos en estado 'Activo' para liquidar pagos.")
             else:
-                st.warning("⚠️ Inquilino sin celular válido.")
+                contrato_seleccionado = st.selectbox("Seleccione el Contrato Activo a liquidar:", options=list(dict_activos.keys()), key="sb_pago_activo")
+                c_datos = dict_activos[contrato_seleccionado]
+
+                st.markdown("### 📝 Datos de la Liquidación Actual")
                 
-        with btn_c2:
-            # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
-            html_pdf_profesional = f"""
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <style>
-                body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
-                .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
-                .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
-                .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
-                .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
-                .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
-                .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
-                .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
-                .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
-                .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
-                .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
-                .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
-                .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
-            </style>
-            </head>
-            <body>
-                <div class="invoice-card">
-                    <table class="header-table">
-                        <tr>
-                            <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
-                            <td class="meta-text">
-                                <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}-{mes_periodo_texto.replace(' ','')}<br>
-                                <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
-                                <strong>Período:</strong> {periodo_numerico_pdf} <br> <small style="color: #718096;">({mes_periodo_texto})</small>
-                            </td>
-                        </tr>
-                    </table>
+                # --- REPLICACIÓN DE ALERTAS DE ACTUALIZACIÓN ---
+                try:
+                    try:
+                        inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%Y-%m-%d").date()
+                    except ValueError:
+                        inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%d/%m/%Y").date()
+                    duracion_meses = int(c_datos['calc_duracion'] or 0)
+                    fin_contrato_dt = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=duracion_meses)
                     
-                    <div class="section-title">Datos Comerciales del Contrato</div>
-                    <table class="info-grid">
-                        <tr>
-                            <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
-                            <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']} ({c_datos['alias_propiedad']})</td>
-                        </tr>
-                    </table>
+                    opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+                    act_contrato_sel = c_datos['act_contrato']
+                    meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
                     
-                    <div class="section-title">Desglose de Conceptos Liquidados</div>
-                    <table class="items-table">
-                        <thead>
-                            <tr>
-                                <th>Descripción del Concepto Asociado</th>
-                                <th style="text-align: right;">Subtotal</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr>
-                                <td>Valor Locativo Neto (Alquiler Base)</td>
-                                <td style="text-align: right;">{txt_alquiler_fmt}</td>
-                            </tr>
-                            
-                            {f"<tr><td>📌 Impuesto Inmobiliario Provincial</td><td style='text-align: right;'>$ {c_datos['imp_inmobiliario']:,.2f}</td></tr>" if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else ""}
-                            {f"<tr><td>🏢 Expensas Consorcio</td><td style='text-align: right;'>$ {monto_expensas:,.2f}</td></tr>" if monto_expensas > 0 else ""}
-                            {f"<tr><td>⚡ Energía Eléctrica (EDESAL)</td><td style='text-align: right;'>$ {monto_edesal:,.2f}</td></tr>" if monto_edesal > 0 else ""}
-                            {f"<tr><td>🔥 Gas Natural</td><td style='text-align: right;'>$ {monto_gas:,.2f}</td></tr>" if monto_gas > 0 else ""}
-                            {f"<tr><td>🏛️ Tasas Municipales</td><td style='text-align: right;'>$ {monto_municipalidad:,.2f}</td></tr>" if monto_municipalidad > 0 else ""}
-                            {f"<tr><td>💧 Obras Sanitarias (OO.SS)</td><td style='text-align: right;'>$ {c_datos['ooss']:,.2f}</td></tr>" if c_datos['ooss'] and c_datos['ooss'] > 0 else ""}
-                            {f"<tr><td>🚗 Alquiler Cochera Complementaria</td><td style='text-align: right;'>$ {monto_cochera:,.2f}</td></tr>" if monto_cochera > 0 else ""}
-                            {f"<tr><td>💼 Honorarios Inmobiliaria (Comisión de Contrato)</td><td style='text-align: right;'>$ {monto_honorarios_pago:,.2f}</td></tr>" if monto_honorarios_pago > 0 else ""}
-                            {f"<tr><td>🛡️ Respaldo con Monto Depositado (Depósito en Garantía)</td><td style='text-align: right;'>$ {monto_garantia_pago:,.2f}</td></tr>" if monto_garantia_pago > 0 else ""}
-                            
-                            <tr class="total-row">
-                                <td>TOTAL CONSOLIDADO PERCIBIDO</td>
-                                <td style="text-align: right;">{txt_total_fmt}</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                    fecha_hoy = datetime.now().date()
+                    prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
                     
-                    <table class="info-grid" style="margin-top:20px;">
-                        <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
-                    </table>
+                    while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
+                        prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                        
+                    necesita_renovacion = prox_actualizacion_calculada > fin_contrato_dt
                     
-                    <div style="text-align: right; margin-top: 40px;">
-                        <div class="signature-line"></div>
-                        <span style="font-size:13px; font-weight:bold; color:#4a5568;">Administración de Propiedades</span>
-                    </div>
+                    diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato_dt)
+                    total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
+                    if total_meses_transcurridos < 0: total_meses_transcurridos = 0
+                    mes_actual_contrato_vivo = total_meses_transcurridos + 1
                     
-                    <div class="footer-stamp">
-                        Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
-                    </div>
-                </div>
-                <script>window.print();</script>
-            </body>
-            </html>
-            """
-            st.download_button(
-                label="🖨️ Descargar Comprobante PDF Corporativo",
-                data=html_pdf_profesional,
-                file_name=f"comprobante_oficial_C_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
-                mime="text/html",
-                help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
-            )
+                    es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
+                    
+                    if necesita_renovacion:
+                        st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
+                    elif es_mes_de_actualizacion:
+                        st.warning(f"⚠️ **AVISO:** El inquilino está en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_sel}', **corresponde aplicar una actualización del monto** en este periodo.")
+                    else:
+                        st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
+                        
+                except Exception as e:
+                    st.error(f"No se pudieron calcular las alertas de período para este contrato: {e}")
 
-
-# =====================================================================
-# PESTAÑA 4: MÓDULO DE HISTORIAL DE PAGOS COMPLETO (MEJORA 1 VISUALIZACIÓN)
-# =====================================================================
-with tab_historial_pagos:
-    st.subheader("🗄️ Registro Completo de Caja y Balance Mensual")
-    
-    conn = conectar_db()
-    query_historial = '''
-        SELECT ph.id as [ID PAGO], c.codigo as [COD CONTRATO], p.alias_propiedad as [PROPIEDAD],
-               (i.apellidos || ', ' || i.nombres) as [INQUILINO], ph.periodo as [PERIODO],
-               ph.monto_alquiler as [ALQUILER ($)], ph.monto_servicios as [SERVICIOS ($)],
-               ph.monto_total as [TOTAL ($)], ph.fecha_pago as [FECHA IMPACTO], ph.metodo_pago as [METODO]
-        FROM pagos_historial ph
-        JOIN contratos c ON ph.contrato_id = c.codigo
-        JOIN propiedades p ON c.propiedad_id = p.id
-        JOIN inquilinos i ON c.inquilino_id = i.id
-        ORDER BY ph.id DESC
-    '''
-    df_historial = pd.read_sql_query(query_historial, conn)
-    conn.close()
-    
-    if df_historial.empty:
-        st.info("Aún no se registran cobros mensuales asentados de manera definitiva en el libro de caja.")
-    else:
-        # Filtros del historial
-        f_periodo = st.text_input("Filtrar historial por palabra clave (Ej: Mayo o Efectivo):", placeholder="Escriba para filtrar...")
-        if f_periodo:
-            df_historial = df_historial[
-                df_historial['PERIODO'].str.contains(f_periodo, case=False, na=False) |
-                df_historial['INQUILINO'].str.contains(f_periodo, case=False, na=False) |
-                df_historial['METODO'].str.contains(f_periodo, case=False, na=False)
-            ]
-            
-        st.dataframe(df_historial, use_container_width=True, hide_index=True)
-        
-        st.markdown("---")
-        st.markdown("##### 📊 Resumen Estadístico de Caja Registrada")
-        c_r1, c_r2, c_r3 = st.columns(3)
-        c_r1.metric("Volumen Total Cobrado", f"$ {df_historial['TOTAL ($)'].sum():,.2f}")
-        c_r2.metric("Puras Cuotas de Alquiler", f"$ {df_historial['ALQUILER ($)'].sum():,.2f}")
-        c_r3.metric("Fondo de Reintegro de Servicios", f"$ {df_historial['SERVICIOS ($)'].sum():,.2f}")
-
-# =====================================================================
-# PESTAÑA 5: FORMULARIO REACTIVO DE CARGA DE CONTRATOS (EDICIÓN EN VIVO)
-# =====================================================================
-with tab_carga:
-    st.subheader("Formulario de Registro Técnico del Contrato")
-    
-    dict_propiedades, dict_inquilinos = obtener_datos_desplegables()
-    
-    if not dict_propiedades or not dict_inquilinos:
-        st.warning("⚠️ Módulo de carga bloqueado: Debe registrar al menos una Propiedad y un Inquilino en la pestaña '⚙️ Cargar Inquilinos / Propiedades' para poder generar un contrato.")
-    else:
-        permitir_edicion = st.toggle("🔒 Habilitar Formulario de Carga", value=False)
-        
-        if not permitir_edicion:
-            st.info("Formulario protegido contra escrituras accidentales. Active el interruptor de arriba para editar.")
-
-        def obtener_ultimo_contrato():
-            conn = conectar_db()
-            cursor = conn.cursor()
-            try:
-                cursor.execute('''
-                    SELECT propiedad_id, inquilino_id, estado, monto_inicial, alquiler, 
-                           act_contrato, indice, honorarios, monto_garantia,
-                           imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, cochera
-                    FROM contratos 
-                    ORDER BY codigo DESC LIMIT 1
-                ''')
-                return cursor.fetchone()
-            except Exception:
-                return None
-            finally:
-                conn.close()
-
-        def verificar_contrato_existente(p_id):
-            conn = conectar_db()
-            cursor = conn.cursor()
-            try:
-                cursor.execute('SELECT codigo, estado FROM contratos WHERE propiedad_id = ? ORDER BY codigo DESC LIMIT 1', (p_id,))
-                return cursor.fetchone()
-            except Exception:
-                return None
-            finally:
-                conn.close()
-
-        if "ultimo_contrato" not in st.session_state:
-            st.session_state.ultimo_contrato = obtener_ultimo_contrato()
-
-        u = st.session_state.ultimo_contrato
-            
-        # --- 1. SELECCIÓN DE ENTIDADES Y DATOS MAESTROS ---
-        st.markdown("### 1. Selección de Entidades y Datos Maestros")
-        c1, c2, c3 = st.columns([2, 2, 1])
-        
-        lista_propiedades = list(dict_propiedades.keys())
-        idx_prop = 0
-        if u and u[0] in dict_propiedades.values():
-            idx_prop = lista_propiedades.index(next(k for k, v in dict_propiedades.items() if v == u[0]))
-
-        lista_inquilinos = list(dict_inquilinos.keys())
-        idx_inq = 0
-        if u and u[1] in dict_inquilinos.values():
-            idx_inq = lista_inquilinos.index(next(k for k, v in dict_inquilinos.items() if v == u[1]))
-
-        estados_disponibles = ["Activo", "Finalizado", "Cancelado", "Revalorizado", "Vencido", "Inhabitado"]
-        idx_estado = estados_disponibles.index(u[2]) if u and u[2] in estados_disponibles else 0
-
-        propiedad_seleccionada = c1.selectbox("Seleccione la Propiedad (Alias / Ubicación):", lista_propiedades, index=idx_prop, disabled=not permitir_edicion)
-        inquilino_seleccionada = c2.selectbox("Seleccione el Inquilino (Apellido, Nombre):", lista_inquilinos, index=idx_inq, disabled=not permitir_edicion)
-        state_contrato = c3.selectbox("Estado del Contrato:", estados_disponibles, index=idx_estado, disabled=not permitir_edicion)
-        
-        propiedad_id = dict_propiedades[propiedad_seleccionada]
-        inquilino_id = dict_inquilinos[inquilino_seleccionada]
-
-        contrato_previo = verificar_contrato_existente(propiedad_id)
-        modo_guardado = "Crear Nuevo"
-        id_contrato_a_modificar = None
-
-        if contrato_previo:
-            id_contrato_a_modificar = contrato_previo[0]
-            st.info(f"ℹ️ **Aviso:** Esta propiedad ya posee un contrato registrado (Código Interno: {id_contrato_a_modificar} - Estado: {contrato_previo[1]}).")
-            modo_guardado = st.radio(
-                "¿Qué acción desea realizar al guardar?",
-                ["Actualizar (Modificar el contrato existente)", "Crear uno nuevo (Nuevo Registro Histórico)"],
-                index=0,
-                disabled=not permitir_edicion
-            )
-        
-        # --- 2. FECHAS, PLAZOS Y DURACIÓN ---
-        fecha_primer_dia_actual = datetime.now().replace(day=1).date()
-        fecha_primer_dia_vencimiento = fecha_primer_dia_actual + dateutil.relativedelta.relativedelta(years=2)
-
-        st.markdown("### 2. Fechas, Plazos y Duración (Cálculos Dinámicos)")
-        cf1, cf2 = st.columns(2)
-        inicio_contrato = cf1.date_input("Inicio del Contrato:", value=fecha_primer_dia_actual, format="DD/MM/YYYY", disabled=not permitir_edicion)
-        fin_contrato = cf2.date_input("Fin del Contrato:", value=fecha_primer_dia_vencimiento, format="DD/MM/YYYY", disabled=not permitir_edicion)
-
-        cf3, cf4, cf5 = st.columns([2, 1, 1])
-        opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-        idx_act = list(opciones_actualizacion.keys()).index(u[5]) if u and u[5] in opciones_actualizacion else 4
-
-        act_contrato_seleccionado = cf3.selectbox("Actualización Contrato (Frecuencia):", list(opciones_actualizacion.keys()), index=idx_act, disabled=not permitir_edicion)
-        meses_a_sumar = opciones_actualizacion[act_contrato_seleccionado]
-
-        fecha_hoy = datetime.now().date()
-        prox_actualizacion_calculada = inicio_contrato + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-
-        while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato:
-            prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-
-        necesita_renovacion = prox_actualizacion_calculada > fin_contrato
-
-        diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato)
-        total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
-        if total_meses_transcurridos < 0: total_meses_transcurridos = 0
-        mes_actual_contrato_vivo = total_meses_transcurridos + 1
-
-        es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
-
-        if necesita_renovacion:
-            st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
-        elif es_mes_de_actualizacion:
-            st.warning(f"⚠️ **AVISO:** Estás en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_seleccionado}', **corresponde aplicar una actualización del monto** en este periodo.")
-        else:
-            st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
-
-        with cf4:
-            if not necesita_renovacion:
-                st.date_input("Próxima Actualización:", value=prox_actualizacion_calculada, format="DD/MM/YYYY", disabled=True)
-
-        fin_con_un_dia_mas = fin_contrato + dateutil.relativedelta.relativedelta(days=1)
-        diff_contrato = dateutil.relativedelta.relativedelta(fin_con_un_dia_mas, inicio_contrato)
-        duracion_meses_calculada = (diff_contrato.years * 12) + diff_contrato.months
-        cf5.text_input("Duración del Contrato:", value=f"{duracion_meses_calculada} meses", disabled=True)
-
-        # --- 3. VALORES ECONÓMICOS E ÍNDICES ---
-        st.markdown("### 3. Valores Económicos e Índices")
-        cv1, cv2 = st.columns(2)
-        
-        val_monto_ini = float(u[3]) if u and u[3] is not None else 80000.0
-        val_alq_ult = float(u[4]) if u and u[4] is not None else 80000.0
-        
-        monto_inicial = cv1.number_input("Monto Inicial ($):", min_value=0.0, step=5000.0, value=val_monto_ini, disabled=not permitir_edicion, key="monto_inicial_live")
-        alquiler = cv2.number_input("Último Valor Cobrado ($):", min_value=0.0, step=5000.0, value=val_alq_ult, disabled=not permitir_edicion, key="alquiler_ultimo_live")
-        
-        cv_ind, cv_meses = st.columns(2)
-        indices_disponibles = ["ICL", "IPC", "UVA", "Otro"]
-        idx_ind = indices_disponibles.index(u[6]) if u and u[6] in indices_disponibles else 0
-        
-        indice_seleccionado = cv_ind.selectbox("Índice Aplicado:", indices_disponibles, index=idx_ind, disabled=not permitir_edicion)
-        meses_atras = cv_meses.number_input("Intervalo de Meses para Ajustar:", min_value=1, max_value=24, value=int(meses_a_sumar), disabled=not permitir_edicion)
-        
-        indice_final = st.text_input("Especifique el Índice personalizado:", value=u[6] if u and idx_ind == 3 else "", placeholder="Ej: Ajuste Fijo", disabled=not permitir_edicion) if indice_seleccionado == "Otro" else indice_seleccionado
-
-        codigo_rate = indice_final.lower()
-        fecha_param_str = inicio_contrato.strftime("%Y-%m-%d")
-        url_calculo_dinamica = f"https://arquiler.com/pwa?amount={int(alquiler)}&date={fecha_param_str}&months={meses_atras}&rate={codigo_rate}"
-        
-
-        #  CÓDIGO CORREGIDO:
-        c_web1, c_web2 = st.columns([2, 3])
-        c_web1.markdown(f"🔗 [Abrir panel en arquiler.com]({url_calculo_dinamica})")
-
-        # Formateamos dinámicamente usando el valor actual de la variable 'alquiler'
-        valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-
-        alquiler_actualizado_texto = c_web2.text_input(
-        "Valor Actualizado obtenido ($):", 
-        value=valor_por_defecto_fmt, # <--- Forzamos a que tome siempre el valor reflejado en 'Último Valor Cobrado'
-        key="campo_alquiler_actualizado_text", 
-        disabled=not permitir_edicion
-        )
-
-
-        alquiler_actualizado = limpiar_string_a_float(alquiler_actualizado_texto)
-        
-        valor_invalido_o_vacio = (alquiler_actualizado is None or alquiler_actualizado <= 0.0)
-        alquiler_sin_cambios = (alquiler_actualizado == alquiler)
-        
-        bloqueo_por_actualizacion = False
-        if necesita_renovacion or valor_invalido_o_vacio:
-            bloqueo_por_actualizacion = True
-        elif es_mes_de_actualizacion and alquiler_sin_cambios:
-            bloqueo_por_actualizacion = True
-
-        if necesita_renovacion:
-            st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
-        elif valor_invalido_o_vacio:
-            st.error("❌ **Error:** El 'Valor Actualizado obtenido' debe ser un número positivo mayor a 0.")
-        elif es_mes_de_actualizacion and alquiler_sin_cambios:
-            st.warning(f"⚡ **MES DE ACTUALIZACIÓN (Mes {mes_actual_contrato_vivo})**: Debe ingresar un valor distinto al anterior ($ {alquiler:,.2f}) para poder guardar.")
-        elif es_mes_de_actualizacion and not alquiler_sin_cambios:
-            st.success(f"✅ **Mes de actualización:** Nuevo valor confirmado ($ {alquiler_actualizado:,.2f}).")
-        else:
-            st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}).")
-
-        # --- 4. LIQUIDACIÓN DE IMPORTES DE AGENCIA ---
-        st.markdown("### 4. Liquidación de Importes de Agencia")
-        with st.container(border=True):
-            st.markdown("##### **A) COMISION INMOBILIARIA (A cargo del Propietario - Retención Mensual)**")
-            ch_prop1, ch_prop2 = st.columns(2)
-            val_hon_pct = float(u[7]) if u and u[7] is not None else 5.0
-            honorarios_pct = ch_prop1.number_input("Porcentaje de Administración (%):", min_value=0.0, value=val_hon_pct, step=0.5, disabled=not permitir_edicion, key="honorarios_pct_live")
-            
-            # --- REACTIVIDAD: Se calcula directamente con el valor de la caja 'alquiler_actualizado'
-            retencion_mensual_estimated = alquiler_actualizado * (honorarios_pct / 100.0) if not valor_invalido_o_vacio else 0.0
-            ret_mensual_fmt = f"$ {retencion_mensual_estimated:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-            ch_prop2.text_input("Retención mensual calculada ($):", value=ret_mensual_fmt, disabled=True, key="retencion_mensual_live")
-        
-        with st.container(border=True):
-            st.markdown("##### **B) HONORARIOS INMOBILIARIA (A cargo del Inquilino - Comisión de Contrato)**")
-            ch_inq1, ch_inq2, ch_inq3 = st.columns(3)
-            
-            # 🟢 CORRECCIÓN: Leemos el índice 16 de la tupla u (monto_honorarios) en lugar del valor del alquiler (monto_inicial)
-            val_hon_total = float(u[16]) if u and len(u) > 16 and u[16] is not None else 0.0
-            honorarios_inquilino_total = ch_inq1.number_input("Monto Total de Comisión ($):", min_value=0.0, value=val_hon_total, step=5000.0, disabled=not permitir_edicion, key="hon_inq_total_live")
-            
-            val_cuotas_hon = int(u[17]) if u and len(u) > 17 and u[17] is not None else 1
-            cuota_honorarios = ch_inq2.number_input("Cuotas pactadas para el pago:", min_value=1, value=val_cuotas_hon, step=1, disabled=not permitir_edicion, key="cuota_hon_live")
-            
-            val_hon_pagados = float(u[18]) if u and len(u) > 18 and u[18] is not None else 0.0
-            honorarios_pagados = ch_inq3.number_input("Monto pagado a la fecha ($):", min_value=0.0, value=val_hon_pagados, step=5000.0, disabled=not permitir_edicion, key="hon_pagados_live")
-            
-            saldo_inquilino_hon = honorarios_inquilino_total - honorarios_pagados
-            if saldo_inquilino_hon > 0: 
-                saldo_hon_fmt = f"$ {saldo_inquilino_hon:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                st.warning(f"💵 Honorarios Inquilino: Queda un saldo de **{saldo_hon_fmt}** a financiar.")
-
-
-        # --- 5. RESPALDO Y GARANTÍAS DEL CONTRATO ---
-        st.markdown("### 5. Respaldo y Garantías del Contrato")
-        st.markdown("##### **A) Respaldo con Documento Pagaré**")
-        cg_pag1, cg_pag2 = st.columns(2)
-        tiene_pag_idx = 1 if u and "Sí" in str(u[9]) else 0
-        
-        # 🟢 CORRECCIÓN DE KEY: cambiado a "tiene_pagare_live_sec5"
-        tiene_pagare = cg_pag1.selectbox("¿Aplica Pagaré firmado?:", ["No", "Sí"], index=tiene_pag_idx, disabled=not permitir_edicion, key="tiene_pagare_live_sec5")
-        
-        # 🟢 CORRECCIÓN DE KEY: cambiado a "monto_pagare_live_sec5"
-        monto_pagare = cg_pag2.number_input("Monto acordado del Pagaré ($):", min_value=0.0, value=0.0, step=10000.0, disabled=not permitir_edicion if tiene_pagare == "Sí" else True, key="monto_pagare_live_sec5")
-
-        with st.container(border=True):
-            st.markdown("##### **C) DEPÓSITO DE RESPALDO / GARANTÍA (A cargo del Inquilino)**")
-            ch_dep1, ch_dep2 = st.columns(2)
-            
-            val_deposito_total = float(u[19]) if u and len(u) > 19 and u[19] is not None else 0.0
-            
-            # 🟢 CORRECCIÓN DE KEY: cambiado a "deposito_total_live_sec5"
-            monto_deposito_total = ch_dep1.number_input("Monto Total de Depósito Pactado ($):", min_value=0.0, value=val_deposito_total, step=5000.0, disabled=not permitir_edicion, key="deposito_total_live_sec5")
-            
-            val_deposito_pagado = float(u[20]) if u and len(u) > 20 and u[20] is not None else 0.0
-            deposito_pagados = ch_dep2.number_input("Monto de Depósito Reintegrado / Pagado a la fecha ($):", min_value=0.0, value=val_deposito_pagado, step=5000.0, disabled=not permitir_edicion, key="dep_pagados_live_sec5")
-            
-            saldo_inquilino_dep = max(0.0, monto_deposito_total - deposito_pagados)
-            
-            if saldo_inquilino_dep <= 0 and monto_deposito_total > 0:
-                estado_garantia_calculado = "Depositada Completa"
-            elif monto_deposito_total == 0:
-                estado_garantia_calculado = "Sin Depósito"
-            else:
-                saldo_dep_fmt = f"$ {saldo_inquilino_dep:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                estado_garantia_calculado = f"Financiando (Saldo: {saldo_dep_fmt})"
+                # 2. SECCIÓN DE COLUMNAS E INPUTS NUMÉRICOS (EDICIÓN DE MONTOS)
+                st.markdown("#### 🔧 Ajustar montos para el período actual")
+                ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
                 
-                st.warning(f"💵 Depósito de Respaldo: Queda un saldo de **{saldo_dep_fmt}** a financiar.")
-
-        # --- 6. DESGLOSE DE SERVICIOS MENSUALES ($) ---
-        st.markdown("### 6. Desglose de Servicios Mensuales ($)")
-        
-        with st.container(border=True):
-            st.markdown("##### **⚡ / 🔥 / 💧 / 🏛️ Servicios Públicos y Municipales**")
-            g1_col1, g1_col2 = st.columns(2)
-            
-            with g1_col1:
-                with st.container():
-                    s_col5, s_col6 = st.columns([3, 2])
-                    val_ede = float(u[12]) if u and u[12] is not None else 0.0
-                    edesal = s_col5.number_input("Monto Electricidad ($):", min_value=0.0, value=val_ede, step=500.0, disabled=not permitir_edicion, key="edesal_live")
-                    cargo_electricidad = s_col6.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_elec", disabled=not permitir_edicion)
-                    num_nis = st.number_input("NIS Nro:", min_value=0, value=0, step=1, key="id_nis", disabled=not permitir_edicion)
+                val_base_expensas = float(c_datos['expensas'] or 0.0)
+                val_base_edesal = float(c_datos['edesal'] or 0.0)
+                val_base_gas = float(c_datos['gas'] or 0.0)
+                val_base_municipalidad = float(c_datos['municipalidad'] or 0.0)
+                val_base_cochera = float(c_datos['cochera'] or 0.0)
                 
-                st.markdown("---")
-                with st.container():
-                    s_col7, s_col8 = st.columns([3, 2])
-                    val_gas = float(u[13]) if u and u[13] is not None else 0.0
-                    gas = s_col7.number_input("Monto Gas ($):", min_value=0.0, value=val_gas, step=500.0, disabled=not permitir_edicion, key="gas_live")
-                    cargo_gas = s_col8.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_gas", disabled=not permitir_edicion)
-                    cuenta_gas = st.text_input("Nro de Cuenta (Gas):", key="id_cta_gas", disabled=not permitir_edicion)
+                monto_expensas = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, value=val_base_expensas, step=500.0)
+                monto_edesal = ed_col2.number_input("⚡ Luz (EDESAL) ($):", min_value=0.0, value=val_base_edesal, step=500.0)
+                monto_gas = ed_col3.number_input("🔥 Gas Natural ($):", min_value=0.0, value=val_base_gas, step=500.0)
+                monto_municipalidad = ed_col4.number_input("🏛️ Tasas Municipales ($):", min_value=0.0, value=val_base_municipalidad, step=200.0)
+                monto_cochera = ed_col5.number_input("🚗 Alquiler Cochera ($):", min_value=0.0, value=val_base_cochera, step=1000.0)
+
+                # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
+                st.markdown("#### 📑 Conceptos Especiales de Contrato")
+                ed_col_esp1, ed_col_esp2 = st.columns(2)
+                
+                # Lógica de Honorarios
+                total_honorarios_inquilino = float(c_datos['monto_inicial'] or 0.0)
+                pagado_honorarios_inquilino = float(c_datos['honorarios_pagados'] or 0.0)
+                saldo_honorarios_inquilino = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
+                
+                monto_honorarios_pago = ed_col_esp1.number_input(
+                    "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):", 
+                    min_value=0.0, 
+                    value=saldo_honorarios_inquilino, 
+                    step=1000.0, 
+                    help=f"Comisión Pactada Inquilino: ${total_honorarios_inquilino:.2f}. Pagado a la fecha: ${pagado_honorarios_inquilino:.2f}. Saldo restante: ${saldo_honorarios_inquilino:.2f}"
+                )
+                
+                # Lógica de Garantía REFORMADA (Sincronizada con el campo 'garantia' de la carga)
+                val_teorico_garantia = float(c_datos['monto_garantia'] or 0.0)
+                try:
+                    pagado_garantia_inquilino = float(c_datos['garantia'] or 0.0)
+                except ValueError:
+                    pagado_garantia_inquilino = 0.0
                     
-            with g1_col2:
-                with st.container():
-                    s_col9, s_col10 = st.columns([3, 2])
-                    val_mun = float(u[14]) if u and u[14] is not None else 0.0
-                    municipalidad = s_col9.number_input("Monto Municipalidad ($):", min_value=0.0, value=val_mun, step=500.0, disabled=not permitir_edicion, key="municipalidad_live")
-                    cargo_municipalidad = s_col10.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_mun", disabled=not permitir_edicion)
-                    finca_mun = st.text_input("Finca Nro:", key="id_finca_mun", disabled=not permitir_edicion)
+                saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
                 
-                st.markdown("---")
-                with st.container():
-                    s_col11, s_col12 = st.columns([3, 2])
-                    val_oos = float(u[15]) if u and u[15] is not None else 0.0
-                    ooss = s_col11.number_input("Monto OO.SS. ($):", min_value=0.0, value=val_oos, step=500.0, disabled=not permitir_edicion, key="ooss_live")
-                    cargo_ooss = s_col12.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_oos", disabled=not permitir_edicion)
-                    cuenta_oos = st.text_input("Nro de Cuenta (OO.SS.):", key="id_cta_oos", disabled=not permitir_edicion)
+                monto_garantia_pago = ed_col_esp2.number_input(
+                    "🛡️ Respaldo con Monto Depositado (Garantía) ($):", 
+                    min_value=0.0, 
+                    value=saldo_garantia_inquilino, 
+                    step=5000.0, 
+                    help=f"Monto de garantía estipulado: ${val_teorico_garantia:.2f}. Depositado a la fecha: ${pagado_garantia_inquilino:.2f}. Saldo faltante: ${saldo_garantia_inquilino:.2f}"
+                )
 
-        with st.container(border=True):
-            st.markdown("##### **🏢 Complementos de Propiedad y Consorcio**")
-            g2_col1, g2_col2 = st.columns(2)
-            
-            with g2_col1:
-                s_col3, s_col4 = st.columns([3, 2])
-                val_exp = float(u[10]) if u and u[10] is not None else 0.0
-                expensas = s_col3.number_input("Monto Expensas ($):", min_value=0.0, value=val_exp, step=500.0, disabled=not permitir_edicion, key="expensas_live")
-                cargo_expensas = s_col4.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_exp", disabled=not permitir_edicion)
+                # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
+                detalles_recibo_servicios = []
+                desglose_pantalla_pdf = []
                 
-            with g2_col2:
-                s_col13, s_col14 = st.columns([3, 2])
-                val_coch = float(u[16]) if u and len(u) > 16 and u[16] is not None else 0.0
-                cochera = s_col13.number_input("Monto Cochera ($):", min_value=0.0, value=val_coch, step=1000.0, disabled=not permitir_edicion, key="cochera_live")
-                cargo_cochera = s_col14.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_coch", disabled=not permitir_edicion)
+                if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']):
+                    detalles_recibo_servicios.append(f" - Imp. Inmobiliario: $ {c_datos['imp_inmobiliario']:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "📌 Impuesto Inmobiliario Provincial", "Monto": c_datos['imp_inmobiliario']})
+                    
+                if monto_expensas > 0:
+                    detalles_recibo_servicios.append(f" - Expensas Consorcio: $ {monto_expensas:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🏢 Expensas Consorcio", "Monto": monto_expensas})
+                    
+                if monto_edesal > 0:
+                    detalles_recibo_servicios.append(f" - Luz (EDESAL): $ {monto_edesal:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "⚡ Energía Eléctrica (EDESAL)", "Monto": monto_edesal})
+                    
+                if monto_gas > 0:
+                    detalles_recibo_servicios.append(f" - Gas Natural: $ {monto_gas:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🔥 Gas Natural", "Monto": monto_gas})
+                    
+                if monto_municipalidad > 0:
+                    detalles_recibo_servicios.append(f" - Tasas Municipales: $ {monto_municipalidad:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🏛️ Tasas Municipales", "Monto": monto_municipalidad})
+                    
+                if c_datos['ooss'] and c_datos['ooss'] > 0:
+                    detalles_recibo_servicios.append(f" - Obras Sanitarias (OO.SS): $ {c_datos['ooss']:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "💧 Obras Sanitarias (OO.SS)", "Monto": c_datos['ooss']})
+                    
+                if monto_cochera > 0:
+                    detalles_recibo_servicios.append(f" - Alquiler Cochera: $ {monto_cochera:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🚗 Alquiler Cochera Complementaria", "Monto": monto_cochera})
 
-        with st.container(border=True):
-            st.markdown("##### **📌 Impuesto Provincial Individual**")
-            s_col1, s_col2 = st.columns([3, 2])
-            val_imp_inmob = float(u[9]) if u and u[9] is not None else 0.0
-            imp_inmobiliario = s_col1.number_input("Imp. Inmobiliario ($):", min_value=0.0, value=val_imp_inmob, step=500.0, disabled=not permitir_edicion, key="imp_inmob_live")
-            cargo_inmobiliario = s_col2.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=1, key="cargo_inmob", disabled=not permitir_edicion)
+                if monto_honorarios_pago > 0:
+                    detalles_recibo_servicios.append(f" - Honorarios Inmobiliaria: $ {monto_honorarios_pago:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "💼 Honorarios Inmobiliaria (Comisión de Contrato)", "Monto": monto_honorarios_pago})
+                    
+                if monto_garantia_pago > 0:
+                    detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
 
-        notas_adicionales_input = st.text_input("Notas Adicionales de Servicios:", disabled=not permitir_edicion, key="notas_servicios_live")
-        
-        str_identificadores = f"[NIS: {num_nis}] [Cta Gas: {cuenta_gas}] [Finca: {finca_mun}] [Cta OO.SS.: {cuenta_oos}]"
-        detalles_pagos_str = f"| Elec: {cargo_electricidad} | Gas: {cargo_gas} | Mun: {cargo_municipalidad} | OOSS: {cargo_ooss} | Exp: {cargo_expensas} | Inmob: {cargo_inmobiliario}"
-        
-        if notas_adicionales_input.strip():
-            servicios_detalle = f"{str_identificadores} {detalles_pagos_str} | Notas: {notas_adicionales_input}"
-        else:
-            servicios_detalle = f"{str_identificadores} {detalles_pagos_str}"
+                # Sumatoria dinámica de la parte variable de servicios modificada en pantalla + los nuevos conceptos
+                val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
+                val_ooss = float(c_datos['ooss'] or 0.0)
+                
+                monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
 
-        # --- REACTIVIDAD EXPLICITA: Suma los servicios que dicen "Inquilino" en vivo
-        m_inmob_liq = imp_inmobiliario if cargo_inmobiliario == "Inquilino" else 0.0
-        m_exp_liq = expensas if cargo_expensas == "Inquilino" else 0.0
-        m_elec_liq = edesal if cargo_electricidad == "Inquilino" else 0.0
-        m_gas_liq = gas if cargo_gas == "Inquilino" else 0.0
-        m_mun_liq = municipalidad if cargo_municipalidad == "Inquilino" else 0.0
-        m_oos_liq = ooss if cargo_ooss == "Inquilino" else 0.0
-        m_coch_liq = cochera if cargo_cochera == "Inquilino" else 0.0
-        
-        servicios_total_calculado = (m_inmob_liq + m_exp_liq + m_elec_liq + m_gas_liq + m_mun_liq + m_oos_liq + m_coch_liq)
+                # ── MONTO NETO ALQUILER con cálculo automático de índice ─────────
+                val_monto_ini_recibo = float(c_datos['monto_inicial'] or 0.0)
+                val_alq_ultimo_recibo = float(c_datos['alquiler'] or 0.0)
+                indice_recibo = str(c_datos.get('indice') or 'ICL').upper()
 
-        # --- 7. CONSOLIDACIÓN DEL PAGO DE ALQUILER INICIAL (CÁLCULO DINÁMICO) ---
-        st.markdown("### 7. Consolidación del Pago de Alquiler Inicial")
-        cp_1, cp_2, cp_3 = st.columns(3)
-        
-        # El neto toma el valor convertido de lo que el usuario escribió arriba en "Valor Actualizado obtenido"
-        base_calculo_cobro = float(alquiler_actualizado) if not valor_invalido_o_vacio else 0.0
-        
-        alquiler_cobrado = cp_1.number_input(
-            "Monto Neto de Alquiler Cobrado ($):", 
-            min_value=0.0, 
-            value=base_calculo_cobro, 
-            step=5000.0, 
-            disabled=True,
-            key="alquiler_cobrado_live"  # <--- Atrapa el cambio manual si se quiere alterar antes de guardar
-        )
-        
-        # El total final responde directamente a la suma de lo que está tipiado en "Monto Neto Cobrado" + "Servicios"
-        total_pagado_calculado = alquiler_cobrado + servicios_total_calculado
-        
-        cp_2.number_input("Total de Servicios Adicionados ($):", value=float(servicios_total_calculado), disabled=True, key="box_total_servicios_live")
-        cp_3.number_input("TOTAL CONSOLIDADO COBRADO (Caja) ($):", value=float(total_pagado_calculado), disabled=True, key="box_total_caja_live")
+                # Convertir date a datetime igual que en la pestaña de carga
+                inicio_contrato_recibo = datetime.combine(inicio_contrato_dt, datetime.min.time())
 
-        st.markdown("---")
-        
-        boton_deshabilitado = (not permitir_edicion) or bloqueo_por_actualizacion or necesita_renovacion
-        texto_boton = "💾 Actualizar Contrato Existente" if (contrato_previo and "Actualizar" in modo_guardado) else "💾 Guardar y Registrar Contrato Completo"
-        
-        btn_guardar_final = st.button(texto_boton, disabled=boton_deshabilitado, type="primary", key="btn_guardar_contrato_final")
-        
-        if btn_guardar_final:
-            alq_act_fmt = f"${alquiler_actualizado:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-            m_pag_fmt = f"${monto_pagare:,.0f}".replace(",", "v").replace(".", ",").replace("v", ".")
-            
-            detalle_garantia_unificado = f"Pagaré: {tiene_pagare} ({m_pag_fmt}) | Depósito: {estado_garantia_calculado}"
-            registro_distribucion = f"[Alq.Actualizado: {alq_act_fmt} | Imp.Inmob: {cargo_inmobiliario}] {servicios_detalle}".strip()
-            
-            inicio_str = inicio_contrato.strftime('%d/%m/%Y')
-            fin_str = fin_contrato.strftime('%d/%m/%Y')
-            prox_act_str = prox_actualizacion_calculada.strftime('%d/%m/%Y')
-            meses_atras_calculado = meses_atras
-            
-            conn = conectar_db()
-            cursor = conn.cursor()
-            try:
-                if contrato_previo and "Actualizar" in modo_guardado:
-                    cursor.execute('''
-                        UPDATE contratos 
-                        SET propiedad_id=?, inquilino_id=?, estado=?, inicio_contrato=?, fin_contrato=?,
-                            calc_duracion=?, act_contrato=?, indice=?, monto_inicial=?, alquiler=?, prox_actualizacion=?,
-                            mes_contrato=?, mes_actualizacion_contrato=?, servicios=?, honorarios=?, monto_honorarios=?,
-                            cuota_honorarios=?, honorarios_pagados=?, monto_garantia=?, garantia=?,
-                            imp_inmobiliario=?, expensas=?, edesal=?, gas=?, municipalidad=?, ooss=?, servicios_total=?,
-                            cochera=?, alquiler_cobrado=?, total_pagado=?
-                        WHERE codigo = ?
-                    ''', (
-                        propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
-                        duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
-                        mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
-                        cuota_honorarios, honorarios_pagados, monto_deposito_total, detalle_garantia_unificado,
-                        imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
-                        cochera, alquiler_cobrado, total_pagado_calculado, id_contrato_a_modificar
-                    ))
-                    st.success(f"✔️ ¡Contrato N° {id_contrato_a_modificar} actualizado correctamente!")
+                st.markdown("#### 💰 Monto Neto de Alquiler")
+                r_col1, r_col2, r_col3 = st.columns([2, 2, 2])
+                r_col1.markdown(f"🔗 [Verificar en arquiler.com](https://arquiler.com/pwa?amount={int(val_monto_ini_recibo)}&date={inicio_contrato_dt.strftime('%Y-%m-%d')}&months={meses_a_sumar}&rate={indice_recibo.lower()})")
 
+                # Mismo bloque exacto que en pestaña de carga
+                valor_auto_recibo = None
+                if indice_recibo in ("ICL", "IPC"):
+                    with st.spinner(f"⏳ Consultando {indice_recibo}..."):
+                        if indice_recibo == "ICL":
+                            valor_auto_recibo = calcular_valor_actualizado_icl(
+                                val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            )
+                        elif indice_recibo == "IPC":
+                            valor_auto_recibo = calcular_valor_actualizado_ipc(
+                                val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            )
+
+                if valor_auto_recibo is not None:
+                    valor_auto_recibo_fmt = f"$ {valor_auto_recibo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    r_col2.metric(
+                        label=f"📡 Auto {indice_recibo} (oficial)",
+                        value=valor_auto_recibo_fmt,
+                        help=f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}."
+                    )
+                    val_base_alq = valor_auto_recibo
                 else:
-                    if state_contrato == "Activo":
-                        cursor.execute('''
-                            UPDATE contratos 
-                            SET estado = 'Finalizado' 
-                            WHERE propiedad_id = ? AND estado = 'Activo'
-                        ''', (propiedad_id,))
+                    if indice_recibo in ("ICL", "IPC"):
+                        r_col2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
+                    val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
+
+                cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
+                monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0)
+                
+                # Muestra el total consolidado de conceptos adicionales de forma informativa
+                cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
+                
+                total_pago_real = monto_alq_pago + monto_serv_pago
+                cp_col3.number_input("TOTAL A RECAUDAR ($):", value=total_pago_real, disabled=True)
+                metodo_pago = cp_col4.selectbox("Método de Pago:", ["Transferencia Bancaria", "Efectivo", "Depósito", "Cheque"])
+
+                
+                # 3. CONSTRUCCIÓN DE LA TABLA REACTIVA
+                with st.expander("🔍 Ver conceptos consolidados del PDF oficial", expanded=True):
+                    st.markdown("Los siguientes conceptos e importes son los que se computarán de forma exacta en el comprobante:")
                     
-                    cursor.execute('''
-                        INSERT INTO contratos (
-                            propiedad_id, inquilino_id, estado, inicio_contrato, fin_contrato,
-                            calc_duracion, act_contrato, indice, monto_inicial, alquiler, prox_actualizacion,
-                            mes_contrato, mes_actualizacion_contrato, servicios, honorarios, monto_honorarios,
-                            cuota_honorarios, honorarios_pagados, monto_garantia, garantia,
-                            imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total,
-                            cochera, alquiler_cobrado, total_pagado
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
-                        duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
-                        mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
-                        cuota_honorarios, honorarios_pagados, monto_deposito_total, detalle_garantia_unificado,
-                        imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
-                        cochera, alquiler_cobrado, total_pagado_calculado
-                    ))
-                    st.success("✔️ ¡Nuevo contrato creado e insertado con éxito!")
+                    items_vista = [{"Concepto Asociado": "Valor Locativo Neto (Alquiler Base)", "Monto": f"$ {monto_alq_pago:,.2f}"}]
+                    for item in desglose_pantalla_pdf:
+                        items_vista.append({"Concepto Asociado": item["Concepto"], "Monto": f"$ {item['Monto']:,.2f}"})
+                        
+                    st.table(pd.DataFrame(items_vista))
 
-                conn.commit()
-                st.session_state.ultimo_contrato = obtener_ultimo_contrato()
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error de base de datos al impactar los cambios: {e}")
-            finally:
-                conn.close()
+                # --- NUEVA LÓGICA: Período calculado dinámicamente desde fechas ---
+                try:
+                    _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%d/%m/%Y").date()
+                try:
+                    _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%d/%m/%Y").date()
 
+                # Mes actual del contrato: meses transcurridos desde el inicio + 1
+                _diff_actual = dateutil.relativedelta.relativedelta(datetime.now().date(), _inicio_dt)
+                _meses_transcurridos = (_diff_actual.years * 12) + _diff_actual.months
+                if _meses_transcurridos < 0:
+                    _meses_transcurridos = 0
+                mes_actual_num = _meses_transcurridos + 1
 
-# =====================================================================
-# PESTAÑA 6: CARGA DE AUXILIARES (INQUILINOS / PROPIEDADES)
-# =====================================================================
-with tab_auxiliares:
-    st.subheader("⚙️ Panel de Configuración de Entidades")
-    col_aux1, col_aux2 = st.columns(2)
-    
-    with col_aux1:
-        st.markdown("#### Registrar Nuevo Inquilino")
-        with st.form("form_inquilino", clear_on_submit=True):
-            apellidos = st.text_input("Apellidos:", placeholder="Ej: Pérez Rossi")
-            nombres = st.text_input("Nombres:", placeholder="Ej: Juan Carlos")
-            dni = st.text_input("DNI (Sin puntos):", placeholder="Ej: 34567890")
-            email = st.text_input("Email:", placeholder="Ej: juancarlos@gmail.com")
-            tel = st.text_input("Teléfono Celular (10 dígitos):", placeholder="Ej: 2657123456")
-            
-            btn_inq = st.form_submit_button("Guardar Inquilino")
-            if btn_inq and apellidos and nombres:
-                tel_limpio = tel.strip().replace(" ", "").replace("-", "")
-                email_limpio = email.strip().lower()
-                dni_limpio = dni.strip().replace(".", "").replace(" ", "")
-                                
-                if dni_limpio and not dni_limpio.isdigit():
-                    st.error("⚠️ El DNI debe contener únicamente números.")
-                elif tel_limpio and not re.match(r"^[1-9]\d{9}$", tel_limpio):
-                    st.error("⚠️ Teléfono inválido (Debe tener 10 dígitos sin 0 ni 15).")
+                # Duración total en meses entre inicio y fin del contrato
+                _delta = dateutil.relativedelta.relativedelta(_fin_dt, _inicio_dt)
+                meses_totales_contrato = (_delta.years * 12) + _delta.months
+                if meses_totales_contrato <= 0:
+                    meses_totales_contrato = int(c_datos.get('calc_duracion') or 0)
+
+                # Generar lista de todos los meses del contrato
+                opciones_periodo = [f"Mes {m} de {meses_totales_contrato}" for m in range(1, meses_totales_contrato + 1)]
+                indice_default = max(0, min(mes_actual_num - 1, len(opciones_periodo) - 1))
+
+                mes_periodo_texto = st.selectbox(
+                    "📅 Período a liquidar:",
+                    options=opciones_periodo,
+                    index=indice_default,
+                    key=f"sel_periodo_{c_datos['codigo']}"
+                )
+
+                # --- VERIFICAR SI YA EXISTE UN PAGO PARA ESTE PERÍODO ---
+                with conectar_db() as _conn_chk:
+                    _rows_existentes = _conn_chk.execute(
+                        "SELECT monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo = ? ORDER BY id DESC",
+                        (c_datos['codigo'], mes_periodo_texto)
+                    ).fetchall()
+
+                    # Saldos pendientes de períodos ANTERIORES (todos excepto el seleccionado)
+                    _todos_los_pagos = _conn_chk.execute(
+                        "SELECT periodo, monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo != ? ORDER BY id ASC",
+                        (c_datos['codigo'], mes_periodo_texto)
+                    ).fetchall()
+
+                _row_existente = _rows_existentes[0] if _rows_existentes else None
+
+                # Calcular saldos pendientes de períodos anteriores
+                # Agrupamos por período y calculamos si quedó saldo en cada uno
+                import re as _re
+                _saldos_anteriores_detalle = {}
+                for _p, _monto, _coment in _todos_los_pagos:
+                    _abonado = float(_monto or 0)
+                    # Intentar extraer el total original del comentario si existe
+                    _match_tot = _re.search(r'Abonado: \$ [\d\.,]+ \| Saldo: \$ ([\d\.,]+)', _coment or "")
+                    if _match_tot:
+                        _saldo_ese = float(_match_tot.group(1).replace('.','').replace(',','.'))
+                        if _p not in _saldos_anteriores_detalle:
+                            _saldos_anteriores_detalle[_p] = 0.0
+                        _saldos_anteriores_detalle[_p] = _saldo_ese  # el último saldo registrado es el vigente
+
+                _total_saldos_anteriores = sum(_saldos_anteriores_detalle.values())
+
+                # Calcular saldo acumulado real del período seleccionado
+                saldo_periodo_anterior = 0.0
+                _total_abonado_periodo = 0.0
+                if _row_existente:
+                    _total_abonado_periodo = sum(float(r[0] or 0) for r in _rows_existentes)
+                    saldo_periodo_anterior = max(0.0, total_pago_real - _total_abonado_periodo)
+                    if saldo_periodo_anterior > 0:
+                        st.warning(
+                            f"⚠️ **Período {mes_periodo_texto} con pago parcial registrado.** "
+                            f"Total abonado hasta ahora: **$ {_total_abonado_periodo:,.2f}** — "
+                            f"Saldo pendiente: **$ {saldo_periodo_anterior:,.2f}**"
+                        )
+                    else:
+                        st.error(f"🔒 **{mes_periodo_texto} ya fue liquidado en su totalidad** (Total abonado: $ {_total_abonado_periodo:,.2f}). No se puede volver a impactar.")
                 else:
+                    # Período nuevo: mostrar y sumar saldos anteriores si existen
+                    if _total_saldos_anteriores > 0:
+                        _detalle_saldos = " | ".join([f"{p}: $ {s:,.2f}" for p, s in _saldos_anteriores_detalle.items() if s > 0])
+                        st.warning(f"📋 Saldos pendientes de períodos anteriores: $ {_total_saldos_anteriores:,.2f} ({_detalle_saldos})")
 
-                    apellidos_fmt = apellidos.strip().upper()  # Todo MAYÚSCULAS
-                    nombres_fmt = nombres.strip().title()      # Primera Letra Mayúscula
+                # Total a cubrir en este recibo:
+                # - Período con saldo parcial → cubrir ese saldo
+                # - Período nuevo → total del mes + saldos de períodos anteriores
+                if saldo_periodo_anterior > 0:
+                    _total_a_cubrir = saldo_periodo_anterior
+                elif not _row_existente:
+                    _total_a_cubrir = total_pago_real + _total_saldos_anteriores
+                    if _total_saldos_anteriores > 0:
+                        cp_col3.empty()  # reemplazar el widget anterior
+                        st.info(f"💰 **TOTAL A RECAUDAR (con saldos anteriores): $ {_total_a_cubrir:,.2f}**  "
+                                f"*(Mes actual: $ {total_pago_real:,.2f} + Saldos anteriores: $ {_total_saldos_anteriores:,.2f})*")
+                else:
+                    _total_a_cubrir = total_pago_real
 
+                # --- MONTO ABONADO Y SALDO PENDIENTE ---
+                _valor_default_abonado = float(_total_a_cubrir)
+
+                saldo_col1, saldo_col2 = st.columns(2)
+                monto_abonado = saldo_col1.number_input(
+                    "💵 Monto Abonado por el Inquilino ($):",
+                    min_value=0.0,
+                    value=float(_valor_default_abonado),
+                    step=1000.0,
+                    key=f"monto_abonado_{c_datos['codigo']}_{mes_periodo_texto}"
+                )
+                saldo_pendiente = _total_a_cubrir - monto_abonado
+                if saldo_pendiente > 0:
+                    saldo_col2.metric("⚠️ Saldo Pendiente ($):", f"$ {saldo_pendiente:,.2f}", delta=f"-{saldo_pendiente:,.2f}", delta_color="inverse")
+                elif saldo_pendiente < 0:
+                    saldo_col2.metric("✅ A Favor del Inquilino ($):", f"$ {abs(saldo_pendiente):,.2f}", delta=f"+{abs(saldo_pendiente):,.2f}", delta_color="normal")
+                else:
+                    saldo_col2.metric("✅ Saldo Pendiente ($):", "$ 0,00 — Cancelado", delta="Pago completo", delta_color="off")
+
+                comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
+                
+                # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
+                # Resetear flag si el usuario cambió de contrato
+                if st.session_state.contrato_impactado_id != c_datos['codigo']:
+                    st.session_state.pago_impactado = False
+                    st.session_state.contrato_impactado_id = None
+
+                if st.button("📥 Impactar Cobro en Caja Histórica", type="primary",
+                               disabled=bool(_row_existente and saldo_periodo_anterior == 0)):
                     conn = conectar_db()
                     cursor = conn.cursor()
                     try:
-                        cursor.execute("INSERT INTO inquilinos (apellidos, nombres, dni, telefono, email) VALUES (?, ?, ?, ?, ?)", 
-                        (apellidos_fmt, nombres_fmt, dni_limpio, tel_limpio, email_limpio))
+                        # 1. Guarda el registro en el historial de cobros con los montos recalculados
+                        _comentario_completo = comentarios_pago or ""
+                        if saldo_pendiente != 0:
+                            _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {saldo_pendiente:,.2f}"
+                        _val_ooss_insert = float(c_datos.get('ooss') or 0.0)
+                        _val_imp_insert = float(c_datos.get('imp_inmobiliario') or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
+                        cursor.execute('''
+                            INSERT INTO pagos_historial (
+                                contrato_id, periodo, monto_alquiler, monto_servicios, monto_total,
+                                fecha_pago, metodo_pago, comentarios,
+                                monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
+                                monto_cochera, monto_ooss, monto_imp_inmobiliario,
+                                monto_honorarios, monto_garantia,
+                                monto_abonado, saldo_pendiente, saldos_anteriores
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, monto_abonado,
+                            datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
+                            monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
+                            monto_cochera, _val_ooss_insert, _val_imp_insert,
+                            monto_honorarios_pago, monto_garantia_pago,
+                            monto_abonado, saldo_pendiente, _total_saldos_anteriores
+                        ))
+
+                        # 2. Avanzar automáticamente el contador del mes vivo del contrato
+                        nuevo_mes_vivo = (c_datos['mes_contrato'] or 1) + 1
+                        cursor.execute("UPDATE contratos SET mes_contrato = ? WHERE codigo = ?", (nuevo_mes_vivo, c_datos['codigo']))
+
+                        # 3. Pisar el valor del alquiler base con el monto recién cobrado
+                        cursor.execute("UPDATE contratos SET alquiler = ? WHERE codigo = ?", (monto_alq_pago, c_datos['codigo']))
+
+                        # 4. Acumula el cobro de honorarios directamente sobre lo que ya pagó el Inquilino
+                        nuevos_honorarios_acumulados = pagado_honorarios_inquilino + monto_honorarios_pago
+
+                        # 4b. Acumula el cobro de garantía directamente sobre el Monto Depositado a la Fecha
+                        nueva_garantia_acumulada = pagado_garantia_inquilino + monto_garantia_pago
+
+                        # 5. Guardar los valores actualizados de manera persistente en la base de datos
+                        cursor.execute('''
+                            UPDATE contratos 
+                            SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?, honorarios_pagados = ?, garantia = ?, servicios_total = ?
+                            WHERE codigo = ?
+                        ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera, nuevos_honorarios_acumulados, str(nueva_garantia_acumulada), monto_serv_pago, c_datos['codigo']))
+
                         conn.commit()
-                        st.success(f"✔️ Inquilino {apellidos}, {nombres} guardado.")
-                    except sqlite3.IntegrityError:
-                        st.error("Ya existe un inquilino registrado con este nombre.")
+                        st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
+                        if saldo_pendiente > 0:
+                            st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
+                        elif saldo_pendiente < 0:
+                            st.info(f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor).")
+                        st.info(f"🔄 Los honorarios pagados acumulados del inquilino subieron a: $ {nuevos_honorarios_acumulados:,.2f}")
+                        st.info(f"🛡️ El monto de garantía depositado a la fecha subió a: $ {nueva_garantia_acumulada:,.2f}")
+
+                        # Activar flag para mostrar el PDF sin recargar la página
+                        st.session_state.pago_impactado = True
+                        st.session_state.contrato_impactado_id = c_datos['codigo']
+
+                    except Exception as e:
+                        st.error(f"Error al procesar el impacto en caja: {e}")
                     finally:
                         conn.close()
+
+                if st.session_state.pago_impactado and st.session_state.contrato_impactado_id == c_datos['codigo']:
+                    st.markdown("---")
+                    st.markdown("### 🚀 Generador Inteligente de Comprobantes (WhatsApp & PDF Profesional)")
+                
+                    txt_alquiler_fmt = f"$ {monto_alq_pago:,.2f}"
+                    txt_servicios_fmt = f"$ {monto_serv_pago:,.2f}"
+                    txt_total_fmt = f"$ {total_pago_real:,.2f}"
+                    servicios_str_whatsapp = "\n".join(detalles_recibo_servicios) if detalles_recibo_servicios else " - No se registran conceptos adicionales."
                     
-    with col_aux2:
-        st.markdown("#### Registrar Nueva Propiedad")
-        with st.form("form_propiedad", clear_on_submit=True):
-            alias = st.text_input("Alias de la Propiedad:", placeholder="Ej: Dpto 3B - Torre Mitre")
-            calle = st.text_input("Calle / Av:", placeholder="Ej: Av. Mitre")
-            numero = st.text_input("Número:", placeholder="Ej: 1450")
-            depto = st.text_input("Departamento (Opcional):", placeholder="Ej: Piso 3 - Dpto B")
+                    mes_actual_num = c_datos['mes_contrato'] or 1
+                    meses_totales_contrato = c_datos['calc_duracion'] or 0
+                    periodo_numerico_pdf = f"Mes {mes_actual_num} de {meses_totales_contrato}"
+    
+                    plantilla_texto = (
+                        f"¡Hola {c_datos['nombres']}! 👋 Te acercamos el detalle de liquidación correspondiente al período *{mes_periodo_texto}* para la propiedad ubicada en *{c_datos['propiedad_dir']}*.\n\n"
+                        f"🔹 *Concepto Alquiler:* {txt_alquiler_fmt}\n"
+                        f"🔹 *Conceptos Adicionales / Servicios / Especiales:* {txt_servicios_fmt}\n"
+                        f"{servicios_str_whatsapp}\n\n"
+                        f"💰 *TOTAL ABONADO:* *{txt_total_fmt}* ({metodo_pago})\n\n"
+                        f"📌 El presente sirve como comprobante de pago definitivo para los conceptos descritos. ¡Muchas gracias por tu responsabilidad!"
+                    )
+                    
+                    texto_final_recibo = st.text_area(
+                        "Cuerpo de la Notificación comercial:", 
+                        value=plantilla_texto.replace("\\n", "\n"), 
+                        height=200
+                    )
+                    
+                    btn_c1, btn_c2 = st.columns(2)
+                    
+                    with btn_c1:
+                        tel_inquilino = str(c_datos['telefono'] or "").strip()
+                        if tel_inquilino:
+                            tel_whatsapp = "54" + tel_inquilino if len(tel_inquilino) == 10 and not tel_inquilino.startswith("54") else tel_inquilino
+                            texto_url = urllib.parse.quote(texto_final_recibo)
+                            st.markdown(f'<a href="https://wa.me/{tel_whatsapp}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📲 Despachar Recibo por WhatsApp</button></a>', unsafe_allow_html=True)
+                        else:
+                            st.warning("⚠️ Inquilino sin celular válido.")
+                            
+                    with btn_c2:
+                        # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
+                        html_pdf_profesional = f"""
+                        <html>
+                        <head>
+                        <meta charset="utf-8">
+                        <style>
+                            body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
+                            .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
+                            .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
+                            .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
+                            .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
+                            .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
+                            .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
+                            .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
+                            .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
+                            .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
+                            .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
+                            .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
+                            .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
+                        </style>
+                        </head>
+                        <body>
+                            <div class="invoice-card">
+                                <table class="header-table">
+                                    <tr>
+                                        <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
+                                        <td class="meta-text">
+                                            <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}-{mes_periodo_texto.replace(' ','')}<br>
+                                            <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
+                                            <strong>Período:</strong> {mes_periodo_texto} <br>
+                                        </td>
+                                    </tr>
+                                </table>
+                                
+                                <div class="section-title">Datos Comerciales del Contrato</div>
+                                <table class="info-grid">
+                                    <tr>
+                                        <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
+                                        <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']} ({c_datos['alias_propiedad']})</td>
+                                    </tr>
+                                </table>
+                                
+                                <div class="section-title">Desglose de Conceptos Liquidados</div>
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Descripción del Concepto Asociado</th>
+                                            <th style="text-align: right;">Subtotal</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>Valor Locativo Neto (Alquiler Base)</td>
+                                            <td style="text-align: right;">{txt_alquiler_fmt}</td>
+                                        </tr>
+                                        
+                                        {f"<tr><td>📌 Impuesto Inmobiliario Provincial</td><td style='text-align: right;'>$ {c_datos['imp_inmobiliario']:,.2f}</td></tr>" if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else ""}
+                                        {f"<tr><td>🏢 Expensas Consorcio</td><td style='text-align: right;'>$ {monto_expensas:,.2f}</td></tr>" if monto_expensas > 0 else ""}
+                                        {f"<tr><td>⚡ Energía Eléctrica (EDESAL)</td><td style='text-align: right;'>$ {monto_edesal:,.2f}</td></tr>" if monto_edesal > 0 else ""}
+                                        {f"<tr><td>🔥 Gas Natural</td><td style='text-align: right;'>$ {monto_gas:,.2f}</td></tr>" if monto_gas > 0 else ""}
+                                        {f"<tr><td>🏛️ Tasas Municipales</td><td style='text-align: right;'>$ {monto_municipalidad:,.2f}</td></tr>" if monto_municipalidad > 0 else ""}
+                                        {f"<tr><td>💧 Obras Sanitarias (OO.SS)</td><td style='text-align: right;'>$ {c_datos['ooss']:,.2f}</td></tr>" if c_datos['ooss'] and c_datos['ooss'] > 0 else ""}
+                                        {f"<tr><td>🚗 Alquiler Cochera Complementaria</td><td style='text-align: right;'>$ {monto_cochera:,.2f}</td></tr>" if monto_cochera > 0 else ""}
+                                        {f"<tr><td>💼 Honorarios Inmobiliaria (Comisión de Contrato)</td><td style='text-align: right;'>$ {monto_honorarios_pago:,.2f}</td></tr>" if monto_honorarios_pago > 0 else ""}
+                                        {f"<tr><td>🛡️ Respaldo con Monto Depositado (Depósito en Garantía)</td><td style='text-align: right;'>$ {monto_garantia_pago:,.2f}</td></tr>" if monto_garantia_pago > 0 else ""}
+                                        
+                                        <tr class="total-row">
+                                            <td>TOTAL CONSOLIDADO PERCIBIDO</td>
+                                            <td style="text-align: right;">{txt_total_fmt}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                                
+                                <table class="info-grid" style="margin-top:20px;">
+                                    <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
+                                </table>
+                                
+                                <div style="text-align: right; margin-top: 40px;">
+                                    <div class="signature-line"></div>
+                                    <span style="font-size:13px; font-weight:bold; color:#4a5568;">Administración de Propiedades</span>
+                                </div>
+                                
+                                <div class="footer-stamp">
+                                    Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
+                                </div>
+                            </div>
+                            <script>window.print();</script>
+                        </body>
+                        </html>
+                        """
+                        st.download_button(
+                            label="🖨️ Descargar Comprobante PDF Corporativo",
+                            data=html_pdf_profesional,
+                            file_name=f"comprobante_oficial_C_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
+                            mime="text/html",
+                            help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
+                        )
+    
+    
+# =====================================================================
+# PESTAÑA 4: MÓDULO DE HISTORIAL DE PAGOS COMPLETO (MEJORA 1 VISUALIZACIÓN)
+# =====================================================================
+if tab_historial_pagos:
+    with tab_historial_pagos:
+        st.subheader("🗄️ Registro Completo de Caja y Balance Mensual")
+    
+        conn = conectar_db()
+        query_historial = '''
+            SELECT ph.id as [ID PAGO], c.codigo as [COD CONTRATO], p.alias_propiedad as [PROPIEDAD],
+                (i.apellidos || ', ' || i.nombres) as [INQUILINO], ph.periodo as [PERIODO],
+                ph.monto_alquiler as [ALQUILER ($)], ph.monto_servicios as [SERVICIOS ($)],
+                ph.monto_total as [TOTAL ($)], ph.fecha_pago as [FECHA IMPACTO], ph.metodo_pago as [METODO]
+            FROM pagos_historial ph
+            JOIN contratos c ON ph.contrato_id = c.codigo
+            JOIN propiedades p ON c.propiedad_id = p.id
+            JOIN inquilinos i ON c.inquilino_id = i.id
+            ORDER BY ph.id DESC
+        '''
+        df_historial = pd.read_sql_query(query_historial, conn)
+        conn.close()
             
-            btn_prop = st.form_submit_button("Guardar Propiedad")
-            if btn_prop and alias and calle and numero:
+        if df_historial.empty:
+            st.info("Aún no se registran cobros mensuales asentados de manera definitiva en el libro de caja.")
+        else:
+            # Filtros del historial
+            f_periodo = st.text_input("Filtrar historial por palabra clave (Ej: Mayo o Efectivo):", placeholder="Escriba para filtrar...")
+            if f_periodo:
+                df_historial = df_historial[
+                    df_historial['PERIODO'].str.contains(f_periodo, case=False, na=False) |
+                    df_historial['INQUILINO'].str.contains(f_periodo, case=False, na=False) |
+                    df_historial['METODO'].str.contains(f_periodo, case=False, na=False)
+                ]
+                    
+            st.dataframe(df_historial, use_container_width=True, hide_index=True)
+                
+            st.markdown("---")
+            st.markdown("##### 📊 Resumen Estadístico de Caja Registrada")
+            c_r1, c_r2, c_r3 = st.columns(3)
+            c_r1.metric("Volumen Total Cobrado", f"$ {df_historial['TOTAL ($)'].sum():,.2f}")
+            c_r2.metric("Puras Cuotas de Alquiler", f"$ {df_historial['ALQUILER ($)'].sum():,.2f}")
+            c_r3.metric("Fondo de Reintegro de Servicios", f"$ {df_historial['SERVICIOS ($)'].sum():,.2f}")
+    
+    
+    
+# =====================================================================
+# PESTAÑA 5: FORMULARIO REACTIVO DE CARGA DE CONTRATOS (CORREGIDA)
+# =====================================================================
+    
+if tab_carga:
+    with tab_carga:
+        st.subheader("Formulario de Registro Técnico del Contrato")
+    
+        dict_propiedades, dict_inquilinos = obtener_datos_desplegables()
+            
+        if not dict_propiedades or not dict_inquilinos:
+            st.warning("⚠️ Módulo de carga bloqueado: Debe registrar al menos una Propiedad y un Inquilino en la pestaña '⚙️ Cargar Inquilinos / Propiedades' para poder generar un contrato.")
+        else:
+            permitir_edicion = st.toggle("🔒 Habilitar Formulario de Carga", value=False)
+                
+            if not permitir_edicion:
+                st.info("Formulario protegido contra escrituras accidentales. Active el interruptor de arriba para editar.")
+    
+            # --- 1. SELECCIÓN DE ENTIDADES Y DATOS MAESTROS (PROCESO REACTIVO) ---
+            st.markdown("### 1. Selección de Entidades y Datos Maestros")
+            c1, c2, c3 = st.columns([2, 2, 1])
+                
+            lista_propiedades = list(dict_propiedades.keys())
+            lista_inquilinos = list(dict_inquilinos.keys())
+            estados_disponibles = ["Activo", "Finalizado", "Cancelado", "Revalorizado", "Vencido", "Inhabitado"]
+    
+            # 🔧 PASO 1: SELECCIONAR PROPIEDAD
+            # IMPORTANTE: el selectbox de propiedad NUNCA se deshabilita,
+            # para que Streamlit siempre detecte cambios y recargue los datos de la BD.
+            propiedad_seleccionada = c1.selectbox(
+                "Seleccione la Propiedad (Alias / Ubicación):", 
+                lista_propiedades, 
+                key="prop_sel_main"
+            )
+    
+            # ✅ AHORA SÍ PODEMOS USAR propiedad_id
+            propiedad_id = dict_propiedades[propiedad_seleccionada]
+    
+            # Inicializar estado de sesión de forma segura
+            if "propiedad_activa" not in st.session_state:
+                st.session_state.propiedad_activa = None
+            if "datos_contrato" not in st.session_state:
+                st.session_state.datos_contrato = None
+    
+            # Detectar cambio de propiedad para forzar recarga de datos desde la BD
+            if st.session_state.propiedad_activa != propiedad_id:
+                st.session_state.propiedad_activa = propiedad_id
+                u = cargar_datos_iniciales_contrato(propiedad_id)
+                st.session_state.datos_contrato = u
+    
+                # ══════════════════════════════════════════════════════════════
+                # CRÍTICO: escribir los valores de la BD en el session_state de
+                # cada widget. Streamlit ignora value= en rerenders si la key
+                # ya existe — hay que sobrescribirla directamente.
+                # ══════════════════════════════════════════════════════════════
+                opciones_actualizacion_tmp = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+                indices_disponibles_tmp = ["ICL", "IPC", "UVA", "Otro"]
+    
+                if u:
+                    # Inquilino y estado
+                    if u.get("inquilino_id"):
+                        inq_nombre = next((n for n, i in dict_inquilinos.items() if i == u["inquilino_id"]), None)
+                        if inq_nombre:
+                            st.session_state["inq_sel_main"] = inq_nombre
+                    if u.get("estado") in estados_disponibles:
+                        st.session_state["estado_sel_main"] = u["estado"]
+                    # Sección 2 — Fechas
+                    try:
+                        from datetime import date as date_type
+                        def parse_fecha(val):
+                            """Intenta parsear una fecha; retorna None si el valor es inválido."""
+                            if not val:
+                                return None
+                            try:
+                                return date_type.fromisoformat(str(val))
+                            except Exception:
+                                return None
+                        hoy = datetime.now().replace(day=1).date()
+                        st.session_state["inicio_contrato_main"] = parse_fecha(u.get("inicio_contrato")) or hoy
+                        st.session_state["fin_contrato_main"]    = parse_fecha(u.get("fin_contrato"))    or (hoy + dateutil.relativedelta.relativedelta(years=2))
+                    except Exception:
+                        pass
+                    act_val_raw = str(u.get("act_contrato", "")).strip()
+                    # La BD puede tener el número de meses ("4") o el texto ("Cuatrimestral")
+                    # Construimos ambos mapeos para cubrir los dos casos
+                    meses_a_texto = {str(v): k for k, v in opciones_actualizacion_tmp.items()}
+                    if act_val_raw in opciones_actualizacion_tmp:
+                        act_val = act_val_raw          # ya es texto: "Cuatrimestral"
+                    elif act_val_raw in meses_a_texto:
+                        act_val = meses_a_texto[act_val_raw]  # número → texto: "4" → "Cuatrimestral"
+                    else:
+                        act_val = "Semestral"
+                    st.session_state["act_contrato_main"] = act_val
+    
+                    # Sección 3 — Valores económicos
+                    st.session_state["monto_inicial_main"]       = float(u["monto_inicial"])   if u.get("monto_inicial")   is not None else 80000.0
+                    st.session_state["alquiler_ultimo_main"]     = float(u["alquiler"])         if u.get("alquiler")         is not None else 80000.0
+                    ind_val = u.get("indice", "ICL")
+                    st.session_state["indice_sel_main"]          = ind_val if ind_val in indices_disponibles_tmp else "ICL"
+                    mes_act = opciones_actualizacion_tmp.get(act_val, 6)
+                    st.session_state["meses_atras_main"]         = int(u["mes_actualizacion_contrato"]) if u.get("mes_actualizacion_contrato") is not None else mes_act
+                    alq_fmt = f"{float(u['alquiler']):,.2f}".replace(",", "v").replace(".", ",").replace("v", ".") if u.get("alquiler") is not None else "0,00"
+                    st.session_state["alquiler_actualizado_main"] = alq_fmt
+    
+                    # Sección 4 — Honorarios
+                    st.session_state["honorarios_pct_live"]      = float(u["honorarios"])        if u.get("honorarios")        is not None else 5.0
+                    st.session_state["hon_inq_total_live"]       = float(u["monto_honorarios"]) if u.get("monto_honorarios") not in (None, 0, 0.0) else float(u.get("monto_inicial") or 80000.0)
+                    st.session_state["cuota_hon_live"]           = max(1, int(u["cuota_honorarios"])) if u.get("cuota_honorarios") is not None else 1
+                    st.session_state["hon_pagados_live"]         = float(u["honorarios_pagados"]) if u.get("honorarios_pagados") is not None else 0.0
+    
+                    # Sección 5 — Garantías
+                    st.session_state["deposito_total_live_sec5"] = float(u["monto_garantia"]) if u.get("monto_garantia") not in (None, 0, 0.0) else float(u.get("monto_inicial") or 80000.0)
+                    st.session_state["dep_pagados_live_sec5"]    = float(u["garantia_pagada"])   if u.get("garantia_pagada")   is not None else 0.0
+                    tipos_garantia_tmp = ["Sin Garantía", "Propietario", "Recibo de Sueldo", "Bien Inmueble", "Aval Bancario", "Otro"]
+                    val_tipo_tmp = u.get("tipo_de_garantie", "Sin Garantía")
+                    st.session_state["tipo_garantia_live_sec5"]  = val_tipo_tmp if val_tipo_tmp in tipos_garantia_tmp else "Sin Garantía"
+    
+                    # Sección 6 — Servicios
+                    st.session_state["edesal_live"]              = float(u["edesal"])            if u.get("edesal")            is not None else 0.0
+                    st.session_state["gas_live"]                 = float(u["gas"])               if u.get("gas")               is not None else 0.0
+                    st.session_state["municipalidad_live"]       = float(u["municipalidad"])     if u.get("municipalidad")     is not None else 0.0
+                    st.session_state["ooss_live"]                = float(u["ooss"])              if u.get("ooss")              is not None else 0.0
+                    st.session_state["expensas_live"]            = float(u["expensas"])          if u.get("expensas")          is not None else 0.0
+                    st.session_state["cochera_live"]             = float(u["cochera"])           if u.get("cochera")           is not None else 0.0
+                    st.session_state["imp_inmob_live"]           = float(u["imp_inmobiliario"])  if u.get("imp_inmobiliario")  is not None else 0.0
+                else:
+                    # Sin contrato previo: resetear todo a defaults
+                    st.session_state["estado_sel_main"]           = "Activo"
+                    hoy = datetime.now().replace(day=1).date()
+                    st.session_state["inicio_contrato_main"]      = hoy
+                    st.session_state["fin_contrato_main"]         = hoy + dateutil.relativedelta.relativedelta(years=2)
+                    st.session_state["act_contrato_main"]         = "Semestral"
+                    st.session_state["monto_inicial_main"]        = 80000.0
+                    st.session_state["alquiler_ultimo_main"]      = 80000.0
+                    st.session_state["indice_sel_main"]           = "ICL"
+                    st.session_state["meses_atras_main"]          = 6
+                    st.session_state["alquiler_actualizado_main"] = "80.000,00"
+                    st.session_state["honorarios_pct_live"]       = 5.0
+                    st.session_state["hon_inq_total_live"]        = 0.0
+                    st.session_state["cuota_hon_live"]            = 1
+                    st.session_state["hon_pagados_live"]          = 0.0
+                    st.session_state["deposito_total_live_sec5"]  = 0.0
+                    st.session_state["dep_pagados_live_sec5"]     = 0.0
+                    st.session_state["edesal_live"]               = 0.0
+                    st.session_state["gas_live"]                  = 0.0
+                    st.session_state["municipalidad_live"]        = 0.0
+                    st.session_state["ooss_live"]                 = 0.0
+                    st.session_state["expensas_live"]             = 0.0
+                    st.session_state["cochera_live"]              = 0.0
+                    st.session_state["imp_inmob_live"]            = 0.0
+    
+                # Forzar rerender para que los widgets lean el session_state actualizado
+                st.rerun()
+    
+            # Usamos 'u' como la fuente de datos cargada en el estado
+            u = st.session_state.datos_contrato
+    
+    
+            # 🔧 PASO 2: DETERMINAR ÍNDICE DEL INQUILINO PARA PRESELECCIONAR
+            if u and 'inquilino_id' in u:
+                idx_inq = buscar_inquilino_por_id(u['inquilino_id'], lista_inquilinos, dict_inquilinos)
+            else:
+                idx_inq = 0
+    
+            # 🔧 PASO 3: ÚNICO SELECTBOX DE INQUILINO (SIN DUPLICADOS)
+            inquilino_seleccionada = c2.selectbox(
+                "Seleccione el Inquilino (Apellido, Nombre):", 
+                lista_inquilinos, 
+                disabled=not permitir_edicion,
+                key="inq_sel_main"
+            )
+    
+            # Obtener ID del inquilino seleccionado
+            inquilino_id = dict_inquilinos[inquilino_seleccionada]
+    
+            state_contrato = c3.selectbox(
+                "Estado del Contrato:", 
+                estados_disponibles,
+                disabled=not permitir_edicion,
+                key="estado_sel_main"
+            )
+    
+            # Verificar si existe un contrato previo para esta propiedad
+            contrato_previo = verificar_contrato_existente(propiedad_id)
+            modo_guardado = "Crear Nuevo"
+            id_contrato_a_modificar = None
+    
+            if contrato_previo:
+                id_contrato_a_modificar = contrato_previo[0]
+                st.info(f"ℹ️ **Aviso:** Esta propiedad ya posee un contrato registrado (Código Interno: {id_contrato_a_modificar} - Estado: {contrato_previo[1]}).")
+                modo_guardado = st.radio(
+                    "¿Qué acción desea realizar al guardar?",
+                    ["Actualizar (Modificar el contrato existente)", "Crear uno nuevo (Nuevo Registro Histórico)"],
+                    index=0,
+                    disabled=not permitir_edicion
+                )
+                
+            # --- 2. FECHAS, PLAZOS Y DURACIÓN ---
+            fecha_primer_dia_actual = datetime.now().replace(day=1).date()
+            fecha_primer_dia_vencimiento = fecha_primer_dia_actual + dateutil.relativedelta.relativedelta(years=2)
+    
+            st.markdown("### 2. Fechas, Plazos y Duración (Cálculos Dinámicos)")
+            cf1, cf2 = st.columns(2)
+            inicio_contrato = cf1.date_input(
+                "Inicio del Contrato:", 
+                value=fecha_primer_dia_actual, 
+                format="DD/MM/YYYY", 
+                disabled=not permitir_edicion,
+                key="inicio_contrato_main"
+            )
+            fin_contrato = cf2.date_input(
+                "Fin del Contrato:", 
+                value=fecha_primer_dia_vencimiento, 
+                format="DD/MM/YYYY", 
+                disabled=not permitir_edicion,
+                key="fin_contrato_main"
+            )
+    
+            cf3, cf4, cf5 = st.columns([2, 1, 1])
+            opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+                
+            act_contrato_seleccionado = cf3.selectbox(
+                "Actualización Contrato (Frecuencia):", 
+                list(opciones_actualizacion.keys()), 
+                disabled=not permitir_edicion,
+                key="act_contrato_main"
+            )
+            meses_a_sumar = opciones_actualizacion[act_contrato_seleccionado]
+    
+            fecha_hoy = datetime.now().date()
+            prox_actualizacion_calculada = inicio_contrato + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+    
+            while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato:
+                prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+    
+            necesita_renovacion = prox_actualizacion_calculada > fin_contrato
+    
+            diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato)
+            total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
+            if total_meses_transcurridos < 0: 
+                total_meses_transcurridos = 0
+            mes_actual_contrato_vivo = total_meses_transcurridos + 1
+    
+            es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
+    
+            # Mostrar alertas de período
+            if necesita_renovacion:
+                st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
+            elif es_mes_de_actualizacion:
+                st.warning(f"⚠️ **AVISO:** Estás en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_seleccionado}', **corresponde aplicar una actualización del monto** en este periodo.")
+            else:
+                st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
+    
+            with cf4:
+                if not necesita_renovacion:
+                    st.date_input(
+                        "Próxima Actualización:", 
+                        value=prox_actualizacion_calculada, 
+                        format="DD/MM/YYYY", 
+                        disabled=True,
+                        key="prox_act_display"
+                    )
+    
+            fin_con_un_dia_mas = fin_contrato + dateutil.relativedelta.relativedelta(days=1)
+            diff_contrato = dateutil.relativedelta.relativedelta(fin_con_un_dia_mas, inicio_contrato)
+            duracion_meses_calculada = (diff_contrato.years * 12) + diff_contrato.months
+            cf5.text_input(
+                "Duración del Contrato:", 
+                value=f"{duracion_meses_calculada} meses", 
+                disabled=True,
+                key="duracion_display"
+            )
+    
+            # --- 3. VALORES ECONÓMICOS E ÍNDICES ---
+            st.markdown("### 3. Valores Económicos e Índices")
+            cv1, cv2 = st.columns(2)
+                
+            # Valores con fallback seguro
+            val_monto_ini = float(u['monto_inicial']) if u and u.get('monto_inicial') is not None else 80000.0
+            val_alq_ult = float(u['alquiler']) if u and u.get('alquiler') is not None else 80000.0
+                
+            monto_inicial = cv1.number_input(
+                "Monto Inicial ($):", 
+                min_value=0.0, 
+                step=5000.0, 
+                value=val_monto_ini, 
+                disabled=not permitir_edicion, 
+                key="monto_inicial_main"
+            )
+            alquiler = cv2.number_input(
+                "Último Valor Cobrado ($):", 
+                min_value=0.0, 
+                step=5000.0, 
+                value=val_alq_ult, 
+                disabled=not permitir_edicion, 
+                key="alquiler_ultimo_main"
+            )
+                
+            cv_ind, cv_meses = st.columns(2)
+            indices_disponibles = ["ICL", "IPC", "UVA", "Otro"]
+                
+            indice_seleccionado = cv_ind.selectbox(
+                "Índice Aplicado:", 
+                indices_disponibles, 
+                disabled=not permitir_edicion,
+                key="indice_sel_main"
+            )
+            meses_atras = cv_meses.number_input(
+                "Intervalo de Meses para Ajustar:", 
+                min_value=1, 
+                max_value=24, 
+                value=int(meses_a_sumar), 
+                disabled=not permitir_edicion,
+                key="meses_atras_main"
+            )
+                
+            indice_final = st.text_input(
+                "Especifique el Índice personalizado:", 
+                value=u['indice'] if u and indice_seleccionado == "Otro" else "", 
+                placeholder="Ej: Ajuste Fijo", 
+                disabled=not permitir_edicion if indice_seleccionado == "Otro" else True,
+                key="indice_custom_main"
+            ) if indice_seleccionado == "Otro" else indice_seleccionado
+    
+            codigo_rate = indice_final.lower()
+            fecha_param_str = inicio_contrato.strftime("%Y-%m-%d")
+            url_calculo_dinamica = f"https://arquiler.com/pwa?amount={int(monto_inicial)}&date={fecha_param_str}&months={meses_atras}&rate={codigo_rate}"
+                
+            c_web1, c_web2, c_web3 = st.columns([2, 2, 2])
+            c_web1.markdown(f"🔗 [Abrir panel en arquiler.com]({url_calculo_dinamica})")
+    
+            # ── AUTO-CÁLCULO ICL / IPC ────────────────────────────────────────────
+            valor_auto = None
+            indice_upper = indice_final.upper()
+    
+            if permitir_edicion and indice_upper in ("ICL", "IPC"):
+                with st.spinner(f"⏳ Consultando {indice_upper}..."):
+                    if indice_upper == "ICL":
+                        valor_auto = calcular_valor_actualizado_icl(
+                            monto_inicial, inicio_contrato, int(meses_atras)
+                        )
+                    elif indice_upper == "IPC":
+                        valor_auto = calcular_valor_actualizado_ipc(
+                            monto_inicial, inicio_contrato, int(meses_atras)
+                        )
+    
+            if valor_auto is not None:
+                valor_auto_fmt = f"$ {valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                c_web2.metric(
+                    label=f"📡 Auto {indice_upper} (oficial)",
+                    value=valor_auto_fmt,
+                    help=f"Calculado automáticamente usando datos oficiales del {'BCRA' if indice_upper == 'ICL' else 'INDEC'}."
+                )
+                valor_por_defecto_fmt = f"{valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            else:
+                if permitir_edicion and indice_upper in ("ICL", "IPC"):
+                    c_web2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
+                valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    
+            alquiler_actualizado_texto = c_web3.text_input(
+                "Valor Actualizado ($):",
+                value=valor_por_defecto_fmt,
+                key="alquiler_actualizado_main",
+                disabled=not permitir_edicion,
+                help="Auto-completado con el índice oficial. Podés ajustarlo manualmente."
+            )
+    
+            alquiler_actualizado = limpiar_string_a_float(alquiler_actualizado_texto)
+                
+            valor_vacio = (alquiler_actualizado is None or alquiler_actualizado <= 0.0)
+            alquiler_sin_cambios = (alquiler_actualizado == alquiler)
+                
+            bloqueo_por_actualizacion = False
+            if needs_renov_status := (necesita_renovacion or valor_vacio):
+                bloqueo_por_actualizacion = True
+            elif es_mes_de_actualizacion and alquiler_sin_cambios:
+                bloqueo_por_actualizacion = True
+    
+            if necesita_renovacion:
+                st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
+            elif valor_vacio:
+                st.error("❌ **Error:** El 'Valor Actualizado obtenido' debe ser un número positivo mayor a 0.")
+            elif es_mes_de_actualizacion and alquiler_sin_cambios:
+                st.warning(f"⚡ **MES DE ACTUALIZACIÓN (Mes {mes_actual_contrato_vivo})**: Debe ingresar un valor distinto al anterior ($ {alquiler:,.2f}) para poder guardar.")
+            elif es_mes_de_actualizacion and not alquiler_sin_cambios:
+                st.success(f"✅ **Mes de actualización:** Nuevo valor confirmado ($ {alquiler_actualizado:,.2f}).")
+            else:
+                st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}).")
+    
+     
+            # --- 4. LIQUIDACIÓN DE IMPORTES DE AGENCIA ---
+            st.markdown("### 4. Liquidación de Importes de Agencia")
+            with st.container(border=True):
+                st.markdown("##### **A) COMISION INMOBILIARIA (A cargo del Propietario - Retención Mensual)**")
+                ch_prop1, ch_prop2 = st.columns(2)
+                val_hon_pct = float(u['honorarios']) if u and u.get('honorarios') is not None else 5.0
+                honorarios_pct = ch_prop1.number_input("Porcentaje de Administración (%):", min_value=0.0, value=val_hon_pct, step=0.5, disabled=not permitir_edicion, key="honorarios_pct_live")
+                    
+                retencion_mensual_estimated = alquiler_actualizado * (honorarios_pct / 100.0) if not valor_vacio else 0.0
+                ret_mensual_fmt = f"$ {retencion_mensual_estimated:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                ch_prop2.text_input("Retención mensual calculada ($):", value=ret_mensual_fmt, disabled=True, key="retencion_mensual_live")
+                
+            with st.container(border=True):
+                st.markdown("##### **B) HONORARIOS INMOBILIARIA (A cargo del Inquilino - Comisión de Contrato)**")
+                ch_inq1, ch_inq2, ch_inq3 = st.columns(3)
+                    
+                # Default: si no hay valor guardado, usar monto_inicial como base
+                val_hon_total = float(u['monto_honorarios']) if u and u.get('monto_honorarios') not in (None, 0, 0.0) else float(monto_inicial)
+                honorarios_inquilino_total = ch_inq1.number_input(
+                    "Monto Total de Comisión ($):", 
+                    min_value=0.0, 
+                    value=val_hon_total, 
+                    step=5000.0, 
+                    disabled=not permitir_edicion, 
+                    key="hon_inq_total_live"
+                )
+                    
+                val_cuotas_hon = int(u['cuota_honorarios']) if u and u.get('cuota_honorarios') is not None else 1
+                cuota_honorarios = ch_inq2.number_input(
+                    "Cuotas pactadas para el pago:", 
+                    min_value=1, 
+                    value=max(1, val_cuotas_hon),
+                    step=1, 
+                    disabled=not permitir_edicion, 
+                    key="cuota_hon_live"
+                )
+    
+                # Valor calculado por cuota
+                valor_por_cuota = honorarios_inquilino_total / cuota_honorarios if cuota_honorarios > 0 else 0.0
+                valor_por_cuota_fmt = f"$ {valor_por_cuota:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                ch_inq3.number_input(
+                    "Valor por cuota ($):", 
+                    value=valor_por_cuota, 
+                    disabled=True, 
+                    key="valor_cuota_hon_live"
+                )
+    
+                val_hon_pagados = float(u['honorarios_pagados']) if u and u.get('honorarios_pagados') is not None else 0.0
+                honorarios_pagados = st.number_input(
+                    "Monto pagado a la fecha ($):", 
+                    min_value=0.0, 
+                    value=val_hon_pagados, 
+                    step=5000.0, 
+                    disabled=not permitir_edicion, 
+                    key="hon_pagados_live"
+                )
+    
+                val_cuotas_hon_pagas = int(u['cuotas_honorarios_pagadas']) if u and u.get('cuotas_honorarios_pagadas') is not None else 0
+                cuotas_honorarios_pagadas = st.number_input(
+                    "Cuotas de honorarios pagadas:",
+                    min_value=0,
+                    max_value=int(cuota_honorarios),
+                    value=min(val_cuotas_hon_pagas, int(cuota_honorarios)),
+                    step=1,
+                    disabled=not permitir_edicion,
+                    key="cuotas_hon_pagas_live"
+                )
+                    
+                saldo_inquilino_hon = honorarios_inquilino_total - honorarios_pagados
+                if saldo_inquilino_hon > 0:
+                    cuotas_pendientes = saldo_inquilino_hon / valor_por_cuota if valor_por_cuota > 0 else 0
+                    saldo_hon_fmt = f"$ {saldo_inquilino_hon:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                    st.warning(f"💵 Saldo pendiente: **{saldo_hon_fmt}** — {cuotas_pendientes:.1f} cuota(s) de {valor_por_cuota_fmt} c/u.")
+    
+            # --- 5. RESPALDO Y GARANTÍAS DEL CONTRATO ---
+            st.markdown("### 5. Respaldo y Garantías del Contrato")
+            st.markdown("##### **A) Respaldo con Documento Pagaré**")
+            cg_pag1, cg_pag2 = st.columns(2)
+                
+            # Verificación en el diccionario
+            tiene_pag_idx = 1 if u and "Sí" in str(u.get('garantia', '')) else 0
+            tiene_pagare = cg_pag1.selectbox("¿Aplica Pagaré firmado?:", ["No", "Sí"], index=tiene_pag_idx, disabled=not permitir_edicion, key="tiene_pagare_live_sec5")
+            monto_pagare = cg_pag2.number_input("Monto acordado del Pagaré ($):", min_value=0.0, value=0.0, step=10000.0, disabled=not permitir_edicion if tiene_pagare == "Sí" else True, key="monto_pagare_live_sec5")
+    
+            # Tipo de garantía
+            tipos_garantia = ["Sin Garantía", "Propietario", "Recibo de Sueldo", "Bien Inmueble", "Aval Bancario", "Otro"]
+            val_tipo_garantia = u.get("tipo_de_garantie", "Sin Garantía") if u else "Sin Garantía"
+            idx_tipo_gar = tipos_garantia.index(val_tipo_garantia) if val_tipo_garantia in tipos_garantia else 0
+            tipo_de_garantie = st.selectbox("Tipo de Garantía:", tipos_garantia, index=idx_tipo_gar, disabled=not permitir_edicion, key="tipo_garantia_live_sec5")
+    
+            with st.container(border=True):
+                st.markdown("##### **C) DEPÓSITO DE RESPALDO / GARANTÍA (A cargo del Inquilino)**")
+                ch_dep1, ch_dep2, ch_dep3 = st.columns(3)
+                    
+                # Default: si no hay valor guardado, usar monto_inicial como base
+                val_deposito_total = float(u['monto_garantia']) if u and u.get('monto_garantia') not in (None, 0, 0.0) else float(monto_inicial)
+                monto_deposito_total = ch_dep1.number_input(
+                    "Monto Total de Depósito Pactado ($):", 
+                    min_value=0.0, 
+                    value=val_deposito_total, 
+                    step=5000.0, 
+                    disabled=not permitir_edicion, 
+                    key="deposito_total_live_sec5"
+                )
+    
+                val_cuotas_dep = int(u.get('cuotas_deposito', 1)) if u and u.get('cuotas_deposito') not in (None, 0) else 1
+                cuotas_deposito = ch_dep2.number_input(
+                    "Cuotas pactadas para el pago:", 
+                    min_value=1, 
+                    value=max(1, val_cuotas_dep), 
+                    step=1, 
+                    disabled=not permitir_edicion, 
+                    key="cuotas_dep_live_sec5"
+                )
+    
+                # Valor calculado por cuota
+                valor_por_cuota_dep = monto_deposito_total / cuotas_deposito if cuotas_deposito > 0 else 0.0
+                valor_por_cuota_dep_fmt = f"$ {valor_por_cuota_dep:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                ch_dep3.number_input(
+                    "Valor por cuota ($):", 
+                    value=valor_por_cuota_dep, 
+                    disabled=True, 
+                    key="valor_cuota_dep_live"
+                )
+    
+                val_deposito_pagado = float(u['garantia_pagada']) if u and u.get('garantia_pagada') is not None else 0.0
+                deposito_pagados = st.number_input(
+                    "Monto de Depósito Reintegrado / Pagado a la fecha ($):", 
+                    min_value=0.0, 
+                    value=val_deposito_pagado, 
+                    step=5000.0, 
+                    disabled=not permitir_edicion, 
+                    key="dep_pagados_live_sec5"
+                )
+    
+                val_cuotas_dep_pagas = int(u['cuotas_deposito_pagadas']) if u and u.get('cuotas_deposito_pagadas') is not None else 0
+                cuotas_deposito_pagadas = st.number_input(
+                    "Cuotas de depósito pagadas:",
+                    min_value=0,
+                    max_value=int(cuotas_deposito),
+                    value=min(val_cuotas_dep_pagas, int(cuotas_deposito)),
+                    step=1,
+                    disabled=not permitir_edicion,
+                    key="cuotas_dep_pagas_live"
+                )
+                    
+                saldo_inquilino_dep = max(0.0, monto_deposito_total - deposito_pagados)
+                    
+                if saldo_inquilino_dep <= 0 and monto_deposito_total > 0:
+                    estado_garantia_calculado = "Depositada Completa"
+                    st.success("✅ Depósito de respaldo: **abonado en su totalidad.**")
+                elif monto_deposito_total == 0:
+                    estado_garantia_calculado = "Sin Depósito"
+                else:
+                    saldo_dep_fmt = f"$ {saldo_inquilino_dep:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                    cuotas_pendientes_dep = saldo_inquilino_dep / valor_por_cuota_dep if valor_por_cuota_dep > 0 else 0
+                    estado_garantia_calculado = f"Financiando (Saldo: {saldo_dep_fmt})"
+                    st.warning(f"💵 Saldo pendiente: **{saldo_dep_fmt}** — {cuotas_pendientes_dep:.1f} cuota(s) de {valor_por_cuota_dep_fmt} c/u.")
+    
+            # --- 6. DESGLOSE DE SERVICIOS MENSUALES ($) ---
+            st.markdown("### 6. Desglose de Servicios Mensuales ($)")
+                
+            with st.container(border=True):
+                st.markdown("##### **⚡ / 🔥 / 💧 / 🏛️ Servicios Públicos y Municipales**")
+                g1_col1, g1_col2 = st.columns(2)
+                    
+                with g1_col1:
+                    with st.container():
+                        s_col5, s_col6 = st.columns([3, 2])
+                        val_ede = float(u['edesal']) if u and u.get('edesal') is not None else 0.0
+                        edesal = s_col5.number_input("Monto Electricidad ($):", min_value=0.0, value=val_ede, step=500.0, disabled=not permitir_edicion, key="edesal_live")
+                        cargo_electricidad = s_col6.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_elec", disabled=not permitir_edicion)
+                        num_nis = st.number_input("NIS Nro:", min_value=0, value=0, step=1, key="id_nis", disabled=not permitir_edicion)
+                        
+                    st.markdown("---")
+                    with st.container():
+                        s_col7, s_col8 = st.columns([3, 2])
+                        val_gas = float(u['gas']) if u and u.get('gas') is not None else 0.0
+                        gas = s_col7.number_input("Monto Gas ($):", min_value=0.0, value=val_gas, step=500.0, disabled=not permitir_edicion, key="gas_live")
+                        cargo_gas = s_col8.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_gas", disabled=not permitir_edicion)
+                        cuenta_gas = st.text_input("Nro de Cuenta (Gas):", key="id_cta_gas", disabled=not permitir_edicion)
+                            
+                with g1_col2:
+                    with st.container():
+                        s_col9, s_col10 = st.columns([3, 2])
+                        val_mun = float(u['municipalidad']) if u and u.get('municipalidad') is not None else 0.0
+                        municipalidad = s_col9.number_input("Monto Municipalidad ($):", min_value=0.0, value=val_mun, step=500.0, disabled=not permitir_edicion, key="municipalidad_live")
+                        cargo_municipalidad = s_col10.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_mun", disabled=not permitir_edicion)
+                        finca_mun = st.text_input("Finca Nro:", key="id_finca_mun", disabled=not permitir_edicion)
+                        
+                    st.markdown("---")
+                    with st.container():
+                        s_col11, s_col12 = st.columns([3, 2])
+                        val_oos = float(u['ooss']) if u and u.get('ooss') is not None else 0.0
+                        ooss = s_col11.number_input("Monto OO.SS. ($):", min_value=0.0, value=val_oos, step=500.0, disabled=not permitir_edicion, key="ooss_live")
+                        cargo_ooss = s_col12.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_oos", disabled=not permitir_edicion)
+                        cuenta_oos = st.text_input("Nro de Cuenta (OO.SS.):", key="id_cta_oos", disabled=not permitir_edicion)
+    
+            with st.container(border=True):
+                st.markdown("##### **🏢 Complementos de Propiedad y Consorcio**")
+                g2_col1, g2_col2 = st.columns(2)
+                    
+                with g2_col1:
+                    s_col3, s_col4 = st.columns([3, 2])
+                    val_exp = float(u['expensas']) if u and u.get('expensas') is not None else 0.0
+                    expensas = s_col3.number_input("Monto Expensas ($):", min_value=0.0, value=val_exp, step=500.0, disabled=not permitir_edicion, key="expensas_live")
+                    cargo_expensas = s_col4.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_exp", disabled=not permitir_edicion)
+                        
+                with g2_col2:
+                    s_col13, s_col14 = st.columns([3, 2])
+                    val_coch = float(u['cochera']) if u and u.get('cochera') is not None else 0.0
+                    cochera = s_col13.number_input("Monto Cochera ($):", min_value=0.0, value=val_coch, step=1000.0, disabled=not permitir_edicion, key="cochera_live")
+                    cargo_cochera = s_col14.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=0, key="cargo_coch", disabled=not permitir_edicion)
+    
+            with st.container(border=True):
+                st.markdown("##### **📌 Impuesto Provincial Individual**")
+                s_col1, s_col2 = st.columns([3, 2])
+                val_imp_inmob = float(u['imp_inmobiliario']) if u and u.get('imp_inmobiliario') is not None else 0.0
+                imp_inmobiliario = s_col1.number_input("Imp. Inmobiliario ($):", min_value=0.0, value=val_imp_inmob, step=500.0, disabled=not permitir_edicion, key="imp_inmob_live")
+                cargo_inmobiliario = s_col2.selectbox("A cargo de:", ["Inquilino", "Propietario"], index=1, key="cargo_inmob", disabled=not permitir_edicion)
+    
+            notas_adicionales_input = st.text_input("Notas Adicionales de Servicios:", disabled=not permitir_edicion, key="notas_servicios_live")
+                
+            str_identificadores = f"[NIS: {num_nis}] [Cta Gas: {cuenta_gas}] [Finca: {finca_mun}] [Cta OO.SS.: {cuenta_oos}]"
+            detalles_pagos_str = f"| Elec: {cargo_electricidad} | Gas: {cargo_gas} | Mun: {cargo_municipalidad} | OOSS: {cargo_ooss} | Exp: {cargo_expensas} | Inmob: {cargo_inmobiliario}"
+                
+            if notas_adicionales_input.strip():
+                servicios_detalle = f"{str_identificadores} {detalles_pagos_str} | Notas: {notas_adicionales_input}"
+            else:
+                servicios_detalle = f"{str_identificadores} {detalles_pagos_str}"
+    
+            m_inmob_liq = imp_inmobiliario if cargo_inmobiliario == "Inquilino" else 0.0
+            m_exp_liq = expensas if cargo_expensas == "Inquilino" else 0.0
+            m_elec_liq = edesal if cargo_electricidad == "Inquilino" else 0.0
+            m_gas_liq = gas if cargo_gas == "Inquilino" else 0.0
+            m_mun_liq = municipalidad if cargo_municipalidad == "Inquilino" else 0.0
+            m_oos_liq = ooss if cargo_ooss == "Inquilino" else 0.0
+            m_coch_liq = cochera if cargo_cochera == "Inquilino" else 0.0
+                
+            servicios_total_calculado = (m_inmob_liq + m_exp_liq + m_elec_liq + m_gas_liq + m_mun_liq + m_oos_liq + m_coch_liq)
+    
+            # --- 7. CONSOLIDACIÓN DEL PAGO DE ALQUILER INICIAL (CÁLCULO DINÁMICO) ---
+            st.markdown("### 7. Consolidación del Pago de Alquiler Inicial")
+            cp_1, cp_2, cp_3 = st.columns(3)
+                
+            base_calculo_cobro = float(alquiler_actualizado) if not valor_vacio else 0.0
+                
+            alquiler_cobrado = cp_1.number_input(
+                "Monto Neto de Alquiler Cobrado ($):", 
+                min_value=0.0, 
+                value=base_calculo_cobro, 
+                step=5000.0, 
+                disabled=True,
+                key="alquiler_cobrado_live"
+            )
+                
+            total_pagado_calculado = alquiler_cobrado + servicios_total_calculado
+                
+            cp_2.number_input("Total de Servicios Adicionados ($):", value=float(servicios_total_calculado), disabled=True, key="box_total_servicios_live")
+            cp_3.number_input("TOTAL CONSOLIDADO COBRADO (Caja) ($):", value=float(total_pagado_calculado), disabled=True, key="box_total_caja_live")
+    
+                
+            # --- BOTÓN GUARDAR FINAL ---
+            st.markdown("---")
+                
+            boton_deshabilitado = (not permitir_edicion) or bloqueo_por_actualizacion or necesita_renovacion
+            texto_boton = "💾 Actualizar Contrato Existente" if (contrato_previo and "Actualizar" in modo_guardado) else "💾 Guardar y Registrar Contrato Completo"
+                
+            btn_guardar_final = st.button(texto_boton, disabled=boton_deshabilitado, type="primary", key="btn_guardar_contrato_final_main")
+                
+    
+                    
+                
+            if btn_guardar_final:
+                alq_act_fmt = f"${alquiler_actualizado:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                m_pag_fmt = f"${monto_pagare:,.0f}".replace(",", "v").replace(".", ",").replace("v", ".")
+                    
+                detalle_garantia_unificado = f"Pagaré: {tiene_pagare} ({m_pag_fmt}) | Depósito: {estado_garantia_calculado}"
+                registro_distribucion = f"[Alq.Actualizado: {alq_act_fmt} | Imp.Inmob: {cargo_inmobiliario}] {servicios_detalle}".strip()
+                    
+                inicio_str = inicio_contrato.strftime('%d/%m/%Y')
+                fin_str = fin_contrato.strftime('%d/%m/%Y')
+                prox_act_str = prox_actualizacion_calculada.strftime('%d/%m/%Y')
+                meses_atras_calculado = meses_atras
+                    
                 conn = conectar_db()
                 cursor = conn.cursor()
                 try:
-                    cursor.execute("INSERT INTO propiedades (alias_propiedad, calle, numero, departamento) VALUES (?, ?, ?, ?)", 
-                                   (alias.strip(), calle.strip(), numero.strip(), depto.strip()))
+                    if contrato_previo and "Actualizar" in modo_guardado:
+                        cursor.execute('''
+                            UPDATE contratos 
+                            SET propiedad_id=?, inquilino_id=?, estado=?, inicio_contrato=?, fin_contrato=?,
+                                calc_duracion=?, act_contrato=?, indice=?, monto_inicial=?, alquiler=?, prox_actualizacion=?,
+                                mes_contrato=?, mes_actualizacion_contrato=?, servicios=?, honorarios=?, monto_honorarios=?,
+                                cuota_honorarios=?, honorarios_pagados=?, cuotas_honorarios_pagadas=?,
+                                tipo_de_garantie=?, monto_garantia=?, garantia=?, garantia_pagada=?,
+                                cuotas_deposito=?, cuotas_deposito_pagadas=?,
+                                imp_inmobiliario=?, expensas=?, edesal=?, gas=?, municipalidad=?, ooss=?, servicios_total=?,
+                                cochera=?, alquiler_cobrado=?, total_pagado=?
+                            WHERE codigo = ?
+                        ''', (
+                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
+                            mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
+                            cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
+                            tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
+                            cuotas_deposito, cuotas_deposito_pagadas,
+                            imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
+                            cochera, alquiler_cobrado, total_pagado_calculado, id_contrato_a_modificar
+                        ))
+                        st.success(f"✔️ ¡Contrato N° {id_contrato_a_modificar} actualizado correctamente!")
+    
+                    else:
+                        if state_contrato == "Activo":
+                            cursor.execute('''
+                                UPDATE contratos 
+                                SET estado = 'Finalizado' 
+                                WHERE propiedad_id = ? AND estado = 'Activo'
+                            ''', (propiedad_id,))
+                            
+                        cursor.execute('''
+                            INSERT INTO contratos (
+                                propiedad_id, inquilino_id, estado, inicio_contrato, fin_contrato,
+                                calc_duracion, act_contrato, indice, monto_inicial, alquiler, prox_actualizacion,
+                                mes_contrato, mes_actualizacion_contrato, servicios, honorarios, monto_honorarios,
+                                cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
+                                tipo_de_garantie, monto_garantia, garantia, garantia_pagada,
+                                cuotas_deposito, cuotas_deposito_pagadas,
+                                imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total,
+                                cochera, alquiler_cobrado, total_pagado
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
+                            mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
+                            cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
+                            tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
+                            cuotas_deposito, cuotas_deposito_pagadas,
+                            imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
+                            cochera, alquiler_cobrado, total_pagado_calculado
+                        ))
+                        st.success("✔️ ¡Nuevo contrato creado e insertado con éxito!")
+    
                     conn.commit()
-                    st.success(f"Propiedad '{alias}' registrada.")
-                except sqlite3.IntegrityError:
-                    st.error("El Alias de la propiedad ya se encuentra registrado.")
+                    # Actualización del session_state post-guardado para mantener consistencia general
+                    st.session_state.ultimo_contrato = obtener_ultimo_contrato()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error de base de datos al impactar los cambios: {e}")
                 finally:
                     conn.close()
-
-
+    
 # =====================================================================
-    # MÓDULO DE EDICIÓN / MODIFICACIÓN DE DATOS EXISTENTES
-    # =====================================================================
-    st.markdown("---")
-    st.markdown("### 🔄 Modificar Datos de Inquilinos o Propiedades Existentes")
+# PESTAÑA 6: CARGA DE AUXILIARES (INQUILINOS / PROPIEDADES)
+# =====================================================================
+if tab_auxiliares:
+        with tab_auxiliares:
+            st.subheader("⚙️ Panel de Configuración de Entidades")
+                
+            sub_tab1, sub_tab2 = st.tabs(["👤 Nuevo Inquilino", "🏠 Nueva Propiedad"])
+                
+            with sub_tab1:
+                st.markdown("#### Registrar Nuevo Inquilino")
+                with st.form("form_inquilino", clear_on_submit=True):
+                    apellidos = st.text_input("Apellidos:")
+                    nombres = st.text_input("Nombres:")
+                    dni = st.text_input("DNI (Sin puntos):")
+                    email = st.text_input("Email:")
+                    tel = st.text_input("Teléfono:")
+                        
+                    btn_inq = st.form_submit_button("Guardar Inquilino")
+                        
+                    if btn_inq:
+                        if not apellidos or not nombres:
+                            st.error("Apellidos y Nombres son obligatorios.")
+                        else:
+                            # ... (tu lógica de conexión y guardado de inquilino) ...
+                            st.success("Inquilino guardado.")
     
-    # Consultamos los desplegables actualizados del sistema
-    dict_propiedades_edit, dict_inquilinos_edit = obtener_datos_desplegables()
-    
-    tipo_edicion = st.radio("Seleccione qué desea editar:", ["Inquilino", "Propiedad"], horizontal=True, key="radio_tipo_edicion")
-    
-    if tipo_edicion == "Inquilino":
-        if not dict_inquilinos_edit:
-            st.info("No hay inquilinos registrados para editar.")
-        else:
-            inquilino_a_editar = st.selectbox("Seleccione el Inquilino a modificar:", list(dict_inquilinos_edit.keys()), key="select_inq_edit")
-            id_inq_edit = dict_inquilinos_edit[inquilino_a_editar]
-            
-            # Buscamos los datos actuales en la base de datos
-            conn = conectar_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT apellidos, nombres, dni, telefono, email FROM inquilinos WHERE id = ?", (id_inq_edit,))
-            datos_inq = cursor.fetchone()
-            conn.close()
-            
-            if datos_inq:
-                with st.form("form_editar_inquilino"):
-                    st.markdown(f"**Editando ID Interno: {id_inq_edit}**")
-                    edit_apellido = st.text_input("Apellidos:", value=datos_inq[0])
-                    edit_nombre = st.text_input("Nombres:", value=datos_inq[1])
-                    edit_dni = st.text_input("DNI / CUIT:", value=datos_inq[2] if datos_inq[2] else "")
-                    edit_tel = st.text_input("Teléfono:", value=datos_inq[3] if datos_inq[3] else "")
-                    edit_email = st.text_input("Email:", value=datos_inq[4] if datos_inq[4] else "")
-                    
-                    btn_modificar_inq = st.form_submit_button("💾 Guardar Cambios Inquilino", type="primary")
-                    
-                    if btn_modificar_inq:
-                        if edit_apellido.strip() and edit_nombre.strip():
-                            edit_apellido_fmt = edit_apellido.strip().upper()  # Todo MAYÚSCULAS
-                            edit_nombre_fmt = edit_nombre.strip().title()      # Primera Letra Mayúscula
+            with sub_tab2:
+                st.markdown("📝 Registrar Nueva Propiedad")
+                with st.form("form_propiedad", clear_on_submit=True):
+                    alias = st.text_input("Alias de la Propiedad:")
+                    calle = st.text_input("Calle / Av:")
+                    numero = st.text_input("Número:")
+                    depto = st.text_input("Departamento:")
+                    propietario = st.text_input("Nombre del Propietario:")
+                    ciudad = st.text_input("Ciudad:")
+                    provincia = st.text_input("Provincia:")
+                    tipo = st.text_input("Características:")
+                        
+                    col1, col2 = st.columns(2)
+                    nis = col1.text_input("NIS Nro:")
+                    cuenta_gas = col2.text_input("Cuenta Nro (GAS):")
+                        
+                    col3, col4 = st.columns(2)
+                    finca = col3.text_input("Finca Nro:")
+                    cuenta_ooss = col4.text_input("Cuenta Nro (OO.SS):")
+                        
+                    nro_padron = st.text_input("Nro Padrón:")
+                        
+                    btn_prop = st.form_submit_button("Guardar Propiedad")
+                        
+                    if btn_prop:
+                        if not alias or not calle or not numero:
+                            st.warning("Completa los campos obligatorios.")
+                        else:
                             conn = conectar_db()
-                            cursor = conn.cursor()
                             try:
-
+                                cursor = conn.cursor()
+                                cursor.execute('''
+                                    INSERT INTO propiedades (alias_propiedad, calle, numero, departamento, propietario, 
+                                                            ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron) 
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (alias, calle, numero, depto, propietario, ciudad, provincia, tipo, 
+                                      nis, cuenta_gas, finca, cuenta_ooss, nro_padron))
+                                conn.commit()
+                                st.success("Propiedad guardada.")
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+                            finally:
+                                conn.close()
+    
+    
+    
+            # =====================================================================
+            # MÓDULO DE EDICIÓN / MODIFICACIÓN DE DATOS EXISTENTES
+            # =====================================================================
+            st.markdown("---")
+            st.markdown("### 🔄 Modificar Datos de Inquilinos o Propiedades Existentes")
+    
+            # Consultamos los desplegables actualizados del sistema
+            dict_propiedades_edit, dict_inquilinos_edit = obtener_datos_desplegables()
+    
+            # AQUÍ HACEMOS LA SEPARACIÓN EN PESTAÑAS
+            tab_edit_inq, tab_edit_prop = st.tabs(["👤 Editar Inquilino", "🏠 Editar Propiedad"])
+    
+            # --- PESTAÑA DE INQUILINOS ---
+            with tab_edit_inq:
+                if not dict_inquilinos_edit:
+                    st.info("No hay inquilinos registrados para editar.")
+                else:
+                    inquilino_a_editar = st.selectbox("Seleccione el Inquilino a modificar:", list(dict_inquilinos_edit.keys()), key="select_inq_edit_tab")
+                    id_inq_edit = dict_inquilinos_edit[inquilino_a_editar]
+                        
+                    conn = conectar_db()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT apellidos, nombres, dni, telefono, email FROM inquilinos WHERE id = ?", (id_inq_edit,))
+                    datos_inq = cursor.fetchone()
+                    conn.close()
+                        
+                    if datos_inq:
+                        crear_formulario_editar_inquilino(id_inq_edit, datos_inq)
+    
+            # --- PESTAÑA DE PROPIEDADES ---
+            with tab_edit_prop:
+                if not dict_propiedades_edit:
+                    st.info("No hay propiedades registradas para editar.")
+                else:
+                    propiedad_a_editar = st.selectbox("Seleccione la Propiedad a modificar:", list(dict_propiedades_edit.keys()), key="select_prop_edit_tab")
+                    id_prop_edit = dict_propiedades_edit[propiedad_a_editar]
+                        
+                    conn = conectar_db()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT alias_propiedad, calle, numero, departamento FROM propiedades WHERE id = ?", (id_prop_edit,))
+                    datos_prop = cursor.fetchone()
+                    conn.close()
+                        
+                    if datos_prop:
+                        crear_formulario_editar_propiedad(id_prop_edit, datos_prop)
+    
+# =====================================================================
+# PESTAÑA 7: PANEL DE GESTIÓN (DINÁMICO PARA SUPERADMIN Y ADMIN DE EMPRESA)
+# =====================================================================
+if tab_superadmin:
+    with tab_superadmin:
+        rol_sesion = st.session_state.get("rol")
+            
+        if rol_sesion == "superadmin":
+            st.subheader("👑 Panel de Control Global (SuperAdmin)")
+        else:
+            st.subheader(f"🏢 Panel de Administración — {st.session_state.get('nombre_empresa', 'Mi Empresa')}")
+            
+        # 1. Definición de subpestañas dinámicas según el rol de la sesión
+        lista_subtabs = ["👤 Crear Usuarios", "🔐 Editar Permisos"]
+        if rol_sesion == "superadmin":
+            lista_subtabs.append("🚀 Importar / Exportar Datos (CSV)")
+                
+        subtabs_objetos = st.tabs(lista_subtabs)
+        subtab_usuarios = subtabs_objetos[0]
+        subtab_permisos = subtabs_objetos[1]
+        if rol_sesion == "superadmin":
+            subtab_csv = subtabs_objetos[2]
+                
+        # =====================================================================
+        # SUBPESTAÑA 1: CREACIÓN DE USUARIOS (Adaptada dinámicamente)
+        # =====================================================================
+        with subtab_usuarios:
+            st.markdown("#### Registrar nuevo usuario en el sistema")
+                
+            with st.form("form_crear_usuario", clear_on_submit=True):
+                st.markdown("#### ➕ Formulario de Alta de Operadores")
+                    
+                new_username = st.text_input("Nombre de Usuario (Login):").strip()
+                new_password = st.text_input("Contraseña:", type="password")
+                    
+                col_name1, col_name2 = st.columns(2)
+                new_apellidos = col_name1.text_input("Apellidos:")
+                new_nombres = col_name2.text_input("Nombres:")
+                    
+                # Control visual y restricción de datos según el rol
+                if rol_sesion == "admin":
+                    new_empresa = st.text_input("Nombre de la Empresa:", value=st.session_state.get("nombre_empresa"), disabled=True)
+                    new_rol = st.selectbox("Rol del Usuario:", ["user", "admin"])
+                else:
+                    new_empresa = st.text_input("Nombre de la Empresa / Inmobiliaria:").strip()
+                    new_rol = st.selectbox("Rol del Usuario:", ["user", "admin", "superadmin"])
+                    
+                btn_crear_user = st.form_submit_button("➕ Crear Usuario", type="primary")
+                    
+                if btn_crear_user:
+                    if new_username and new_password and new_empresa and new_apellidos and new_nombres:
+                            
+                        try:
+                            conn = conectar_db_central()
+                            cursor = conn.cursor()
                                 
-
-                                cursor.execute('''
-                                    UPDATE inquilinos 
-                                    SET apellidos = ?, nombres = ?, dni = ?, telefono = ?, email = ? 
-                                    WHERE id = ?
-                                ''', (edit_apellido_fmt, edit_nombre_fmt, edit_dni.strip(), edit_tel.strip(), edit_email.strip(), id_inq_edit))
-                                conn.commit()
-                                st.success(f"¡Datos de {edit_apellido}, {edit_nombre} actualizados con éxito!")
-                                st.rerun()
-                            except sqlite3.IntegrityError:
-                                st.error("Ya existe otro inquilino registrado con ese mismo Nombre y Apellido.")
-                            finally:
+                            # Determinar el directorio y el archivo de base de datos de destino
+                            if rol_sesion == "admin":
+                                # Si es un admin de empresa, heredamos de forma estricta su base de datos actual
+                                ruta_db_completa = st.session_state.get("empresa_db")
+                                nombre_directorio = os.path.dirname(ruta_db_completa)
+                            else:
+                                # Si es superadmin y crea una empresa nueva:
+                                token_carpeta = secrets.token_hex(8)
+                                nombre_directorio = token_carpeta  
+                                nombre_archivo_final = "data.db"
+                                ruta_db_completa = os.path.join(nombre_directorio, nombre_archivo_final)
+    
+                            # Asegurar la existencia física del directorio
+                            if nombre_directorio and not os.path.exists(nombre_directorio):
+                                os.makedirs(nombre_directorio, exist_ok=True)
+                                st.info(f"📁 Directorio seguro creado de forma física en el servidor.")
+                                
+                            # Cifrado seguro utilizando Bcrypt
+                            rondas_seguridad = st.secrets["seguridad"]["bcrypt_rounds"]
+                            salt = bcrypt.gensalt(rounds=rondas_seguridad)
+                            hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
+                                
+                            # Insertar el registro en la base centralizada de enrutamiento
+                            cursor.execute('''
+                                INSERT INTO usuarios_central (username, password_hash, nombre_empresa, archivo_db, rol, apellidos, nombres)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                new_username, 
+                                hashed_pw, 
+                                new_empresa, 
+                                ruta_db_completa, 
+                                new_rol, 
+                                new_apellidos.strip().upper(), 
+                                new_nombres.strip().title()
+                            ))
+                            conn.commit()
+                                
+                            # Inicializar el archivo físico SQLite si no existía
+                            if not os.path.exists(ruta_db_completa):
+                                conn_nueva_empresa = sqlite3.connect(ruta_db_completa)
+                                crear_tablas_empresa(conn_nueva_empresa)
+                                conn_nueva_empresa.close()
+                                st.info(f"📁 Base de datos inicializada con tablas para: {new_empresa}")
+    
+                            st.success(f"¡Usuario '{new_username}' registrado con éxito!")
+                            st.balloons()                            
+                                
+                        except sqlite3.IntegrityError:
+                            st.error("Error: El nombre de usuario ya se encuentra registrado.")
+                        except Exception as e:
+                            st.error(f"Error al organizar el entorno de base de datos: {e}")
+                        finally:
+                            if 'conn' in locals():
                                 conn.close()
-                        else:
-                            st.error("Los campos Nombre y Apellido son obligatorios.")
-
-    elif tipo_edicion == "Propiedad":
-        if not dict_propiedades_edit:
-            st.info("No hay propiedades registradas para editar.")
-        else:
-            propiedad_a_editar = st.selectbox("Seleccione la Propiedad a modificar:", list(dict_propiedades_edit.keys()), key="select_prop_edit")
-            id_prop_edit = dict_propiedades_edit[propiedad_a_editar]
-            
-            # Buscamos los datos actuales de la propiedad
-            conn = conectar_db()
-            cursor = conn.cursor()
-            cursor.execute("SELECT alias_propiedad, calle, numero, departamento FROM propiedades WHERE id = ?", (id_prop_edit,))
-            datos_prop = cursor.fetchone()
-            conn.close()
-            
-            if datos_prop:
-                with st.form("form_editar_propiedad"):
-                    st.markdown(f"**Editando ID Interno: {id_prop_edit}**")
-                    edit_alias = st.text_input("Alias de la Propiedad:", value=datos_prop[0])
-                    edit_calle = st.text_input("Calle / Av:", value=datos_prop[1])
-                    edit_numero = st.text_input("Número:", value=datos_prop[2])
-                    edit_depto = st.text_input("Departamento / Piso / Bloque (Opcional):", value=datos_prop[3] if datos_prop[3] else "")
+                    else:
+                        st.error("Por favor completa todos los campos del formulario.")
+    
+        # =====================================================================
+        # SUBPESTAÑA 2: ASIGNACIÓN DE PERMISOS (Multi-Tenant Seguro)
+        # =====================================================================
+        with subtab_permisos:
+            st.markdown("### 👤 Editar Usuarios y Permisos de Pestañas")
+    
+            conn_central = conectar_db_central()
+            cursor_central = conn_central.cursor()
+    
+            if rol_sesion == "superadmin":
+                cursor_central.execute("SELECT username, nombre_empresa, rol, archivo_db FROM usuarios_central")
+            elif rol_sesion == "admin":
+                cursor_central.execute('''
+                    SELECT username, nombre_empresa, rol, archivo_db 
+                    FROM usuarios_central 
+                    WHERE archivo_db = ?
+                ''', (st.session_state.get("empresa_db"),))
+            else:
+                st.error("🚫 No tienes permisos suficientes para gestionar usuarios.")
+                conn_central.close()
+                st.stop()
+    
+            usuarios_lista = cursor_central.fetchall()
+            conn_central.close()
+    
+            dict_usuarios = {f"{u[0]} ({u[1]} - Rol: {u[2]})": (u[0], u[3]) for u in usuarios_lista}
+    
+            if dict_usuarios:
+                usuario_form_label = st.selectbox("Seleccione el usuario que desea editar:", list(dict_usuarios.keys()))
+                user_seleccionado, ruta_db_user = dict_usuarios[usuario_form_label]
+    
+                conn_central = conectar_db_central()
+                cursor_central = conn_central.cursor()
+                cursor_central.execute("SELECT rol, nombre_empresa FROM usuarios_central WHERE username = ?", (user_seleccionado,))
+                datos_user_actual = cursor_central.fetchone()
+                conn_central.close()
+    
+                rol_actual_user = datos_user_actual[0] if datos_user_actual else "user"
+                empresa_user = datos_user_actual[1] if datos_user_actual else ""
+    
+                with st.form(f"form_editar_{user_seleccionado}"):
+                    st.markdown(f"🔹 **Modificando a:** `{user_seleccionado}` — Empresa: *{empresa_user}*")
+                        
+                    nueva_pass = st.text_input("🔑 Cambiar Contraseña (Dejar vacío para mantener la actual):", type="password")
+                        
+                    opciones_roles = ["user", "admin"]
+                    if rol_sesion == "superadmin":
+                        opciones_roles.append("superadmin")
+                        
+                    nuevo_rol = st.selectbox("🎖️ Rol en el Sistema:", opciones_roles, index=opciones_roles.index(rol_actual_user) if rol_actual_user in opciones_roles else 0)
+    
+                    st.markdown("---")
+                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para usuarios con rol 'user')")
+                        
+                    permisos_actuales = []
+                    if ruta_db_user and os.path.exists(ruta_db_user):
+                        try:
+                            conn_emp = sqlite3.connect(ruta_db_user)
+                            cursor_emp = conn_emp.cursor()
+                            cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
+                            if cursor_emp.fetchone():
+                                cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
+                                permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
+                            conn_emp.close()
+                        except Exception as e:
+                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
+    
+                    p_dash = st.checkbox("📈 Tablero de Control", value=("dashboard" in permisos_actuales))
+                    p_plan = st.checkbox("📊 Planilla de Contratos", value=("planilla" in permisos_actuales))
+                    p_pagos = st.checkbox("💰 Registrar / Emitir Recibo", value=("pagos" in permisos_actuales))
+                    p_hist = st.checkbox("🗄️ Historial de Caja", value=("historial_pagos" in permisos_actuales))
+                    p_carga = st.checkbox("📝 Carga de Contratos", value=("carga" in permisos_actuales))
+                    p_aux = st.checkbox("⚙️ Cargar Inquilinos / Propiedades", value=("auxiliares" in permisos_actuales))
+    
+                    btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
+    
+                    if btn_guardar_cambios:
+                        conn_central = conectar_db_central()
+                        cursor_central = conn_central.cursor()
+                        try:
+                            # 1. Actualizar datos en BD Central
+                            if nueva_pass.strip():
+                                rondas = st.secrets["seguridad"]["bcrypt_rounds"]
+                                hashed = bcrypt.hashpw(nueva_pass.encode('utf-8'), bcrypt.gensalt(rounds=rondas)).decode('utf-8')
+                                cursor_central.execute("UPDATE usuarios_central SET password_hash = ?, rol = ? WHERE username = ?", (hashed, nuevo_rol, user_seleccionado))
+                            else:
+                                cursor_central.execute("UPDATE usuarios_central SET rol = ? WHERE username = ?", (nuevo_rol, user_seleccionado))
+                            conn_central.commit()
+                                
+                            # 2. Sincronización en BD Empresa
+                            if ruta_db_user and os.path.exists(ruta_db_user):
+                                conn_emp = sqlite3.connect(ruta_db_user)
+                                cursor_emp = conn_emp.cursor()
+                                    
+                                # Asegurar existencia de la tabla
+                                cursor_emp.execute('''CREATE TABLE IF NOT EXISTS permisos_usuario 
+                                                    (username TEXT, pestana TEXT, PRIMARY KEY(username, pestana))''')
+                                    
+                                cursor_emp.execute("DELETE FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
+                                    
+                                nuevas_pestanas = []
+                                if p_dash: nuevas_pestanas.append("dashboard")
+                                if p_plan: nuevas_pestanas.append("planilla")
+                                if p_pagos: nuevas_pestanas.append("pagos")
+                                if p_hist: nuevas_pestanas.append("historial_pagos")
+                                if p_carga: nuevas_pestanas.append("carga")
+                                if p_aux: nuevas_pestanas.append("auxiliares")
+                                    
+                                for p in nuevas_pestanas:
+                                    cursor_emp.execute("INSERT INTO permisos_usuario (username, pestana) VALUES (?, ?)", (user_seleccionado, p))
+                                    
+                                conn_emp.commit()
+                                conn_emp.close()
+                                st.success(f"Permisos de '{user_seleccionado}' actualizados. Se ha forzado la creación de la tabla de permisos.")
+                                
+                        except Exception as e:
+                            st.error(f"Error al sincronizar: {e}")
+                        finally:
+                            conn_central.close()
+                            st.rerun() # FORZAMOS EL REFRESH PARA VER LOS CAMBIOS
+            else:
+                st.info("No se encontraron usuarios activos en este entorno empresarial.")
+    
+        # =====================================================================
+        # SUBPESTAÑA 3: EXCLUSIVA MÓDULO CSV (Solo visible para SuperAdmin)
+        # =====================================================================
+        if rol_sesion == "superadmin":
+            with subtab_csv:
+                st.markdown("### 📊 Operaciones Avanzadas de Migración (CSV)")
+                st.info("Módulo global para inyección directa y respaldos analíticos de tablas SQLite.")
                     
-                    btn_modificar_prop = st.form_submit_button("💾 Guardar Cambios Propiedad", type="primary")
+                # MAPEO ACTUALIZADO: Sin 'SERVICIOS PACTADOS'
+                MAPEO_CONTRATOS = {
+                    "ALIAS PROPIEDAD": "propiedad_id",
+                    "DNI INQUILINO": "inquilino_id",
+                    "ESTADO": "estado",
+                    "INICIO CONTRATO": "inicio_contrato",
+                    "FIN CONTRATO": "fin_contrato",
+                    "DURACIÓN (MESES)": "calc_duracion",
+                    "ACTUALIZACIÓN": "act_contrato",
+                    "ÍNDICE": "indice",
+                    "MONTO INICIAL": "monto_inicial",
+                    "ALQUILER BASE": "alquiler",
+                    "PRÓX ACTUALIZACIÓN": "prox_actualizacion",
+                    "MES CONTRATO": "mes_contrato",
+                    "MES ACTUALIZACIÓN": "mes_actualizacion_contrato",
+                    "HONORARIOS": "honorarios",
+                    "MONTO HONORARIOS": "monto_honorarios",
+                    "CUOTAS HONORARIOS": "cuota_honorarios",
+                    "HONORARIOS PAGADOS": "honorarios_pagados",
+                    "TIPO GARANTÍA": "tipo_de_garantie",
+                    "VALOR GARANTÍA": "monto_garantia",
+                    "GARANTÍA": "garantia",
+                    "GARANTÍA PAGADA": "garantia_pagada",
+                    "IMP INMO": "imp_inmobiliario",
+                    "EXPENSAS BASE": "expensas",
+                    "LUZ BASE": "edesal",
+                    "GAS BASE": "gas",
+                    "MUNI BASE": "municipalidad",
+                    "AGUA BASE": "ooss",
+                    "COCHERA BASE": "cochera"
+                }
+    
+                conn_central = conectar_db_central()
+                df_empresas = pd.read_sql_query("SELECT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
+                conn_central.close()
                     
-                    if btn_modificar_prop:
-                        if edit_alias.strip() and edit_calle.strip() and edit_numero.strip():
-                            conn = conectar_db()
-                            cursor = conn.cursor()
+                nombre_db_central = st.secrets["database"]["archivo_central"]
+                dict_bases = {"Sistema Central (Usuarios y Enrutamiento)": nombre_db_central}
+                    
+                for _, r in df_empresas.iterrows():
+                    if r['archivo_db']: 
+                        dict_bases[f"Empresa: {r['nombre_empresa']} ({r['archivo_db']})"] = r['archivo_db']
+                        
+                base_seleccionada = st.selectbox("1️⃣ Seleccione la Base de Datos a operar:", options=list(dict_bases.keys()))
+                db_file_target = dict_bases[base_seleccionada]
+                    
+                try:
+                    conn_target = sqlite3.connect(db_file_target)
+                    cursor_target = conn_target.cursor()
+                    cursor_target.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+                    tablas_disponibles = [row[0] for row in cursor_target.fetchall()]
+                    conn_target.close()
+                except Exception as e:
+                    tablas_disponibles = []
+                    st.error(f"Error de acceso en el archivo seleccionado: {e}")
+                        
+                if tablas_disponibles:
+                    tabla_seleccionada = st.selectbox("2️⃣ Seleccione la Tabla destino:", options=tablas_disponibles)
+                        
+                    col_exp, col_imp = st.columns(2)
+                        
+                    # --- OPERACIÓN A: EXPORTACIÓN (BAJAR CSV) ---
+                    with col_exp:
+                        st.markdown("#### 📥 Extraer Datos (Bajar CSV)")
+                        try:
+                            conn_target = sqlite3.connect(db_file_target)
+                                
+                            if tabla_seleccionada == "contratos":
+                                query = '''
+                                    SELECT 
+                                        p.alias_propiedad AS [ALIAS PROPIEDAD],
+                                        i.dni AS [DNI INQUILINO],
+                                        c.estado AS [ESTADO],
+                                        c.inicio_contrato AS [INICIO CONTRATO],
+                                        c.fin_contrato AS [FIN CONTRATO],
+                                        c.calc_duracion AS [DURACIÓN (MESES)],
+                                        c.act_contrato AS [ACTUALIZACIÓN],
+                                        c.indice AS [ÍNDICE],
+                                        c.monto_inicial AS [MONTO INICIAL],
+                                        c.alquiler AS [ALQUILER BASE],
+                                        c.prox_actualizacion AS [PRÓX ACTUALIZACIÓN],
+                                        c.mes_contrato AS [MES CONTRATO],
+                                        c.mes_actualizacion_contrato AS [MES ACTUALIZACIÓN],
+                                        c.honorarios AS [HONORARIOS],
+                                        c.monto_honorarios AS [MONTO HONORARIOS],
+                                        c.cuota_honorarios AS [CUOTAS HONORARIOS],
+                                        c.honorarios_pagados AS [HONORARIOS PAGADOS],
+                                        c.tipo_de_garantie AS [TIPO GARANTÍA],
+                                        c.monto_garantia AS [VALOR GARANTÍA],
+                                        c.garantia AS [GARANTÍA],
+                                        c.garantia_pagada AS [GARANTÍA PAGADA],
+                                        c.imp_inmobiliario AS [IMP INMO],
+                                        c.expensas AS [EXPENSAS BASE],
+                                        c.edesal AS [LUZ BASE],
+                                        c.gas AS [GAS BASE],
+                                        c.municipalidad AS [MUNI BASE],
+                                        c.ooss AS [AGUA BASE],
+                                        c.cochera AS [COCHERA BASE]
+                                    FROM contratos c
+                                    JOIN propiedades p ON c.propiedad_id = p.id
+                                    JOIN inquilinos i ON c.inquilino_id = i.id
+                                    ORDER BY c.codigo DESC
+                                '''
+                            else:
+                                query = f"SELECT * FROM [{tabla_seleccionada}]"
+    
+                            df_export = pd.read_sql_query(query, conn_target)
+                            conn_target.close()
+                                
+                            if tabla_seleccionada != "contratos":
+                                if 'id' in df_export.columns:
+                                    df_export = df_export.drop(columns=['id'])
+                            else:
+                                # MODIFICACIONES EXPORTACIÓN:
+                                if "[DNI INQUILINO]" in df_export.columns:
+                                    df_export["DNI INQUILINO"] = df_export["DNI INQUILINO"].astype(str).str.split('.').str[0]
+                                    
+                                if "ACTUALIZACIÓN" in df_export.columns:
+                                    df_export["ACTUALIZACIÓN"] = pd.to_numeric(df_export["ACTUALIZACIÓN"], errors='coerce').fillna(0).astype(int)
+                                    
+                                if "MONTO HONORARIOS" in df_export.columns:
+                                    df_export["MONTO HONORARIOS"] = pd.to_numeric(df_export["MONTO HONORARIOS"], errors='coerce').round(2)
+                                
+                            st.write(f"Vista previa de `{tabla_seleccionada}` ({len(df_export)} registros):")
+                            st.dataframe(df_export.head(5), use_container_width=True, hide_index=True)
+                                
+                            csv_data = df_export.to_csv(index=False, sep=";", encoding="latin-1")
+                                
+                            st.download_button(
+                                label=f"⬇️ Descargar tabla '{tabla_seleccionada}' como CSV",
+                                data=csv_data,
+                                file_name=f"backup_{tabla_seleccionada}_{datetime.now().strftime('%Y%m%d')}.csv",
+                                mime="text/csv",
+                                use_container_width=True
+                            )
+                        except Exception as e:
+                            st.error(f"Fallo al compilar exportación: {e}")
+                                
+    
+                    # --- OPERACIÓN B: INYECCIÓN / PROCESO INVERSO (SUBIR CSV) ---
+                    with col_imp:
+                        st.markdown("#### 📤 Insertar / Sobrescribir Datos (Subir CSV)")
+                            
+                        archivo_subido = st.file_uploader(
+                            f"Cargar archivo para inyectar en '{tabla_seleccionada}'", 
+                            type=["csv"], 
+                            key=f"uploader_{db_file_target}_{tabla_seleccionada}"
+                        )
+    
+                        if archivo_subido is not None:
                             try:
-                                cursor.execute('''
-                                    UPDATE propiedades 
-                                    SET alias_propiedad = ?, calle = ?, numero = ?, departamento = ? 
-                                    WHERE id = ?
-                                ''', (edit_alias.strip(), edit_calle.strip(), edit_numero.strip(), edit_depto.strip(), id_prop_edit))
-                                conn.commit()
-                                st.success(f"¡Propiedad '{edit_alias}' modificada con éxito!")
+                                # 1. Usamos 'utf-8-sig' para remover automáticamente el 'ï»¿' si Excel lo insertó
+                                # Si arroja error por caracteres extraños, retrocede ordenadamente a 'latin-1'
+                                try:
+                                    df = pd.read_csv(archivo_subido, sep=';', encoding='utf-8-sig')
+                                except UnicodeDecodeError:
+                                    archivo_subido.seek(0) # Resetear puntero del archivo
+                                    df = pd.read_csv(archivo_subido, sep=';', encoding='latin-1')
+                                    
+                                # 2. LIMPIEZA CLAVE: Remover espacios en blanco residuales de los nombres de columnas
+                                df.columns = [c.strip() for c in df.columns]
+                                    
+                                if tabla_seleccionada != "contratos":
+                                    if 'id' in df.columns:
+                                        df = df.drop(columns=['id'])
+                                            
+                                import numpy as np
+                                df = df.replace({pd.NA: None, np.nan: None})
+                                    
+                                columnas_csv = list(df.columns)
+                                    
+                                # --- PROCESADOR EXCLUSIVO PARA CONTRATOS ---
+                                if tabla_seleccionada == "contratos":
+                                    if "ALIAS PROPIEDAD" not in columnas_csv or "DNI INQUILINO" not in columnas_csv:
+                                        st.error("❌ El CSV debe incluir obligatoriamente las columnas 'ALIAS PROPIEDAD' y 'DNI INQUILINO'.")
+                                        st.info(f"Columnas detectadas en tu archivo: {columnas_csv}")
+                                    else:
+                                        conn = sqlite3.connect(db_file_target)
+                                        cursor = conn.cursor()
+                                            
+                                        contratos_listos_para_db = []
+                                        errores_relacion = []
+                                            
+                                        st.info("🔄 Procesando archivo inverso de contratos...")
+                                            
+                                        for index, fila in df.iterrows():
+                                            # 🌟 LIMPIEZA CLAVE: Sanitizamos el alias de la propiedad al inicio del bucle
+                                            alias_prop_limpio = str(fila['ALIAS PROPIEDAD']).strip() if fila['ALIAS PROPIEDAD'] is not None else ""
+                                                
+                                            if alias_prop_limpio == "":
+                                                errores_relacion.append(f"Fila {index+2}: El campo 'ALIAS PROPIEDAD' está vacío.")
+                                                continue
+                                            if fila['DNI INQUILINO'] is None or str(fila['DNI INQUILINO']).strip() == "":
+                                                errores_relacion.append(f"Fila {index+2}: El campo 'DNI INQUILINO' está vacío.")
+                                                continue
+    
+                                            # Usamos la variable limpia aquí
+                                            cursor.execute("SELECT id FROM propiedades WHERE TRIM(alias_propiedad) = ?", (alias_prop_limpio,))
+                                            res_prop = cursor.fetchone()
+                                                
+                                            # REGLA 1 INVERSA: Sanitizar DNI para buscar coincidencias exactas en la tabla de inquilinos
+                                            dni_limpio = str(fila['DNI INQUILINO']).split('.')[0].strip()
+                                            cursor.execute("SELECT id FROM inquilinos WHERE dni = ?", (dni_limpio,))
+                                            res_inq = cursor.fetchone()
+                                                
+                                            if not res_prop:
+                                                errores_relacion.append(f"Fila {index+2}: La propiedad con alias '{alias_prop_limpio}' no existe.")
+                                                continue
+                                            if not res_inq:
+                                                errores_relacion.append(f"Fila {index+2}: El inquilino con DNI '{dni_limpio}' no existe.")
+                                                continue
+                                                
+                                            registro_fila = {}
+                                            registro_fila['propiedad_id'] = res_prop[0]
+                                            registro_fila['inquilino_id'] = res_inq[0]
+                                                
+                                            # Extraemos y sanitizamos todos los campos del mapeo
+                                            for alias_sql, col_db in MAPEO_CONTRATOS.items():
+                                                if col_db not in ['propiedad_id', 'inquilino_id']:
+                                                    valor_celda = fila[alias_sql] if alias_sql in df.columns else None
+                                                        
+                                                    # Tratar campos especiales (Fechas)
+                                                    if col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
+                                                        if valor_celda is not None and str(valor_celda).strip() != "":
+                                                            try:
+                                                                # Convierte DD/MM/AAAA a YYYY-MM-DD para SQLite
+                                                                valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
+                                                            except Exception:
+                                                                valor_celda = str(valor_celda).strip()
+                                                        else:
+                                                            valor_celda = None
+                                                                
+                                                    # Tratar campos numéricos enteros
+                                                    elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
+                                                        try:
+                                                            valor_celda = int(float(str(valor_celda).split('.')[0]))
+                                                        except Exception:
+                                                            valor_celda = 0
+                                                                
+                                                    # Tratar campos flotantes / monetarios
+                                                    elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
+                                                        try:
+                                                            valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
+                                                        except Exception:
+                                                            valor_celda = 0.0
+                                                        
+                                                    # Textos estándar
+                                                    elif valor_celda is not None:
+                                                        valor_celda = str(valor_celda).strip()
+    
+                                                    registro_fila[col_db] = valor_celda
+                                                
+                                            # Validamos estrictamente que la fecha de inicio obligatoria no haya quedado nula
+                                            if registro_fila.get('inicio_contrato') is None:
+                                                errores_relacion.append(f"Fila {index+2}: Error de formato o ausencia en la fecha 'INICIO CONTRATO'.")
+                                                continue
+                                                    
+                                            contratos_listos_para_db.append(tuple(registro_fila[c] for c in MAPEO_CONTRATOS.values()))
+                                            
+                                        # --- REEMPLÁZALO POR ESTO ---
+                                        # Cerramos CUALQUIER cursor o conexión residual del análisis previo para liberar el archivo
+                                        try:
+                                            conn.close()
+                                        except:
+                                            pass
+    
+                                        if errores_relacion:
+                                            st.error("❌ Inconsistencias de datos detectadas:")
+                                            for err in errores_relacion[:12]:
+                                                st.write(err)
+                                            if len(errores_relacion) > 12:
+                                                st.write(f"...y otros {len(errores_relacion)-12} errores.")
+                                        else:
+                                            columnas_db = list(MAPEO_CONTRATOS.values())
+                                            signos_pregunta = ", ".join(["?"] * len(columnas_db))
+                                            query = f"INSERT INTO contratos ({', '.join(columnas_db)}) VALUES ({signos_pregunta})"
+                                                
+                                            # Abrimos un bloque 'with' exclusivo para la escritura, asegurando el cierre inmediato
+                                            try:
+                                                with sqlite3.connect(db_file_target) as conn_escritura:
+                                                    cursor_escritura = conn_escritura.cursor()
+                                                    cursor_escritura.executemany(query, contratos_listos_para_db)
+                                                    conn_escritura.commit()
+                                                    
+                                                # Una vez fuera del 'with', la base de datos está 100% liberada y cerrada. Ya podemos usar rerun.
+                                                st.success(f"¡Éxito! El proceso inverso inyectó {len(contratos_listos_para_db)} contratos formateados correctamente.")
+                                                st.balloons()
+                                                st.rerun()
+                                                    
+                                            except sqlite3.OperationalError as op_err:
+                                                if "locked" in str(op_err).lower():
+                                                    st.error("⚠️ La base de datos sigue ocupada por otra operación de lectura en segundo plano. Por favor, intenta presionar el botón de nuevo en unos segundos.")
+                                                else:
+                                                    st.error(f"❌ Error operativo en SQLite: {op_err}")
+                                                
+                                # --- LÓGICA ESTÁNDAR PARA OTRAS TABLAS ---
+                                else:
+                                    esquema_esperado = ESQUEMAS_VALIDOS.get(tabla_seleccionada, [])
+                                    if columnas_csv == esquema_esperado:
+                                            
+                                        # 🛠️ AGREGA ESTO AQUÍ: Limpieza para la tabla de propiedades
+                                        if tabla_seleccionada == "propiedades" and "alias_propiedad" in df.columns:
+                                            df["alias_propiedad"] = df["alias_propiedad"].astype(str).str.strip()
+    
+                                        # 🛠️ TRATAMIENTO ESPECÍFICO PARA COLUMNA "TELEFONO" EN INQUILINOS (Ya existente en tu código)
+                                        if tabla_seleccionada == "inquilinos" and "telefono" in df.columns:
+                                            df["telefono"] = df["telefono"].astype(str).str.split('.').str[0]
+                                            df["telefono"] = df["telefono"].replace({"nan": None, "None": None, "": None})
+    
+                                        conn = sqlite3.connect(db_file_target)
+                                        cursor = conn.cursor()
+                                            
+                                        cursor.execute(f"SELECT * FROM [{tabla_seleccionada}]")
+                                        columnas_db_actuales = [description[0] for description in cursor.description]
+                                        df_existente = pd.DataFrame(cursor.fetchall(), columns=columnas_db_actuales)
+                                            
+                                        columna_clave = 'alias_propiedad' if tabla_seleccionada == 'propiedades' else 'dni'
+                                            
+                                        if not df_existente.empty:
+                                            # Aseguramos que la comparación de claves ignore diferencias por tipos de datos
+                                            existentes = set(df_existente[columna_clave].astype(str).unique())
+                                            df_nuevos = df[~df[columna_clave].astype(str).isin(existentes)]
+                                            duplicados_omitidos = len(df) - len(df_nuevos)
+                                        else:
+                                            df_nuevos = df
+                                            duplicados_omitidos = 0
+                                            
+                                        if not df_nuevos.empty:
+                                            columnas_sql = ", ".join([f"[{c}]" for c in esquema_esperado])
+                                            signos_pregunta = ", ".join(["?"] * len(esquema_esperado))
+                                            query = f"INSERT INTO [{tabla_seleccionada}] ({columnas_sql}) VALUES ({signos_pregunta})"
+                                                
+                                            # Convertimos el DataFrame a un diccionario de registros para asegurar que los valores 'None' se respeten de forma nativa
+                                            datos_a_inyectar = [tuple(reg[c] for c in esquema_esperado) for reg in df_nuevos.to_dict(orient='records')]
+                                                
+                                            cursor.executemany(query, datos_a_inyectar)
+                                            conn.commit()
+                                                
+                                            st.success(f"¡Se han importado {len(df_nuevos)} registros en '{tabla_seleccionada}'!")
+                                            if duplicados_omitidos > 0:
+                                                st.warning(f"⚠️ Se omitieron {duplicados_omitidos} registros duplicados por `{columna_clave}`.")
+                                            st.balloons()
+                                            conn.close()
+                                            st.rerun()
+                                        else:
+                                            st.warning(f"⚠️ Todos los registros del CSV ya existen en la tabla '{tabla_seleccionada}'.")
+                                            conn.close()
+                                    else:
+                                        st.error("❌ El esquema de columnas del CSV no coincide con los campos requeridos.")
+                                        st.info(f"Campos requeridos por el sistema:\n{esquema_esperado}")
+                            except Exception as e:
+                                st.error(f"Error al procesar el archivo CSV: {e}")
+    
+# =====================================================================
+        # SECCIÓN EXCLUSIVA: ELIMINACIÓN DE EMPRESAS (Solo SuperAdmin)
+        # =====================================================================
+        if rol_sesion == "superadmin":
+            st.markdown("---")
+            st.markdown("### 🚨 Zona de Peligro: Eliminar Empresa y Entorno")
+                
+            with st.expander("❌ Hacer clic aquí para gestionar la eliminación de empresas", expanded=False):
+                st.warning("⚠️ Esta acción es irreversible. Se borrarán permanentemente todos los registros del sistema central y el archivo físico de la base de datos.")
+                    
+                # 1. Volvemos a leer las empresas registradas para tener la lista fresca
+                conn_central = conectar_db_central()
+                df_empresas_del = pd.read_sql_query("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
+                conn_central.close()
+                    
+                if not df_empresas_del.empty:
+                    # Mapeamos los nombres comerciales a su ruta de base de datos
+                    dict_empresas_del = {row['nombre_empresa']: row['archivo_db'] for _, row in df_empresas_del.iterrows()}
+                        
+                    empresa_a_eliminar = st.selectbox(
+                        "Seleccione la empresa que desea destruir por completo:",
+                        options=list(dict_empresas_del.keys()),
+                        key="sb_eliminar_empresa"
+                    )
+                        
+                    # Campo de doble confirmación por seguridad escribiendo el nombre de la empresa
+                    confirmacion_texto = st.text_input(
+                        f"Para confirmar, escriba exactamente el nombre de la empresa (**{empresa_a_eliminar}**):"
+                    )
+                        
+                    btn_destruir_empresa = st.button("💥 ELIMINAR EMPRESA Y BORRAR DISCO", type="primary", use_container_width=True)
+                        
+                    if btn_destruir_empresa:
+                        if confirmacion_texto == empresa_a_eliminar:
+                            ruta_db_a_borrar = dict_empresas_del[empresa_a_eliminar]
+                                
+                            try:
+                                # A. ELIMINACIÓN FÍSICA DEL ARCHIVO Y SU CARPETA OFUSCADA
+                                if ruta_db_a_borrar:
+                                    carpeta_ofuscada = os.path.dirname(ruta_db_a_borrar)
+                                        
+                                    if os.path.exists(ruta_db_a_borrar):
+                                        os.remove(ruta_db_a_borrar)
+                                        st.info("🗑️ Archivo de base de datos `.db` removido del almacenamiento.")
+                                        
+                                    if carpeta_ofuscada and os.path.exists(carpeta_ofuscada):
+                                        if not os.listdir(carpeta_ofuscada):
+                                            os.rmdir(carpeta_ofuscada)
+                                            st.info("📁 Carpeta ofuscada eliminada de forma física.")
+                                        else:
+                                            import shutil
+                                            shutil.rmtree(carpeta_ofuscada)
+                                            st.info("📁 Directorio y contenidos residuales eliminados por completo.")
+                                    
+                                # B. ELIMINACIÓN LÓGICA EN LA BASE CENTRAL
+                                conn_central = conectar_db_central()
+                                cursor_central = conn_central.cursor()
+                                    
+                                cursor_central.execute(
+                                    "DELETE FROM usuarios_central WHERE nombre_empresa = ?", 
+                                    (empresa_a_eliminar,)
+                                )
+                                conn_central.commit()
+                                conn_central.close()
+                                    
+                                st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todo su entorno han sido destruidos con éxito.")
+                                st.balloons()
                                 st.rerun()
-                            except sqlite3.IntegrityError:
-                                st.error("El Alias ingresado ya pertenece a otra propiedad.")
-                            finally:
-                                conn.close()
+                                    
+                            except Exception as e:
+                                st.error(f"Error crítico durante el proceso de borrado: {e}")
                         else:
-                            st.error("El Alias, Calle y Número son campos obligatorios.")
+                            st.error("❌ El nombre ingresado no coincide con la empresa seleccionada. Operación cancelada.")
+                else:
+                    st.info("No hay empresas registradas disponibles para eliminar.")
+    
+        # =====================================================================
+        # NUEVA SECCIÓN MODULAR: ELIMINACIÓN DE FILAS EN LAS TABLAS (SOLO SuperAdmin)
+        # =====================================================================
+        if rol_sesion == "superadmin":
+            st.markdown("---")
+            st.markdown("### 🗑️ Gestión de Datos Central: Eliminar Filas / Registros en Bloque")
+                
+            with st.expander("🛠️ [SuperAdmin] Panel de Eliminación Múltiple Forzada", expanded=False):
+                st.warning("⚠️ **Zona Crítica:** Al borrar registros con este panel se forzará la eliminación en la base de datos operativa de la empresa seleccionada saltándose las restricciones de integridad (FOREIGN KEYs). Use con extrema precaución.")
+                    
+                # 1. PASO NUEVO: El SuperAdmin selecciona de qué empresa quiere gestionar los datos
+                conn_central = conectar_db_central()
+                df_empresas_filas = pd.read_sql_query("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
+                conn_central.close()
+                    
+                if not df_empresas_filas.empty:
+                    dict_empresas_filas = {row['nombre_empresa']: row['archivo_db'] for _, row in df_empresas_filas.iterrows()}
+                        
+                    empresa_datos_seleccionada = st.selectbox(
+                        "1. Seleccione la Empresa a la que desea gestionar/borrar datos:",
+                        options=list(dict_empresas_filas.keys()),
+                        key="sb_empresa_datos_del_multi"
+                    )
+                        
+                    # Obtener la ruta del archivo .db físico de la empresa seleccionada
+                    ruta_db_objetivo = dict_empresas_filas[empresa_datos_seleccionada]
+                        
+                    # 2. El SuperAdmin elige qué tabla de la empresa seleccionada quiere limpiar
+                    tabla_seleccionada = st.selectbox(
+                        "2. Seleccione la tabla que desea gestionar:",
+                        options=["contratos", "inquilinos", "propiedades", "pagos_historial"],
+                        format_func=lambda x: x.upper(),
+                        key="sb_tabla_operativa_del_multi"
+                    )
+                        
+                    # --- CONEXIÓN DINÁMICA A LA BASE DE DATOS DE LA EMPRESA SELECCIONADA ---
+                    # Validación de lista blanca para evitar SQL Injection en nombre de tabla
+                    TABLAS_PERMITIDAS = {"contratos", "inquilinos", "propiedades", "pagos_historial"}
+                    if tabla_seleccionada not in TABLAS_PERMITIDAS:
+                        st.error(f"❌ Tabla '{tabla_seleccionada}' no permitida.")
+                    else:
+                        try:
+                            with sqlite3.connect(ruta_db_objetivo) as conn_operativa:
+                                try:
+                                    # Nombre de tabla validado contra lista blanca — seguro usar en f-string
+                                    query_fetch = f"SELECT * FROM {tabla_seleccionada}"
+                                    df_completo = pd.read_sql_query(query_fetch, conn_operativa)
+                                        
+                                    if not df_completo.empty:
+                                        # Identificamos la columna clave primaria automáticamente
+                                        if "codigo" in df_completo.columns:
+                                            id_col_name = "codigo"
+                                        elif "id" in df_completo.columns:
+                                            id_col_name = "id"
+                                        else:
+                                            st.error(f"❌ La tabla '{tabla_seleccionada.upper()}' no tiene una columna de clave primaria reconocida ('id' o 'codigo'). No se puede proceder con el borrado.")
+                                            id_col_name = None
+                                            
+                                        if id_col_name:
+                                            st.info("💡 **Tip para seleccionar TODO:** Haz clic en la casilla vacía que aparece arriba de todo en el encabezado izquierdo de la tabla.")
+                                                
+                                            # 3. Renderizado con Selección de Filas Nativo de Streamlit
+                                            tabla_interactiva = st.dataframe(
+                                                df_completo,
+                                                use_container_width=True,
+                                                hide_index=True,
+                                                selection_mode="multi-row",  # Habilita checkboxes y selección múltiple
+                                                on_select="rerun",           # Actualiza la vista reactivamente al marcar
+                                                key=f"tabla_seleccion_borrado_{empresa_datos_seleccionada}_{tabla_seleccionada}" # Key única combinada
+                                            )
+                                                
+                                            # Extraemos los índices numéricos seleccionados
+                                            indices_seleccionados = tabla_interactiva.get("selection", {}).get("rows", [])
+                                                
+                                            if indices_seleccionados:
+                                                # Filtramos los IDs correspondientes usando los índices posicionales reales del DataFrame
+                                                ids_a_borrar = df_completo.iloc[indices_seleccionados][id_col_name].tolist()
+                                                cant_filas = len(ids_a_borrar)
+                                                    
+                                                st.error(f"🔴 Has seleccionado **{cant_filas}** registro(s) de la empresa **{empresa_datos_seleccionada}** para FORZAR su eliminación permanente de la tabla `{tabla_seleccionada.upper()}`.")
+                                                st.caption(f"Elementos marcados para destrucción ({id_col_name.upper()}): {ids_a_borrar}")
+                                                    
+                                                # Frase de seguridad dinámica y estricta
+                                                confirmacion_palabra = st.text_input(
+                                                    f"Para confirmar la eliminación masiva, escriba exactamente **FORZAR BORRADO {cant_filas} FILAS**:",
+                                                    key="txt_confirmacion_multi_del"
+                                                )
+                                                    
+                                                btn_eliminar_bloque = st.button(f"💥 FORZAR ELIMINACIÓN DE {cant_filas} REGISTROS", type="primary", use_container_width=True)
+                                                    
+                                                if btn_eliminar_bloque:
+                                                    frase_esperada = f"FORZAR BORRADO {cant_filas} FILAS"
+                                                    if confirmacion_palabra == frase_esperada:
+                                                        cursor_op = conn_operativa.cursor()
+                                                            
+                                                        try:
+                                                            # A. DESACTIVAR VALIDACIONES DE INTEGRIDAD
+                                                            cursor_op.execute("PRAGMA foreign_keys = OFF;")
+                                                                
+                                                            # B. EJECUTAR EL DELETE EN BLOQUE
+                                                            # Nombre de tabla y columna validados — los placeholders '?' protegen los valores
+                                                            placeholder = ",".join(["?"] * cant_filas)
+                                                            query_delete = f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})"
+                                                                
+                                                            cursor_op.execute(query_delete, tuple(ids_a_borrar))
+                                                            conn_operativa.commit()
+                                                                
+                                                            st.success(f"✅ Se han destruido correctamente {cant_filas} registros de la tabla '{tabla_seleccionada.upper()}' pertenecientes a la empresa '{empresa_datos_seleccionada}'.")
+                                                            st.balloons()
+                                                            st.rerun()
+                                                                
+                                                        except Exception as sql_e:
+                                                            conn_operativa.rollback()
+                                                            st.error(f"❌ Error interno de la base de datos al borrar: {sql_e}")
+                                                        finally:
+                                                            # C. REACTIVAR VALIDACIONES DE INTEGRIDAD
+                                                            cursor_op.execute("PRAGMA foreign_keys = ON;")
+                                                    else:
+                                                        st.error(f"❌ La frase de confirmación no coincide. Escriba exactamente: **{frase_esperada}**")
+                                            else:
+                                                st.info("💡 Selecciona una o más casillas de la izquierda para desplegar el cuadro de ejecución de borrado.")
+                                    else:
+                                        st.info(f"La tabla '{tabla_seleccionada.upper()}' de la empresa '{empresa_datos_seleccionada}' se encuentra completamente vacía.")
+                                            
+                                except Exception as e:
+                                    st.error(f"Error al leer o procesar la eliminación masiva: {e}")
+                        except Exception as conn_err:
+                            st.error(f"❌ No se pudo conectar a la base de datos de '{empresa_datos_seleccionada}': {conn_err}")
+                else:
+                    st.info("No hay empresas registradas en la base central para auditar o borrar datos.")
