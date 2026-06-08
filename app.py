@@ -4050,6 +4050,15 @@ if tab_gastos:
         # ── SUBPESTAÑA 2: HISTORIAL ─────────────────────────────────────
         with subtab_historial:
             conn = conectar_db()
+            # Asegurar columnas USD en gastos_propiedades (bases de datos existentes sin migracion previa)
+            _cols_gp_exist = {row[1] for row in conn.execute("PRAGMA table_info(gastos_propiedades)").fetchall()}
+            for _col_gp, _tipo_gp in [('monto_usd', 'REAL DEFAULT 0'), ('cotizacion_usd', 'REAL DEFAULT 0'), ('tipo_cotizacion_usd', "TEXT DEFAULT ''")]:
+                if _col_gp not in _cols_gp_exist:
+                    try:
+                        conn.execute(f"ALTER TABLE gastos_propiedades ADD COLUMN {_col_gp} {_tipo_gp}")
+                        conn.commit()
+                    except Exception:
+                        pass
             _where_g = "AND p.propietario = ?" if _pf_g_activo else ""
             _params_g = (_pf_g,) if _pf_g_activo else ()
             _df_gastos = pd.read_sql_query(f"""
