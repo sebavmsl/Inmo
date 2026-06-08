@@ -172,16 +172,12 @@ def conectar_db():
             'monto_expensas', 'monto_edesal', 'monto_gas', 'monto_municipalidad',
             'monto_cochera', 'monto_ooss', 'monto_imp_inmobiliario',
             'monto_honorarios', 'monto_garantia',
-            'monto_abonado', 'saldo_pendiente', 'saldos_anteriores',
-            'cotizacion_usd', 'tipo_cotizacion_usd',
-            'alquiler_usd', 'cochera_usd', 'total_usd',
-            'gasto_usd', 'gasto_cotizacion_usd', 'gasto_tipo_cotizacion_usd'
+            'monto_abonado', 'saldo_pendiente', 'saldos_anteriores'
         }
         _cols_faltantes = _cols_requeridas - _cols_existentes
         for _col in _cols_faltantes:
             try:
-                _tipo = "TEXT DEFAULT ''" if _col in ('tipo_cotizacion_usd', 'gasto_tipo_cotizacion_usd') else 'REAL DEFAULT 0'
-                conn.execute(f"ALTER TABLE pagos_historial ADD COLUMN {_col} {_tipo}")
+                conn.execute(f"ALTER TABLE pagos_historial ADD COLUMN {_col} REAL DEFAULT 0")
                 conn.commit()
             except Exception:
                 pass
@@ -287,17 +283,6 @@ def crear_tablas_empresa(conn):
         )
     ''')
     
-    # Migración: columnas USD en gastos_propiedades
-    cursor.execute("PRAGMA table_info(gastos_propiedades)")
-    _cols_gp = {row[1] for row in cursor.fetchall()}
-    for _col_gp, _tipo_gp in [('monto_usd', 'REAL DEFAULT 0'), ('cotizacion_usd', 'REAL DEFAULT 0'), ('tipo_cotizacion_usd', "TEXT DEFAULT ''")]:
-        if _col_gp not in _cols_gp:
-            try:
-                conn.execute(f"ALTER TABLE gastos_propiedades ADD COLUMN {_col_gp} {_tipo_gp}")
-                conn.commit()
-            except Exception:
-                pass
-
     # Tabla 5: Gastos de Propiedades
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS gastos_propiedades (
@@ -311,9 +296,6 @@ def crear_tablas_empresa(conn):
             comprobante TEXT,
             pagado_por TEXT,
             observaciones TEXT,
-            monto_usd REAL DEFAULT 0,
-            cotizacion_usd REAL DEFAULT 0,
-            tipo_cotizacion_usd TEXT DEFAULT '',
             FOREIGN KEY (propiedad_id) REFERENCES propiedades(id)
         )
     ''')
@@ -877,29 +859,6 @@ def calcular_valor_actualizado_ipc(
     except Exception as e:
         logging.warning(f"[IPC] Error calculando: {e}")
         return None
-
-
-@st.cache_data(ttl=1800)
-def obtener_cotizacion_usd() -> dict:
-    """
-    Obtiene cotizaciones del dólar desde la API pública dolarapi.com.
-    Retorna dict con claves 'blue', 'oficial', 'mep', 'cripto' y sus valores de venta.
-    En caso de error devuelve dict vacío.
-    Cache de 30 minutos.
-    """
-    tipos = {"oficial": "oficial"}
-    resultado = {}
-    for nombre, endpoint in tipos.items():
-        try:
-            resp = requests.get(f"https://dolarapi.com/v1/dolares/{endpoint}", timeout=8)
-            resp.raise_for_status()
-            data = resp.json()
-            venta = data.get("venta") or data.get("valor")
-            if venta:
-                resultado[nombre] = float(venta)
-        except Exception as e:
-            logging.warning(f"[USD] No se pudo obtener cotización {nombre}: {e}")
-    return resultado
 
 
 def limpiar_string_a_float(texto_num):
@@ -1652,47 +1611,7 @@ if tab_planilla:
                     saldo_col2.metric("✅ Saldo Pendiente ($):", "$ 0,00 — Cancelado", delta="Pago completo", delta_color="off")
 
                 comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
-
-                # --- CONVERSIÓN A DÓLAR ---
-                st.markdown("#### 💵 Equivalente en Dólares (opcional)")
-                _cotiz_usd = obtener_cotizacion_usd()
-                _tipos_disponibles = []
-                _etiquetas_usd = {}
-                for _k in ["blue", "oficial", "mep", "cripto"]:
-                    if _k in _cotiz_usd:
-                        _etiqueta = f"{_k.capitalize()} — $ {_cotiz_usd[_k]:,.0f}"
-                        _tipos_disponibles.append(_etiqueta)
-                        _etiquetas_usd[_etiqueta] = (_k, _cotiz_usd[_k])
-                _tipos_disponibles.append("Manual")
-
-                usd_col1, usd_col2 = st.columns(2)
-                _tipo_sel_label = usd_col1.selectbox(
-                    "Cotización a usar:",
-                    _tipos_disponibles,
-                    key=f"tipo_cotiz_{c_datos['codigo']}_{mes_periodo_texto}"
-                )
-                if _tipo_sel_label == "Manual":
-                    _cotiz_elegida_valor = usd_col2.number_input(
-                        "Cotización manual ($ por USD):",
-                        min_value=1.0, step=10.0, value=1000.0,
-                        key=f"cotiz_manual_{c_datos['codigo']}_{mes_periodo_texto}"
-                    )
-                    _cotiz_elegida_nombre = "manual"
-                else:
-                    _cotiz_elegida_nombre, _cotiz_elegida_valor = _etiquetas_usd[_tipo_sel_label]
-
-                if _cotiz_elegida_valor and _cotiz_elegida_valor > 0:
-                    _alq_usd  = round(monto_alq_pago / _cotiz_elegida_valor, 2)
-                    _coch_usd = round(monto_cochera / _cotiz_elegida_valor, 2) if monto_cochera > 0 else 0.0
-                    _tot_usd  = round(_total_a_cubrir / _cotiz_elegida_valor, 2)
-                    _usd_c1, _usd_c2, _usd_c3, _usd_c4 = st.columns(4)
-                    _usd_c1.metric("🏠 Alquiler", f"U$S {_alq_usd:,.2f}")
-                    _usd_c2.metric("🚗 Cochera", f"U$S {_coch_usd:,.2f}")
-                    _usd_c4.metric("💰 TOTAL", f"U$S {_tot_usd:,.2f}")
-                else:
-                    _alq_usd = _coch_usd = _tot_usd = 0.0
-                    st.info("Seleccioná una cotización para ver el equivalente en dólares.")
-
+                
                 # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
                 # Resetear flag si el usuario cambió de contrato
                 if st.session_state.contrato_impactado_id != c_datos['codigo']:
@@ -1719,19 +1638,15 @@ if tab_planilla:
                                 monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                                 monto_cochera, monto_ooss, monto_imp_inmobiliario,
                                 monto_honorarios, monto_garantia,
-                                monto_abonado, saldo_pendiente, saldos_anteriores,
-                                cotizacion_usd, tipo_cotizacion_usd,
-                                alquiler_usd, cochera_usd, total_usd
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                monto_abonado, saldo_pendiente, saldos_anteriores
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, _total_a_cubrir,
                             datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                             monto_cochera, _val_ooss_insert, _val_imp_insert,
                             monto_honorarios_pago, monto_garantia_pago,
-                            monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
-                            _cotiz_elegida_valor, _cotiz_elegida_nombre,
-                            _alq_usd, _coch_usd, _tot_usd
+                            monto_abonado, _saldo_a_guardar, _total_saldos_anteriores
                         ))
 
                         # 2. Avanzar automáticamente el contador del mes vivo del contrato
@@ -1980,12 +1895,7 @@ if tab_historial_pagos:
                 COALESCE(ph.monto_garantia, 0)                AS [_garantia],
                 COALESCE(ph.monto_abonado, 0)                 AS [_abonado],
                 COALESCE(ph.saldo_pendiente, 0)               AS [_saldo_pendiente],
-                ph.comentarios                                 AS [_comentarios],
-                COALESCE(ph.cotizacion_usd, 0)                AS [COTIZ. USD ($)],
-                COALESCE(ph.tipo_cotizacion_usd, '')          AS [TIPO USD],
-                COALESCE(ph.alquiler_usd, 0)                  AS [ALQUILER (U$S)],
-                COALESCE(ph.cochera_usd, 0)                   AS [COCHERA (U$S)],
-                COALESCE(ph.total_usd, 0)                     AS [TOTAL (U$S)]
+                ph.comentarios                                 AS [_comentarios]
             FROM pagos_historial ph
             JOIN contratos c  ON ph.contrato_id = c.codigo
             JOIN propiedades p ON c.propiedad_id = p.id
@@ -3115,7 +3025,7 @@ if tab_superadmin:
                 # Control visual y restricción de datos según el rol
                 if rol_sesion == "admin":
                     new_empresa = st.text_input("Nombre de la Empresa:", value=st.session_state.get("nombre_empresa"), disabled=True)
-                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin"])
+                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario"])
                 else:
                     new_empresa = st.text_input("Nombre de la Empresa / Inmobiliaria:").strip()
                     new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin", "superadmin"])
@@ -3201,7 +3111,7 @@ if tab_superadmin:
                 cursor_central.execute('''
                     SELECT username, nombre_empresa, rol, archivo_db 
                     FROM usuarios_central 
-                    WHERE archivo_db = ?
+                    WHERE archivo_db = ? AND rol IN ('user', 'propietario')
                 ''', (st.session_state.get("empresa_db"),))
             else:
                 st.error("🚫 No tienes permisos suficientes para gestionar usuarios.")
@@ -3236,9 +3146,12 @@ if tab_superadmin:
                     st.markdown("#### 🔐 Acceso")
                     nueva_pass = st.text_input("🔑 Cambiar Contraseña (Dejar vacío para mantener la actual):", type="password")
 
-                    opciones_roles = ["user", "propietario", "admin"]
                     if rol_sesion == "superadmin":
-                        opciones_roles.append("superadmin")
+                        opciones_roles = ["user", "propietario", "admin", "superadmin"]
+                    elif rol_sesion == "admin":
+                        opciones_roles = ["user", "propietario"]
+                    else:
+                        opciones_roles = ["user", "propietario", "admin"]
 
                     nuevo_rol = st.selectbox("🎖️ Rol en el Sistema:", opciones_roles, index=opciones_roles.index(rol_actual_user) if rol_actual_user in opciones_roles else 0)
 
@@ -3283,28 +3196,31 @@ if tab_superadmin:
                     st.markdown("---")
                     if nuevo_rol == "propietario":
                         st.info("🏠 El rol **Propietario** tiene acceso fijo de solo lectura a: Dashboard, Planilla de Contratos e Historial de Caja. No requiere configuración de permisos.")
-                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para usuarios con rol 'user')")
+                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
                         
                     permisos_actuales = []
-                    if ruta_db_user and os.path.exists(ruta_db_user):
-                        try:
-                            conn_emp = sqlite3.connect(ruta_db_user)
-                            cursor_emp = conn_emp.cursor()
-                            cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
-                            if cursor_emp.fetchone():
-                                cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
-                                permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
-                            conn_emp.close()
-                        except Exception as e:
-                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
-    
-                    p_dash = st.checkbox("📈 Tablero de Control", value=("dashboard" in permisos_actuales))
-                    p_plan = st.checkbox("📊 Planilla de Contratos", value=("planilla" in permisos_actuales))
-                    p_pagos = st.checkbox("💰 Registrar / Emitir Recibo", value=("pagos" in permisos_actuales))
-                    p_hist = st.checkbox("🗄️ Historial de Caja", value=("historial_pagos" in permisos_actuales))
-                    p_carga = st.checkbox("📝 Carga de Contratos", value=("carga" in permisos_actuales))
-                    p_aux = st.checkbox("⚙️ Cargar Inquilinos / Propiedades", value=("auxiliares" in permisos_actuales))
-                    p_gastos = st.checkbox("🔧 Gastos de Propiedades", value=("gastos" in permisos_actuales))
+                    if nuevo_rol != "propietario":
+                        if ruta_db_user and os.path.exists(ruta_db_user):
+                            try:
+                                conn_emp = sqlite3.connect(ruta_db_user)
+                                cursor_emp = conn_emp.cursor()
+                                cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
+                                if cursor_emp.fetchone():
+                                    cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
+                                    permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
+                                conn_emp.close()
+                            except Exception as e:
+                                st.warning(f"Aviso al recuperar permisos existentes: {e}")
+
+                        p_dash  = st.checkbox("📈 Tablero de Control",                  value=("dashboard"       in permisos_actuales))
+                        p_plan  = st.checkbox("📊 Planilla de Contratos",               value=("planilla"        in permisos_actuales))
+                        p_pagos = st.checkbox("💰 Registrar / Emitir Recibo",           value=("pagos"           in permisos_actuales))
+                        p_hist  = st.checkbox("🗄️ Historial de Caja",                  value=("historial_pagos" in permisos_actuales))
+                        p_carga = st.checkbox("📝 Carga de Contratos",                  value=("carga"           in permisos_actuales))
+                        p_aux   = st.checkbox("⚙️ Cargar Inquilinos / Propiedades",    value=("auxiliares"      in permisos_actuales))
+                        p_gastos= st.checkbox("🔧 Gastos de Propiedades",               value=("gastos"          in permisos_actuales))
+                    else:
+                        p_dash = p_plan = p_pagos = p_hist = p_carga = p_aux = p_gastos = False
     
                     btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
     
@@ -3995,29 +3911,6 @@ if tab_gastos:
                     _pagado_por = _gcol7.selectbox("💳 Pagado por:", ["Inmobiliaria", "Propietario", "Inquilino", "Otro"])
                     _observaciones = _gcol8.text_input("🗒️ Observaciones:", placeholder="Opcional")
 
-                    st.markdown("#### 💵 Equivalente en Dólares (opcional)")
-                    _cotiz_gasto_usd = obtener_cotizacion_usd()
-                    _tipos_gasto = []
-                    _etiquetas_gasto_usd = {}
-                    for _k in ["blue", "oficial", "mep", "cripto"]:
-                        if _k in _cotiz_gasto_usd:
-                            _etiqueta = f"{_k.capitalize()} — $ {_cotiz_gasto_usd[_k]:,.0f}"
-                            _tipos_gasto.append(_etiqueta)
-                            _etiquetas_gasto_usd[_etiqueta] = (_k, _cotiz_gasto_usd[_k])
-                    _tipos_gasto.append("Manual")
-                    _gcol9, _gcol10 = st.columns(2)
-                    _tipo_cotiz_gasto_label = _gcol9.selectbox("Cotización USD a usar:", _tipos_gasto, key="cotiz_gasto_sel")
-                    if _tipo_cotiz_gasto_label == "Manual":
-                        _cotiz_gasto_valor = _gcol10.number_input("Cotización manual ($ por USD):", min_value=1.0, step=10.0, value=1000.0, key="cotiz_gasto_manual")
-                        _cotiz_gasto_nombre = "manual"
-                    else:
-                        _cotiz_gasto_nombre, _cotiz_gasto_valor = _etiquetas_gasto_usd[_tipo_cotiz_gasto_label]
-                    if _cotiz_gasto_valor and _cotiz_gasto_valor > 0 and _monto > 0:
-                        _monto_usd_preview = round(_monto / _cotiz_gasto_valor, 2)
-                        st.info(f"💵 Equivalente: **U$S {_monto_usd_preview:,.2f}** (cotización {_cotiz_gasto_nombre} $ {_cotiz_gasto_valor:,.0f})")
-                    else:
-                        _monto_usd_preview = 0.0
-
                     _btn_gasto = st.form_submit_button("💾 Registrar Gasto", type="primary")
 
                     if _btn_gasto:
@@ -4028,21 +3921,17 @@ if tab_gastos:
                         else:
                             try:
                                 conn = conectar_db()
-                                _monto_usd_insert = round(_monto / _cotiz_gasto_valor, 2) if _cotiz_gasto_valor and _cotiz_gasto_valor > 0 else 0.0
                                 conn.execute(
                                     """INSERT INTO gastos_propiedades
-                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones,
-                                        monto_usd, cotizacion_usd, tipo_cotizacion_usd)
-                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                     (_prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
                                      _descripcion.strip(), _monto, _proveedor.strip(),
-                                     _comprobante.strip(), _pagado_por, _observaciones.strip(),
-                                     _monto_usd_insert, _cotiz_gasto_valor, _cotiz_gasto_nombre)
+                                     _comprobante.strip(), _pagado_por, _observaciones.strip())
                                 )
                                 conn.commit()
                                 conn.close()
-                                _usd_msg = f" (U$S {_monto_usd_insert:,.2f} a cotización {_cotiz_gasto_nombre})" if _monto_usd_insert > 0 else ""
-                                st.success(f"✅ Gasto de $ {_monto:,.2f}{_usd_msg} registrado correctamente en {_prop_label}.")
+                                st.success(f"✅ Gasto de $ {_monto:,.2f} registrado correctamente en {_prop_label}.")
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -4050,21 +3939,12 @@ if tab_gastos:
         # ── SUBPESTAÑA 2: HISTORIAL ─────────────────────────────────────
         with subtab_historial:
             conn = conectar_db()
-            # Asegurar columnas USD en gastos_propiedades (bases de datos existentes sin migracion previa)
-            _cols_gp_exist = {row[1] for row in conn.execute("PRAGMA table_info(gastos_propiedades)").fetchall()}
-            for _col_gp, _tipo_gp in [('monto_usd', 'REAL DEFAULT 0'), ('cotizacion_usd', 'REAL DEFAULT 0'), ('tipo_cotizacion_usd', "TEXT DEFAULT ''")]:
-                if _col_gp not in _cols_gp_exist:
-                    try:
-                        conn.execute(f"ALTER TABLE gastos_propiedades ADD COLUMN {_col_gp} {_tipo_gp}")
-                        conn.commit()
-                    except Exception:
-                        pass
             _where_g = "AND p.propietario = ?" if _pf_g_activo else ""
             _params_g = (_pf_g,) if _pf_g_activo else ()
             _df_gastos = pd.read_sql_query(f"""
                 SELECT gp.id as [ID], p.alias_propiedad as [PROPIEDAD], p.propietario as [PROPIETARIO],
                        gp.fecha as [FECHA], gp.categoria as [CATEGORÍA], gp.descripcion as [DESCRIPCIÓN],
-                       gp.monto as [MONTO ($)], COALESCE(gp.monto_usd,0) as [MONTO (U$S)], COALESCE(gp.tipo_cotizacion_usd,'') as [TIPO USD], COALESCE(gp.cotizacion_usd,0) as [COTIZ. USD], gp.proveedor as [PROVEEDOR],
+                       gp.monto as [MONTO ($)], gp.proveedor as [PROVEEDOR],
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
