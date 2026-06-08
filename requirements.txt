@@ -1,13 +1,6 @@
 streamlit
 pandas
-os
-secrets
-logging
-dateutil.relativedelta
-re
-urllib.parse
-bcrypt
-sqlite3
 requests
-datetime
-BytesIO
+bcrypt
+python-dateutil
+openpyxl
