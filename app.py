@@ -1,4 +1,3 @@
-#SIN COTIZACION - ULTIMO
 import streamlit as st
 import pandas as pd
 import os
@@ -173,12 +172,16 @@ def conectar_db():
             'monto_expensas', 'monto_edesal', 'monto_gas', 'monto_municipalidad',
             'monto_cochera', 'monto_ooss', 'monto_imp_inmobiliario',
             'monto_honorarios', 'monto_garantia',
-            'monto_abonado', 'saldo_pendiente', 'saldos_anteriores'
+            'monto_abonado', 'saldo_pendiente', 'saldos_anteriores',
+            'cotizacion_usd', 'tipo_cotizacion_usd',
+            'alquiler_usd', 'cochera_usd', 'total_usd',
+            'gasto_usd', 'gasto_cotizacion_usd', 'gasto_tipo_cotizacion_usd'
         }
         _cols_faltantes = _cols_requeridas - _cols_existentes
         for _col in _cols_faltantes:
             try:
-                conn.execute(f"ALTER TABLE pagos_historial ADD COLUMN {_col} REAL DEFAULT 0")
+                _tipo = "TEXT DEFAULT ''" if _col in ('tipo_cotizacion_usd', 'gasto_tipo_cotizacion_usd') else 'REAL DEFAULT 0'
+                conn.execute(f"ALTER TABLE pagos_historial ADD COLUMN {_col} {_tipo}")
                 conn.commit()
             except Exception:
                 pass
@@ -284,6 +287,17 @@ def crear_tablas_empresa(conn):
         )
     ''')
     
+    # Migración: columnas USD en gastos_propiedades
+    cursor.execute("PRAGMA table_info(gastos_propiedades)")
+    _cols_gp = {row[1] for row in cursor.fetchall()}
+    for _col_gp, _tipo_gp in [('monto_usd', 'REAL DEFAULT 0'), ('cotizacion_usd', 'REAL DEFAULT 0'), ('tipo_cotizacion_usd', "TEXT DEFAULT ''")]:
+        if _col_gp not in _cols_gp:
+            try:
+                conn.execute(f"ALTER TABLE gastos_propiedades ADD COLUMN {_col_gp} {_tipo_gp}")
+                conn.commit()
+            except Exception:
+                pass
+
     # Tabla 5: Gastos de Propiedades
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS gastos_propiedades (
@@ -297,6 +311,9 @@ def crear_tablas_empresa(conn):
             comprobante TEXT,
             pagado_por TEXT,
             observaciones TEXT,
+            monto_usd REAL DEFAULT 0,
+            cotizacion_usd REAL DEFAULT 0,
+            tipo_cotizacion_usd TEXT DEFAULT '',
             FOREIGN KEY (propiedad_id) REFERENCES propiedades(id)
         )
     ''')
@@ -703,8 +720,8 @@ def obtener_datos_desplegables():
 def _obtener_icl_bcra_xls(año: int) -> dict:
     """
     Descarga el XLS del ICL publicado por el BCRA para el año dado.
-    Columna 7 = fecha (formato 20260101), columna 8 = valor ICL.
-    Los datos reales arrancan en la fila 26 (las anteriores son encabezados).
+    Detecta automáticamente las columnas de fecha y valor buscando
+    patrones numéricos tipo YYYYMMDD en cada fila de cada hoja.
     Retorna dict {"YYYY-MM-DD": valor_float}.
     Cache de 1 hora.
     """
@@ -712,20 +729,47 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
     try:
         resp = requests.get(url, timeout=15, verify=False)
         resp.raise_for_status()
-        df_raw = pd.read_excel(BytesIO(resp.content), header=None)
         resultado = {}
-        for _, row in df_raw.iterrows():
+        # Intentar leer todas las hojas
+        try:
+            xls = pd.ExcelFile(BytesIO(resp.content))
+            hojas = xls.sheet_names
+        except Exception:
+            hojas = [0]
+
+        for hoja in hojas:
             try:
-                fecha_raw = str(row.iloc[7]).strip()
-                valor_raw = row.iloc[8]
-                # La celda de fecha tiene formato YYYYMMDD (ej: 20260101)
-                if len(fecha_raw) != 8 or not fecha_raw.isdigit():
-                    continue
-                fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
-                valor = float(valor_raw)
-                resultado[fecha.strftime("%Y-%m-%d")] = valor
+                df_raw = pd.read_excel(BytesIO(resp.content), sheet_name=hoja, header=None)
             except Exception:
                 continue
+
+            for _, row in df_raw.iterrows():
+                # Buscar en cada celda una fecha formato YYYYMMDD y un valor numérico adyacente
+                for i, celda in enumerate(row):
+                    try:
+                        fecha_raw = str(celda).strip().split(".")[0]  # por si viene como float "20240101.0"
+                        if len(fecha_raw) == 8 and fecha_raw.isdigit():
+                            # Verificar que sea una fecha válida del año correspondiente
+                            anio_celda = int(fecha_raw[:4])
+                            if abs(anio_celda - año) > 1:
+                                continue
+                            fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
+                            # Buscar el valor ICL en las celdas siguientes (hasta 3 posiciones)
+                            for j in range(i + 1, min(i + 4, len(row))):
+                                try:
+                                    valor = float(row.iloc[j])
+                                    if valor > 0:
+                                        resultado[fecha.strftime("%Y-%m-%d")] = valor
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
+                    except Exception:
+                        continue
+
+        if resultado:
+            logging.info(f"[ICL] Obtenidos {len(resultado)} registros para {año}.")
+        else:
+            logging.warning(f"[ICL] No se encontraron datos en el XLS del BCRA para {año}.")
         return resultado
     except Exception as e:
         logging.warning(f"[ICL] No se pudo obtener XLS del BCRA para {año}: {e}")
@@ -833,6 +877,29 @@ def calcular_valor_actualizado_ipc(
     except Exception as e:
         logging.warning(f"[IPC] Error calculando: {e}")
         return None
+
+
+@st.cache_data(ttl=1800)
+def obtener_cotizacion_usd() -> dict:
+    """
+    Obtiene cotizaciones del dólar desde la API pública dolarapi.com.
+    Retorna dict con claves 'blue', 'oficial', 'mep', 'cripto' y sus valores de venta.
+    En caso de error devuelve dict vacío.
+    Cache de 30 minutos.
+    """
+    tipos = {"oficial": "oficial"}
+    resultado = {}
+    for nombre, endpoint in tipos.items():
+        try:
+            resp = requests.get(f"https://dolarapi.com/v1/dolares/{endpoint}", timeout=8)
+            resp.raise_for_status()
+            data = resp.json()
+            venta = data.get("venta") or data.get("valor")
+            if venta:
+                resultado[nombre] = float(venta)
+        except Exception as e:
+            logging.warning(f"[USD] No se pudo obtener cotización {nombre}: {e}")
+    return resultado
 
 
 def limpiar_string_a_float(texto_num):
@@ -1585,7 +1652,47 @@ if tab_planilla:
                     saldo_col2.metric("✅ Saldo Pendiente ($):", "$ 0,00 — Cancelado", delta="Pago completo", delta_color="off")
 
                 comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
-                
+
+                # --- CONVERSIÓN A DÓLAR ---
+                st.markdown("#### 💵 Equivalente en Dólares (opcional)")
+                _cotiz_usd = obtener_cotizacion_usd()
+                _tipos_disponibles = []
+                _etiquetas_usd = {}
+                for _k in ["blue", "oficial", "mep", "cripto"]:
+                    if _k in _cotiz_usd:
+                        _etiqueta = f"{_k.capitalize()} — $ {_cotiz_usd[_k]:,.0f}"
+                        _tipos_disponibles.append(_etiqueta)
+                        _etiquetas_usd[_etiqueta] = (_k, _cotiz_usd[_k])
+                _tipos_disponibles.append("Manual")
+
+                usd_col1, usd_col2 = st.columns(2)
+                _tipo_sel_label = usd_col1.selectbox(
+                    "Cotización a usar:",
+                    _tipos_disponibles,
+                    key=f"tipo_cotiz_{c_datos['codigo']}_{mes_periodo_texto}"
+                )
+                if _tipo_sel_label == "Manual":
+                    _cotiz_elegida_valor = usd_col2.number_input(
+                        "Cotización manual ($ por USD):",
+                        min_value=1.0, step=10.0, value=1000.0,
+                        key=f"cotiz_manual_{c_datos['codigo']}_{mes_periodo_texto}"
+                    )
+                    _cotiz_elegida_nombre = "manual"
+                else:
+                    _cotiz_elegida_nombre, _cotiz_elegida_valor = _etiquetas_usd[_tipo_sel_label]
+
+                if _cotiz_elegida_valor and _cotiz_elegida_valor > 0:
+                    _alq_usd  = round(monto_alq_pago / _cotiz_elegida_valor, 2)
+                    _coch_usd = round(monto_cochera / _cotiz_elegida_valor, 2) if monto_cochera > 0 else 0.0
+                    _tot_usd  = round(_total_a_cubrir / _cotiz_elegida_valor, 2)
+                    _usd_c1, _usd_c2, _usd_c3, _usd_c4 = st.columns(4)
+                    _usd_c1.metric("🏠 Alquiler", f"U$S {_alq_usd:,.2f}")
+                    _usd_c2.metric("🚗 Cochera", f"U$S {_coch_usd:,.2f}")
+                    _usd_c4.metric("💰 TOTAL", f"U$S {_tot_usd:,.2f}")
+                else:
+                    _alq_usd = _coch_usd = _tot_usd = 0.0
+                    st.info("Seleccioná una cotización para ver el equivalente en dólares.")
+
                 # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
                 # Resetear flag si el usuario cambió de contrato
                 if st.session_state.contrato_impactado_id != c_datos['codigo']:
@@ -1612,15 +1719,19 @@ if tab_planilla:
                                 monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                                 monto_cochera, monto_ooss, monto_imp_inmobiliario,
                                 monto_honorarios, monto_garantia,
-                                monto_abonado, saldo_pendiente, saldos_anteriores
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                monto_abonado, saldo_pendiente, saldos_anteriores,
+                                cotizacion_usd, tipo_cotizacion_usd,
+                                alquiler_usd, cochera_usd, total_usd
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, _total_a_cubrir,
                             datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                             monto_cochera, _val_ooss_insert, _val_imp_insert,
                             monto_honorarios_pago, monto_garantia_pago,
-                            monto_abonado, _saldo_a_guardar, _total_saldos_anteriores
+                            monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
+                            _cotiz_elegida_valor, _cotiz_elegida_nombre,
+                            _alq_usd, _coch_usd, _tot_usd
                         ))
 
                         # 2. Avanzar automáticamente el contador del mes vivo del contrato
@@ -1869,7 +1980,12 @@ if tab_historial_pagos:
                 COALESCE(ph.monto_garantia, 0)                AS [_garantia],
                 COALESCE(ph.monto_abonado, 0)                 AS [_abonado],
                 COALESCE(ph.saldo_pendiente, 0)               AS [_saldo_pendiente],
-                ph.comentarios                                 AS [_comentarios]
+                ph.comentarios                                 AS [_comentarios],
+                COALESCE(ph.cotizacion_usd, 0)                AS [COTIZ. USD ($)],
+                COALESCE(ph.tipo_cotizacion_usd, '')          AS [TIPO USD],
+                COALESCE(ph.alquiler_usd, 0)                  AS [ALQUILER (U$S)],
+                COALESCE(ph.cochera_usd, 0)                   AS [COCHERA (U$S)],
+                COALESCE(ph.total_usd, 0)                     AS [TOTAL (U$S)]
             FROM pagos_historial ph
             JOIN contratos c  ON ph.contrato_id = c.codigo
             JOIN propiedades p ON c.propiedad_id = p.id
@@ -2430,7 +2546,8 @@ if tab_carga:
             valor_auto = None
             indice_upper = indice_final.upper()
     
-            if permitir_edicion and indice_upper in ("ICL", "IPC"):
+            # Se calcula siempre que el índice sea ICL o IPC (no solo en modo edición)
+            if indice_upper in ("ICL", "IPC"):
                 with st.spinner(f"⏳ Consultando {indice_upper}..."):
                     if indice_upper == "ICL":
                         valor_auto = calcular_valor_actualizado_icl(
@@ -2450,7 +2567,7 @@ if tab_carga:
                 )
                 valor_por_defecto_fmt = f"{valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             else:
-                if permitir_edicion and indice_upper in ("ICL", "IPC"):
+                if indice_upper in ("ICL", "IPC"):
                     c_web2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
                 valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
@@ -3878,6 +3995,29 @@ if tab_gastos:
                     _pagado_por = _gcol7.selectbox("💳 Pagado por:", ["Inmobiliaria", "Propietario", "Inquilino", "Otro"])
                     _observaciones = _gcol8.text_input("🗒️ Observaciones:", placeholder="Opcional")
 
+                    st.markdown("#### 💵 Equivalente en Dólares (opcional)")
+                    _cotiz_gasto_usd = obtener_cotizacion_usd()
+                    _tipos_gasto = []
+                    _etiquetas_gasto_usd = {}
+                    for _k in ["blue", "oficial", "mep", "cripto"]:
+                        if _k in _cotiz_gasto_usd:
+                            _etiqueta = f"{_k.capitalize()} — $ {_cotiz_gasto_usd[_k]:,.0f}"
+                            _tipos_gasto.append(_etiqueta)
+                            _etiquetas_gasto_usd[_etiqueta] = (_k, _cotiz_gasto_usd[_k])
+                    _tipos_gasto.append("Manual")
+                    _gcol9, _gcol10 = st.columns(2)
+                    _tipo_cotiz_gasto_label = _gcol9.selectbox("Cotización USD a usar:", _tipos_gasto, key="cotiz_gasto_sel")
+                    if _tipo_cotiz_gasto_label == "Manual":
+                        _cotiz_gasto_valor = _gcol10.number_input("Cotización manual ($ por USD):", min_value=1.0, step=10.0, value=1000.0, key="cotiz_gasto_manual")
+                        _cotiz_gasto_nombre = "manual"
+                    else:
+                        _cotiz_gasto_nombre, _cotiz_gasto_valor = _etiquetas_gasto_usd[_tipo_cotiz_gasto_label]
+                    if _cotiz_gasto_valor and _cotiz_gasto_valor > 0 and _monto > 0:
+                        _monto_usd_preview = round(_monto / _cotiz_gasto_valor, 2)
+                        st.info(f"💵 Equivalente: **U$S {_monto_usd_preview:,.2f}** (cotización {_cotiz_gasto_nombre} $ {_cotiz_gasto_valor:,.0f})")
+                    else:
+                        _monto_usd_preview = 0.0
+
                     _btn_gasto = st.form_submit_button("💾 Registrar Gasto", type="primary")
 
                     if _btn_gasto:
@@ -3888,17 +4028,21 @@ if tab_gastos:
                         else:
                             try:
                                 conn = conectar_db()
+                                _monto_usd_insert = round(_monto / _cotiz_gasto_valor, 2) if _cotiz_gasto_valor and _cotiz_gasto_valor > 0 else 0.0
                                 conn.execute(
                                     """INSERT INTO gastos_propiedades
-                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones)
-                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones,
+                                        monto_usd, cotizacion_usd, tipo_cotizacion_usd)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                     (_prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
                                      _descripcion.strip(), _monto, _proveedor.strip(),
-                                     _comprobante.strip(), _pagado_por, _observaciones.strip())
+                                     _comprobante.strip(), _pagado_por, _observaciones.strip(),
+                                     _monto_usd_insert, _cotiz_gasto_valor, _cotiz_gasto_nombre)
                                 )
                                 conn.commit()
                                 conn.close()
-                                st.success(f"✅ Gasto de $ {_monto:,.2f} registrado correctamente en {_prop_label}.")
+                                _usd_msg = f" (U$S {_monto_usd_insert:,.2f} a cotización {_cotiz_gasto_nombre})" if _monto_usd_insert > 0 else ""
+                                st.success(f"✅ Gasto de $ {_monto:,.2f}{_usd_msg} registrado correctamente en {_prop_label}.")
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -3911,7 +4055,7 @@ if tab_gastos:
             _df_gastos = pd.read_sql_query(f"""
                 SELECT gp.id as [ID], p.alias_propiedad as [PROPIEDAD], p.propietario as [PROPIETARIO],
                        gp.fecha as [FECHA], gp.categoria as [CATEGORÍA], gp.descripcion as [DESCRIPCIÓN],
-                       gp.monto as [MONTO ($)], gp.proveedor as [PROVEEDOR],
+                       gp.monto as [MONTO ($)], COALESCE(gp.monto_usd,0) as [MONTO (U$S)], COALESCE(gp.tipo_cotizacion_usd,'') as [TIPO USD], COALESCE(gp.cotizacion_usd,0) as [COTIZ. USD], gp.proveedor as [PROVEEDOR],
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
