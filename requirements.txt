@@ -9,5 +9,3 @@ urllib.parse
 bcrypt
 sqlite3
 requests
-from datetime import datetime
-from io import BytesIO
