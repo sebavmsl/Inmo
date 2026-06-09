@@ -1187,7 +1187,7 @@ if tab_planilla:
             st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
         
             conn = conectar_db()
-        # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
+            # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
             query_activos = '''
                 SELECT 
                     c.codigo, p.alias_propiedad, 
