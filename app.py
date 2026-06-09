@@ -3087,7 +3087,7 @@ if tab_superadmin:
                 # Control visual y restricción de datos según el rol
                 if rol_sesion == "admin":
                     new_empresa = st.text_input("Nombre de la Empresa:", value=st.session_state.get("nombre_empresa"), disabled=True)
-                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin"])
+                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario"])
                 else:
                     new_empresa = st.text_input("Nombre de la Empresa / Inmobiliaria:").strip()
                     new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin", "superadmin"])
@@ -3174,6 +3174,7 @@ if tab_superadmin:
                     SELECT username, nombre_empresa, rol, archivo_db 
                     FROM usuarios_central 
                     WHERE archivo_db = ?
+                    AND rol IN ('user', 'propietario')
                 ''', (st.session_state.get("empresa_db"),))
             else:
                 st.error("🚫 No tienes permisos suficientes para gestionar usuarios.")
@@ -3208,7 +3209,7 @@ if tab_superadmin:
                     st.markdown("#### 🔐 Acceso")
                     nueva_pass = st.text_input("🔑 Cambiar Contraseña (Dejar vacío para mantener la actual):", type="password")
 
-                    opciones_roles = ["user", "propietario", "admin"]
+                    opciones_roles = ["user", "propietario"] if rol_sesion == "admin" else ["user", "propietario", "admin"]
                     if rol_sesion == "superadmin":
                         opciones_roles.append("superadmin")
 
