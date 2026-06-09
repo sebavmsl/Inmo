@@ -18,7 +18,7 @@ from io import BytesIO
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
-st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
+st.set_page_config(page_title="Gestión de Alquileres - VER 09.06", layout="wide")
 
 # 2. Inyección de CSS para ocultar elementos
 hide_streamlit_style = """
