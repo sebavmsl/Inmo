@@ -1,3 +1,4 @@
+#SIN COTIZACION - ULTIMO
 import streamlit as st
 import pandas as pd
 import os
@@ -296,6 +297,8 @@ def crear_tablas_empresa(conn):
             comprobante TEXT,
             pagado_por TEXT,
             observaciones TEXT,
+            cotizacion_usd REAL DEFAULT 0,
+            monto_usd REAL DEFAULT 0,
             FOREIGN KEY (propiedad_id) REFERENCES propiedades(id)
         )
     ''')
@@ -324,6 +327,11 @@ def crear_tablas_empresa(conn):
             monto_abonado REAL DEFAULT 0,
             saldo_pendiente REAL DEFAULT 0,
             saldos_anteriores REAL DEFAULT 0,
+            cotizacion_usd REAL DEFAULT 0,
+            monto_alquiler_usd REAL DEFAULT 0,
+            monto_cochera_usd REAL DEFAULT 0,
+            monto_imp_inmobiliario_usd REAL DEFAULT 0,
+            retencion_agencia_usd REAL DEFAULT 0,
             FOREIGN KEY (contrato_id) REFERENCES contratos(codigo)
         )
     ''')
@@ -394,6 +402,13 @@ def inicializar_tablas():
             "ALTER TABLE pagos_historial ADD COLUMN monto_abonado REAL DEFAULT 0",
             "ALTER TABLE pagos_historial ADD COLUMN saldo_pendiente REAL DEFAULT 0",
             "ALTER TABLE pagos_historial ADD COLUMN saldos_anteriores REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN cotizacion_usd REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_alquiler_usd REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_cochera_usd REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN monto_imp_inmobiliario_usd REAL DEFAULT 0",
+            "ALTER TABLE pagos_historial ADD COLUMN retencion_agencia_usd REAL DEFAULT 0",
+            "ALTER TABLE gastos_propiedades ADD COLUMN cotizacion_usd REAL DEFAULT 0",
+            "ALTER TABLE gastos_propiedades ADD COLUMN monto_usd REAL DEFAULT 0",
         ]:
             try:
                 conn.execute(migration)
@@ -702,8 +717,8 @@ def obtener_datos_desplegables():
 def _obtener_icl_bcra_xls(año: int) -> dict:
     """
     Descarga el XLS del ICL publicado por el BCRA para el año dado.
-    Detecta automáticamente las columnas de fecha y valor buscando
-    patrones numéricos tipo YYYYMMDD en cada fila de cada hoja.
+    Columna 7 = fecha (formato 20260101), columna 8 = valor ICL.
+    Los datos reales arrancan en la fila 26 (las anteriores son encabezados).
     Retorna dict {"YYYY-MM-DD": valor_float}.
     Cache de 1 hora.
     """
@@ -711,47 +726,20 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
     try:
         resp = requests.get(url, timeout=15, verify=False)
         resp.raise_for_status()
+        df_raw = pd.read_excel(BytesIO(resp.content), header=None)
         resultado = {}
-        # Intentar leer todas las hojas
-        try:
-            xls = pd.ExcelFile(BytesIO(resp.content))
-            hojas = xls.sheet_names
-        except Exception:
-            hojas = [0]
-
-        for hoja in hojas:
+        for _, row in df_raw.iterrows():
             try:
-                df_raw = pd.read_excel(BytesIO(resp.content), sheet_name=hoja, header=None)
+                fecha_raw = str(row.iloc[7]).strip()
+                valor_raw = row.iloc[8]
+                # La celda de fecha tiene formato YYYYMMDD (ej: 20260101)
+                if len(fecha_raw) != 8 or not fecha_raw.isdigit():
+                    continue
+                fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
+                valor = float(valor_raw)
+                resultado[fecha.strftime("%Y-%m-%d")] = valor
             except Exception:
                 continue
-
-            for _, row in df_raw.iterrows():
-                # Buscar en cada celda una fecha formato YYYYMMDD y un valor numérico adyacente
-                for i, celda in enumerate(row):
-                    try:
-                        fecha_raw = str(celda).strip().split(".")[0]  # por si viene como float "20240101.0"
-                        if len(fecha_raw) == 8 and fecha_raw.isdigit():
-                            # Verificar que sea una fecha válida del año correspondiente
-                            anio_celda = int(fecha_raw[:4])
-                            if abs(anio_celda - año) > 1:
-                                continue
-                            fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
-                            # Buscar el valor ICL en las celdas siguientes (hasta 3 posiciones)
-                            for j in range(i + 1, min(i + 4, len(row))):
-                                try:
-                                    valor = float(row.iloc[j])
-                                    if valor > 0:
-                                        resultado[fecha.strftime("%Y-%m-%d")] = valor
-                                        break
-                                except (ValueError, TypeError):
-                                    continue
-                    except Exception:
-                        continue
-
-        if resultado:
-            logging.info(f"[ICL] Obtenidos {len(resultado)} registros para {año}.")
-        else:
-            logging.warning(f"[ICL] No se encontraron datos en el XLS del BCRA para {año}.")
         return resultado
     except Exception as e:
         logging.warning(f"[ICL] No se pudo obtener XLS del BCRA para {año}: {e}")
@@ -1174,683 +1162,708 @@ if tab_planilla:
             conn.close()
 
 
-# =====================================================================
-# PESTAÑA 3: CONTROL DE COBRANZAS, HISTORIAL DE CAJA Y RECIBO PDF/WHATSAPP
-# =====================================================================
-
-if tab_pagos:
-    if "pago_impactado" not in st.session_state:
-        st.session_state.pago_impactado = False
-    if "contrato_impactado_id" not in st.session_state:
-        st.session_state.contrato_impactado_id = None
-    with tab_pagos:
-        st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
+    # =====================================================================
+    # PESTAÑA 3: CONTROL DE COBRANZAS, HISTORIAL DE CAJA Y RECIBO PDF/WHATSAPP
+    # =====================================================================
     
-        conn = conectar_db()
+    if tab_pagos:
+        if "pago_impactado" not in st.session_state:
+            st.session_state.pago_impactado = False
+        if "contrato_impactado_id" not in st.session_state:
+            st.session_state.contrato_impactado_id = None
+        with tab_pagos:
+            st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
+
+            # ── Cotización USD del momento del cobro ──────────────────────
+            _usd_pago_col, _ = st.columns([2, 3])
+            _cotizacion_usd_pago = _usd_pago_col.number_input(
+                "💵 Cotización USD al momento del cobro ($ ARS por 1 USD):",
+                min_value=1.0,
+                value=float(st.session_state.get("cotizacion_usd_hist", 1300.0)),
+                step=10.0,
+                key="cotizacion_usd_pago_input",
+                help="Este valor se guardará junto al pago y no cambiará aunque la cotización cambie después"
+            )
+            st.session_state["cotizacion_usd_hist"] = _cotizacion_usd_pago
+        
+            conn = conectar_db()
         # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
-        query_activos = '''
-            SELECT 
-                c.codigo, p.alias_propiedad, 
-                (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS propiedad_dir,
-                i.apellidos, i.nombres, i.telefono, i.email,
-                c.prox_actualizacion, c.alquiler, c.indice, c.act_contrato, c.calc_duracion,
-                c.fin_contrato,
-                c.mes_contrato, c.monto_honorarios, c.honorarios_pagados, c.monto_garantia, c.garantia, c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
-                c.servicios, c.inicio_contrato, c.monto_inicial
-            FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
-            WHERE c.estado = 'Activo'
-            ORDER BY c.codigo DESC
-        '''
-        
-        df_activos = pd.read_sql_query(query_activos, conn)
-        conn.close()
-        
-        # --- PROCESAMIENTO DINÁMICO DEL ALQUILER ACTUALIZADO ---
-        dict_activos = {}
-        for _, r in df_activos.iterrows():
-            datos_dict = r.to_dict()
+            query_activos = '''
+                SELECT 
+                    c.codigo, p.alias_propiedad, 
+                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS propiedad_dir,
+                    i.apellidos, i.nombres, i.telefono, i.email,
+                    c.prox_actualizacion, c.alquiler, c.indice, c.act_contrato, c.calc_duracion,
+                    c.fin_contrato,
+                    c.mes_contrato, c.monto_honorarios, c.honorarios_pagados, c.monto_garantia, c.garantia, c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
+                    c.servicios, c.inicio_contrato, c.monto_inicial
+                FROM contratos c
+                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN inquilinos i ON c.inquilino_id = i.id
+                WHERE c.estado = 'Activo'
+                ORDER BY c.codigo DESC
+            '''
             
-            texto_servicios = str(r['servicios'])
-            match_alquiler = re.search(r'\[Alq\.Actualizado:\s*\$?([\d\.,]+)', texto_servicios)
+            df_activos = pd.read_sql_query(query_activos, conn)
+            conn.close()
             
-            if match_alquiler:
-                valor_actualizado_parseado = limpiar_string_a_float(match_alquiler.group(1))
-                if valor_actualizado_parseado > 0:
-                    datos_dict['alquiler'] = valor_actualizado_parseado
-                    
-            key_desplegable = f"Cod: {r['codigo']} | {r['alias_propiedad']} - Inquilino: {str(r['apellidos']).upper()}, {str(r['nombres']).title()}"
-            dict_activos[key_desplegable] = datos_dict
-        
-        if not dict_activos:
-            st.info("No se registran contratos en estado 'Activo' para liquidar pagos.")
-        else:
-            contrato_seleccionado = st.selectbox("Seleccione el Contrato Activo a liquidar:", options=list(dict_activos.keys()), key="sb_pago_activo")
-            c_datos = dict_activos[contrato_seleccionado]
-
-            st.markdown("### 📝 Datos de la Liquidación Actual")
+            # --- PROCESAMIENTO DINÁMICO DEL ALQUILER ACTUALIZADO ---
+            dict_activos = {}
+            for _, r in df_activos.iterrows():
+                datos_dict = r.to_dict()
+                
+                texto_servicios = str(r['servicios'])
+                match_alquiler = re.search(r'\[Alq\.Actualizado:\s*\$?([\d\.,]+)', texto_servicios)
+                
+                if match_alquiler:
+                    valor_actualizado_parseado = limpiar_string_a_float(match_alquiler.group(1))
+                    if valor_actualizado_parseado > 0:
+                        datos_dict['alquiler'] = valor_actualizado_parseado
+                        
+                key_desplegable = f"Cod: {r['codigo']} | {r['alias_propiedad']} - Inquilino: {str(r['apellidos']).upper()}, {str(r['nombres']).title()}"
+                dict_activos[key_desplegable] = datos_dict
             
-            # --- REPLICACIÓN DE ALERTAS DE ACTUALIZACIÓN ---
-            try:
-                try:
-                    inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%Y-%m-%d").date()
-                except ValueError:
-                    inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%d/%m/%Y").date()
-                duracion_meses = int(c_datos['calc_duracion'] or 0)
-                fin_contrato_dt = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=duracion_meses)
-                
-                opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-                act_contrato_sel = c_datos['act_contrato']
-                meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
-                
-                fecha_hoy = datetime.now().date()
-                prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                
-                while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
-                    prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                    
-                necesita_renovacion = prox_actualizacion_calculada > fin_contrato_dt
-                
-                diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato_dt)
-                total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
-                if total_meses_transcurridos < 0: total_meses_transcurridos = 0
-                mes_actual_contrato_vivo = total_meses_transcurridos + 1
-                
-                es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
-                
-                if necesita_renovacion:
-                    st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
-                elif es_mes_de_actualizacion:
-                    st.warning(f"⚠️ **AVISO:** El inquilino está en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_sel}', **corresponde aplicar una actualización del monto** en este periodo.")
-                else:
-                    st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
-                    
-            except Exception as e:
-                st.error(f"No se pudieron calcular las alertas de período para este contrato: {e}")
-
-            # 2. SECCIÓN DE COLUMNAS E INPUTS NUMÉRICOS (EDICIÓN DE MONTOS)
-            st.markdown("#### 🔧 Ajustar montos para el período actual")
-            ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
-            
-            val_base_expensas = float(c_datos['expensas'] or 0.0)
-            val_base_edesal = float(c_datos['edesal'] or 0.0)
-            val_base_gas = float(c_datos['gas'] or 0.0)
-            val_base_municipalidad = float(c_datos['municipalidad'] or 0.0)
-            val_base_cochera = float(c_datos['cochera'] or 0.0)
-            
-            monto_expensas = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, value=val_base_expensas, step=500.0)
-            monto_edesal = ed_col2.number_input("⚡ Luz (EDESAL) ($):", min_value=0.0, value=val_base_edesal, step=500.0)
-            monto_gas = ed_col3.number_input("🔥 Gas Natural ($):", min_value=0.0, value=val_base_gas, step=500.0)
-            monto_municipalidad = ed_col4.number_input("🏛️ Tasas Municipales ($):", min_value=0.0, value=val_base_municipalidad, step=200.0)
-            monto_cochera = ed_col5.number_input("🚗 Alquiler Cochera ($):", min_value=0.0, value=val_base_cochera, step=1000.0)
-
-            # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
-            st.markdown("#### 📑 Conceptos Especiales de Contrato")
-            ed_col_esp1, ed_col_esp2 = st.columns(2)
-            
-            # Lógica de Honorarios
-            total_honorarios_inquilino = float(c_datos['monto_inicial'] or 0.0)
-            pagado_honorarios_inquilino = float(c_datos['honorarios_pagados'] or 0.0)
-            saldo_honorarios_inquilino = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
-            
-            monto_honorarios_pago = ed_col_esp1.number_input(
-                "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):", 
-                min_value=0.0, 
-                value=saldo_honorarios_inquilino, 
-                step=1000.0, 
-                help=f"Comisión Pactada Inquilino: ${total_honorarios_inquilino:.2f}. Pagado a la fecha: ${pagado_honorarios_inquilino:.2f}. Saldo restante: ${saldo_honorarios_inquilino:.2f}"
-            )
-            
-            # Lógica de Garantía REFORMADA (Sincronizada con el campo 'garantia' de la carga)
-            val_teorico_garantia = float(c_datos['monto_garantia'] or 0.0)
-            try:
-                pagado_garantia_inquilino = float(c_datos['garantia'] or 0.0)
-            except ValueError:
-                pagado_garantia_inquilino = 0.0
-                
-            saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
-            
-            monto_garantia_pago = ed_col_esp2.number_input(
-                "🛡️ Respaldo con Monto Depositado (Garantía) ($):", 
-                min_value=0.0, 
-                value=saldo_garantia_inquilino, 
-                step=5000.0, 
-                help=f"Monto de garantía estipulado: ${val_teorico_garantia:.2f}. Depositado a la fecha: ${pagado_garantia_inquilino:.2f}. Saldo faltante: ${saldo_garantia_inquilino:.2f}"
-            )
-
-            # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
-            detalles_recibo_servicios = []
-            desglose_pantalla_pdf = []
-            
-            if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']):
-                detalles_recibo_servicios.append(f" - Imp. Inmobiliario: $ {c_datos['imp_inmobiliario']:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "📌 Impuesto Inmobiliario Provincial", "Monto": c_datos['imp_inmobiliario']})
-                
-            if monto_expensas > 0:
-                detalles_recibo_servicios.append(f" - Expensas Consorcio: $ {monto_expensas:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🏢 Expensas Consorcio", "Monto": monto_expensas})
-                
-            if monto_edesal > 0:
-                detalles_recibo_servicios.append(f" - Luz (EDESAL): $ {monto_edesal:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "⚡ Energía Eléctrica (EDESAL)", "Monto": monto_edesal})
-                
-            if monto_gas > 0:
-                detalles_recibo_servicios.append(f" - Gas Natural: $ {monto_gas:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🔥 Gas Natural", "Monto": monto_gas})
-                
-            if monto_municipalidad > 0:
-                detalles_recibo_servicios.append(f" - Tasas Municipales: $ {monto_municipalidad:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🏛️ Tasas Municipales", "Monto": monto_municipalidad})
-                
-            if c_datos['ooss'] and c_datos['ooss'] > 0:
-                detalles_recibo_servicios.append(f" - Obras Sanitarias (OO.SS): $ {c_datos['ooss']:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "💧 Obras Sanitarias (OO.SS)", "Monto": c_datos['ooss']})
-                
-            if monto_cochera > 0:
-                detalles_recibo_servicios.append(f" - Alquiler Cochera: $ {monto_cochera:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🚗 Alquiler Cochera Complementaria", "Monto": monto_cochera})
-
-            if monto_honorarios_pago > 0:
-                detalles_recibo_servicios.append(f" - Honorarios Inmobiliaria: $ {monto_honorarios_pago:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "💼 Honorarios Inmobiliaria (Comisión de Contrato)", "Monto": monto_honorarios_pago})
-                
-            if monto_garantia_pago > 0:
-                detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
-
-            # Sumatoria dinámica de la parte variable de servicios modificada en pantalla + los nuevos conceptos
-            val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
-            val_ooss = float(c_datos['ooss'] or 0.0)
-            
-            monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
-
-            # ── MONTO NETO ALQUILER con cálculo automático de índice ─────────
-            val_monto_ini_recibo = float(c_datos['monto_inicial'] or 0.0)
-            val_alq_ultimo_recibo = float(c_datos['alquiler'] or 0.0)
-            indice_recibo = str(c_datos.get('indice') or 'ICL').upper()
-
-            # Convertir date a datetime igual que en la pestaña de carga
-            inicio_contrato_recibo = datetime.combine(inicio_contrato_dt, datetime.min.time())
-
-            st.markdown("#### 💰 Monto Neto de Alquiler")
-            r_col1, r_col2, r_col3 = st.columns([2, 2, 2])
-            r_col1.markdown(f"🔗 [Verificar en arquiler.com](https://arquiler.com/pwa?amount={int(val_monto_ini_recibo)}&date={inicio_contrato_dt.strftime('%Y-%m-%d')}&months={meses_a_sumar}&rate={indice_recibo.lower()})")
-
-            # Mismo bloque exacto que en pestaña de carga
-            valor_auto_recibo = None
-            if indice_recibo in ("ICL", "IPC"):
-                with st.spinner(f"⏳ Consultando {indice_recibo}..."):
-                    if indice_recibo == "ICL":
-                        valor_auto_recibo = calcular_valor_actualizado_icl(
-                            val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
-                        )
-                    elif indice_recibo == "IPC":
-                        valor_auto_recibo = calcular_valor_actualizado_ipc(
-                            val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
-                        )
-
-            if valor_auto_recibo is not None:
-                valor_auto_recibo_fmt = f"$ {valor_auto_recibo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-                r_col2.metric(
-                    label=f"📡 Auto {indice_recibo} (oficial)",
-                    value=valor_auto_recibo_fmt,
-                    help=f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}."
-                )
-                val_base_alq = valor_auto_recibo
+            if not dict_activos:
+                st.info("No se registran contratos en estado 'Activo' para liquidar pagos.")
             else:
-                if indice_recibo in ("ICL", "IPC"):
-                    r_col2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
-                val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
+                contrato_seleccionado = st.selectbox("Seleccione el Contrato Activo a liquidar:", options=list(dict_activos.keys()), key="sb_pago_activo")
+                c_datos = dict_activos[contrato_seleccionado]
 
-            cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
-            monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0)
-            
-            # Muestra el total consolidado de conceptos adicionales de forma informativa
-            cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
-            
-            total_pago_real = monto_alq_pago + monto_serv_pago
-            cp_col3.number_input("TOTAL A RECAUDAR ($):", value=total_pago_real, disabled=True)
-            metodo_pago = cp_col4.selectbox("Método de Pago:", ["Transferencia Bancaria", "Efectivo", "Depósito", "Cheque"])
+                st.markdown("### 📝 Datos de la Liquidación Actual")
+                
+                # --- REPLICACIÓN DE ALERTAS DE ACTUALIZACIÓN ---
+                try:
+                    try:
+                        inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%Y-%m-%d").date()
+                    except ValueError:
+                        inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%d/%m/%Y").date()
+                    duracion_meses = int(c_datos['calc_duracion'] or 0)
+                    fin_contrato_dt = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=duracion_meses)
+                    
+                    opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+                    act_contrato_sel = c_datos['act_contrato']
+                    meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
+                    
+                    fecha_hoy = datetime.now().date()
+                    prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                    
+                    while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
+                        prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                        
+                    necesita_renovacion = prox_actualizacion_calculada > fin_contrato_dt
+                    
+                    diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato_dt)
+                    total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
+                    if total_meses_transcurridos < 0: total_meses_transcurridos = 0
+                    mes_actual_contrato_vivo = total_meses_transcurridos + 1
+                    
+                    es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
+                    
+                    if necesita_renovacion:
+                        st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
+                    elif es_mes_de_actualizacion:
+                        st.warning(f"⚠️ **AVISO:** El inquilino está en el mes {mes_actual_contrato_vivo} de contrato. Según la frecuencia '{act_contrato_sel}', **corresponde aplicar una actualización del monto** en este periodo.")
+                    else:
+                        st.info(f"Estado: Período normal (Mes {mes_actual_contrato_vivo}). No corresponde actualizar el alquiler este mes.")
+                        
+                except Exception as e:
+                    st.error(f"No se pudieron calcular las alertas de período para este contrato: {e}")
 
-            
-            # 3. CONSTRUCCIÓN DE LA TABLA EDITABLE DE CONCEPTOS
-            with st.expander("🔍 Ver y editar conceptos del comprobante", expanded=True):
-                st.markdown("Podés ajustar la descripción y el monto de cada concepto antes de generar el comprobante. Los cambios sólo afectan al PDF.")
+                # 2. SECCIÓN DE COLUMNAS E INPUTS NUMÉRICOS (EDICIÓN DE MONTOS)
+                st.markdown("#### 🔧 Ajustar montos para el período actual")
+                ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
+                
+                val_base_expensas = float(c_datos['expensas'] or 0.0)
+                val_base_edesal = float(c_datos['edesal'] or 0.0)
+                val_base_gas = float(c_datos['gas'] or 0.0)
+                val_base_municipalidad = float(c_datos['municipalidad'] or 0.0)
+                val_base_cochera = float(c_datos['cochera'] or 0.0)
+                
+                monto_expensas = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, value=val_base_expensas, step=500.0)
+                monto_edesal = ed_col2.number_input("⚡ Luz (EDESAL) ($):", min_value=0.0, value=val_base_edesal, step=500.0)
+                monto_gas = ed_col3.number_input("🔥 Gas Natural ($):", min_value=0.0, value=val_base_gas, step=500.0)
+                monto_municipalidad = ed_col4.number_input("🏛️ Tasas Municipales ($):", min_value=0.0, value=val_base_municipalidad, step=200.0)
+                monto_cochera = ed_col5.number_input("🚗 Alquiler Cochera ($):", min_value=0.0, value=val_base_cochera, step=1000.0)
 
-                # ── Fila del alquiler base (siempre presente, editable) ──
-                _ecol_h1, _ecol_h2 = st.columns([3, 1])
-                _ecol_h1.markdown("**Descripción**")
-                _ecol_h2.markdown("**Monto ($)**")
-
-                _alq_desc_edit = st.text_input(
-                    "Descripción alquiler",
-                    value="Valor Locativo Neto (Alquiler Base)",
-                    label_visibility="collapsed",
-                    key=f"desc_alq_{c_datos['codigo']}"
+                # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
+                st.markdown("#### 📑 Conceptos Especiales de Contrato")
+                ed_col_esp1, ed_col_esp2 = st.columns(2)
+                
+                # Lógica de Honorarios
+                total_honorarios_inquilino = float(c_datos['monto_inicial'] or 0.0)
+                pagado_honorarios_inquilino = float(c_datos['honorarios_pagados'] or 0.0)
+                saldo_honorarios_inquilino = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
+                
+                monto_honorarios_pago = ed_col_esp1.number_input(
+                    "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):", 
+                    min_value=0.0, 
+                    value=saldo_honorarios_inquilino, 
+                    step=1000.0, 
+                    help=f"Comisión Pactada Inquilino: ${total_honorarios_inquilino:.2f}. Pagado a la fecha: ${pagado_honorarios_inquilino:.2f}. Saldo restante: ${saldo_honorarios_inquilino:.2f}"
                 )
-                # monto_alq_pago ya viene del number_input de arriba; lo mostramos como referencia
-                _ecol_h2.markdown(f"$ {monto_alq_pago:,.2f}")
+                
+                # Lógica de Garantía REFORMADA (Sincronizada con el campo 'garantia' de la carga)
+                val_teorico_garantia = float(c_datos['monto_garantia'] or 0.0)
+                try:
+                    pagado_garantia_inquilino = float(c_datos['garantia'] or 0.0)
+                except ValueError:
+                    pagado_garantia_inquilino = 0.0
+                    
+                saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
+                
+                monto_garantia_pago = ed_col_esp2.number_input(
+                    "🛡️ Respaldo con Monto Depositado (Garantía) ($):", 
+                    min_value=0.0, 
+                    value=saldo_garantia_inquilino, 
+                    step=5000.0, 
+                    help=f"Monto de garantía estipulado: ${val_teorico_garantia:.2f}. Depositado a la fecha: ${pagado_garantia_inquilino:.2f}. Saldo faltante: ${saldo_garantia_inquilino:.2f}"
+                )
 
-                # ── Filas editables para cada concepto de servicio ──
-                _desglose_editado = []   # lista de {"Concepto": str, "Monto": float}
-                for _idx_item, _item in enumerate(desglose_pantalla_pdf):
-                    _ic1, _ic2 = st.columns([3, 1])
-                    _desc_e = _ic1.text_input(
-                        f"desc_{_idx_item}",
-                        value=_item["Concepto"],
-                        label_visibility="collapsed",
-                        key=f"desc_{c_datos['codigo']}_{_idx_item}"
+                # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
+                detalles_recibo_servicios = []
+                desglose_pantalla_pdf = []
+                
+                if c_datos['imp_inmobiliario'] and c_datos['imp_inmobiliario'] > 0 and "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']):
+                    detalles_recibo_servicios.append(f" - Imp. Inmobiliario: $ {c_datos['imp_inmobiliario']:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "📌 Impuesto Inmobiliario Provincial", "Monto": c_datos['imp_inmobiliario']})
+                    
+                if monto_expensas > 0:
+                    detalles_recibo_servicios.append(f" - Expensas Consorcio: $ {monto_expensas:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🏢 Expensas Consorcio", "Monto": monto_expensas})
+                    
+                if monto_edesal > 0:
+                    detalles_recibo_servicios.append(f" - Luz (EDESAL): $ {monto_edesal:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "⚡ Energía Eléctrica (EDESAL)", "Monto": monto_edesal})
+                    
+                if monto_gas > 0:
+                    detalles_recibo_servicios.append(f" - Gas Natural: $ {monto_gas:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🔥 Gas Natural", "Monto": monto_gas})
+                    
+                if monto_municipalidad > 0:
+                    detalles_recibo_servicios.append(f" - Tasas Municipales: $ {monto_municipalidad:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🏛️ Tasas Municipales", "Monto": monto_municipalidad})
+                    
+                if c_datos['ooss'] and c_datos['ooss'] > 0:
+                    detalles_recibo_servicios.append(f" - Obras Sanitarias (OO.SS): $ {c_datos['ooss']:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "💧 Obras Sanitarias (OO.SS)", "Monto": c_datos['ooss']})
+                    
+                if monto_cochera > 0:
+                    detalles_recibo_servicios.append(f" - Alquiler Cochera: $ {monto_cochera:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🚗 Alquiler Cochera Complementaria", "Monto": monto_cochera})
+
+                if monto_honorarios_pago > 0:
+                    detalles_recibo_servicios.append(f" - Honorarios Inmobiliaria: $ {monto_honorarios_pago:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "💼 Honorarios Inmobiliaria (Comisión de Contrato)", "Monto": monto_honorarios_pago})
+                    
+                if monto_garantia_pago > 0:
+                    detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
+                    desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
+
+                # Sumatoria dinámica de la parte variable de servicios modificada en pantalla + los nuevos conceptos
+                val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
+                val_ooss = float(c_datos['ooss'] or 0.0)
+                
+                monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
+
+                # ── MONTO NETO ALQUILER con cálculo automático de índice ─────────
+                val_monto_ini_recibo = float(c_datos['monto_inicial'] or 0.0)
+                val_alq_ultimo_recibo = float(c_datos['alquiler'] or 0.0)
+                indice_recibo = str(c_datos.get('indice') or 'ICL').upper()
+
+                # Convertir date a datetime igual que en la pestaña de carga
+                inicio_contrato_recibo = datetime.combine(inicio_contrato_dt, datetime.min.time())
+
+                st.markdown("#### 💰 Monto Neto de Alquiler")
+                r_col1, r_col2, r_col3 = st.columns([2, 2, 2])
+                r_col1.markdown(f"🔗 [Verificar en arquiler.com](https://arquiler.com/pwa?amount={int(val_monto_ini_recibo)}&date={inicio_contrato_dt.strftime('%Y-%m-%d')}&months={meses_a_sumar}&rate={indice_recibo.lower()})")
+
+                # Mismo bloque exacto que en pestaña de carga
+                valor_auto_recibo = None
+                if indice_recibo in ("ICL", "IPC"):
+                    with st.spinner(f"⏳ Consultando {indice_recibo}..."):
+                        if indice_recibo == "ICL":
+                            valor_auto_recibo = calcular_valor_actualizado_icl(
+                                val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            )
+                        elif indice_recibo == "IPC":
+                            valor_auto_recibo = calcular_valor_actualizado_ipc(
+                                val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            )
+
+                if valor_auto_recibo is not None:
+                    valor_auto_recibo_fmt = f"$ {valor_auto_recibo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    r_col2.metric(
+                        label=f"📡 Auto {indice_recibo} (oficial)",
+                        value=valor_auto_recibo_fmt,
+                        help=f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}."
                     )
-                    _monto_e = _ic2.number_input(
-                        f"monto_{_idx_item}",
-                        value=float(_item["Monto"]),
+                    val_base_alq = valor_auto_recibo
+                else:
+                    if indice_recibo in ("ICL", "IPC"):
+                        r_col2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
+                    val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
+
+                cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
+                monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0)
+                
+                # Muestra el total consolidado de conceptos adicionales de forma informativa
+                cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
+                
+                total_pago_real = monto_alq_pago + monto_serv_pago
+                cp_col3.number_input("TOTAL A RECAUDAR ($):", value=total_pago_real, disabled=True)
+                metodo_pago = cp_col4.selectbox("Método de Pago:", ["Transferencia Bancaria", "Efectivo", "Depósito", "Cheque"])
+
+                
+                # 3. CONSTRUCCIÓN DE LA TABLA EDITABLE DE CONCEPTOS
+                with st.expander("🔍 Ver y editar conceptos del comprobante", expanded=True):
+                    st.markdown("Podés ajustar la descripción y el monto de cada concepto antes de generar el comprobante. Los cambios sólo afectan al PDF.")
+
+                    # ── Fila del alquiler base (siempre presente, editable) ──
+                    _ecol_h1, _ecol_h2 = st.columns([3, 1])
+                    _ecol_h1.markdown("**Descripción**")
+                    _ecol_h2.markdown("**Monto ($)**")
+
+                    _alq_desc_edit = st.text_input(
+                        "Descripción alquiler",
+                        value="Valor Locativo Neto (Alquiler Base)",
+                        label_visibility="collapsed",
+                        key=f"desc_alq_{c_datos['codigo']}"
+                    )
+                    # monto_alq_pago ya viene del number_input de arriba; lo mostramos como referencia
+                    _ecol_h2.markdown(f"$ {monto_alq_pago:,.2f}")
+
+                    # ── Filas editables para cada concepto de servicio ──
+                    _desglose_editado = []   # lista de {"Concepto": str, "Monto": float}
+                    for _idx_item, _item in enumerate(desglose_pantalla_pdf):
+                        _ic1, _ic2 = st.columns([3, 1])
+                        _desc_e = _ic1.text_input(
+                            f"desc_{_idx_item}",
+                            value=_item["Concepto"],
+                            label_visibility="collapsed",
+                            key=f"desc_{c_datos['codigo']}_{_idx_item}"
+                        )
+                        _monto_e = _ic2.number_input(
+                            f"monto_{_idx_item}",
+                            value=float(_item["Monto"]),
+                            min_value=0.0,
+                            step=100.0,
+                            label_visibility="collapsed",
+                            key=f"monto_{c_datos['codigo']}_{_idx_item}"
+                        )
+                        _desglose_editado.append({"Concepto": _desc_e, "Monto": _monto_e})
+
+                    # ── Línea extra libre ──
+                    st.markdown("---")
+                    st.caption("➕ Concepto adicional libre (opcional)")
+                    _extra_c1, _extra_c2 = st.columns([3, 1])
+                    _extra_desc = _extra_c1.text_input(
+                        "Descripción extra",
+                        value="",
+                        placeholder="Ej: Sellado de contrato, Multa por mora...",
+                        label_visibility="collapsed",
+                        key=f"extra_desc_{c_datos['codigo']}"
+                    )
+                    _extra_monto = _extra_c2.number_input(
+                        "Monto extra",
+                        value=0.0,
                         min_value=0.0,
                         step=100.0,
                         label_visibility="collapsed",
-                        key=f"monto_{c_datos['codigo']}_{_idx_item}"
+                        key=f"extra_monto_{c_datos['codigo']}"
                     )
-                    _desglose_editado.append({"Concepto": _desc_e, "Monto": _monto_e})
+                    if _extra_desc.strip() and _extra_monto > 0:
+                        _desglose_editado.append({"Concepto": _extra_desc.strip(), "Monto": _extra_monto})
 
-                # ── Línea extra libre ──
-                st.markdown("---")
-                st.caption("➕ Concepto adicional libre (opcional)")
-                _extra_c1, _extra_c2 = st.columns([3, 1])
-                _extra_desc = _extra_c1.text_input(
-                    "Descripción extra",
-                    value="",
-                    placeholder="Ej: Sellado de contrato, Multa por mora...",
-                    label_visibility="collapsed",
-                    key=f"extra_desc_{c_datos['codigo']}"
+                    # ── Recalcular total con montos editados ──
+                    _total_servicios_editado = sum(d["Monto"] for d in _desglose_editado)
+                    _total_comprobante_editado = monto_alq_pago + _total_servicios_editado
+                    st.markdown(f"**Total comprobante: $ {_total_comprobante_editado:,.2f}**")
+
+                # --- NUEVA LÓGICA: Período calculado dinámicamente desde fechas ---
+                try:
+                    _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%d/%m/%Y").date()
+                try:
+                    _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%d/%m/%Y").date()
+
+                # Mes actual del contrato: meses transcurridos desde el inicio + 1
+                _diff_actual = dateutil.relativedelta.relativedelta(datetime.now().date(), _inicio_dt)
+                _meses_transcurridos = (_diff_actual.years * 12) + _diff_actual.months
+                if _meses_transcurridos < 0:
+                    _meses_transcurridos = 0
+                mes_actual_num = _meses_transcurridos + 1
+
+                # Duración total en meses entre inicio y fin del contrato
+                _delta = dateutil.relativedelta.relativedelta(_fin_dt, _inicio_dt)
+                meses_totales_contrato = (_delta.years * 12) + _delta.months
+                if meses_totales_contrato <= 0:
+                    meses_totales_contrato = int(c_datos.get('calc_duracion') or 0)
+
+                # Generar lista de todos los meses del contrato
+                opciones_periodo = [f"Mes {m} de {meses_totales_contrato}" for m in range(1, meses_totales_contrato + 1)]
+                indice_default = max(0, min(mes_actual_num - 1, len(opciones_periodo) - 1))
+
+                mes_periodo_texto = st.selectbox(
+                    "📅 Período a liquidar:",
+                    options=opciones_periodo,
+                    index=indice_default,
+                    key=f"sel_periodo_{c_datos['codigo']}"
                 )
-                _extra_monto = _extra_c2.number_input(
-                    "Monto extra",
-                    value=0.0,
-                    min_value=0.0,
-                    step=100.0,
-                    label_visibility="collapsed",
-                    key=f"extra_monto_{c_datos['codigo']}"
-                )
-                if _extra_desc.strip() and _extra_monto > 0:
-                    _desglose_editado.append({"Concepto": _extra_desc.strip(), "Monto": _extra_monto})
 
-                # ── Recalcular total con montos editados ──
-                _total_servicios_editado = sum(d["Monto"] for d in _desglose_editado)
-                _total_comprobante_editado = monto_alq_pago + _total_servicios_editado
-                st.markdown(f"**Total comprobante: $ {_total_comprobante_editado:,.2f}**")
+                # --- VERIFICAR SI YA EXISTE UN PAGO PARA ESTE PERÍODO ---
+                with conectar_db() as _conn_chk:
+                    _rows_existentes = _conn_chk.execute(
+                        "SELECT monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo = ? ORDER BY id DESC",
+                        (c_datos['codigo'], mes_periodo_texto)
+                    ).fetchall()
 
-            # --- NUEVA LÓGICA: Período calculado dinámicamente desde fechas ---
-            try:
-                _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%Y-%m-%d").date()
-            except ValueError:
-                _inicio_dt = datetime.strptime(str(c_datos['inicio_contrato']), "%d/%m/%Y").date()
-            try:
-                _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%Y-%m-%d").date()
-            except ValueError:
-                _fin_dt = datetime.strptime(str(c_datos['fin_contrato']), "%d/%m/%Y").date()
+                    # Saldos pendientes de períodos ANTERIORES (todos excepto el seleccionado)
+                    _todos_los_pagos = _conn_chk.execute(
+                        "SELECT periodo, monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo != ? ORDER BY id ASC",
+                        (c_datos['codigo'], mes_periodo_texto)
+                    ).fetchall()
 
-            # Mes actual del contrato: meses transcurridos desde el inicio + 1
-            _diff_actual = dateutil.relativedelta.relativedelta(datetime.now().date(), _inicio_dt)
-            _meses_transcurridos = (_diff_actual.years * 12) + _diff_actual.months
-            if _meses_transcurridos < 0:
-                _meses_transcurridos = 0
-            mes_actual_num = _meses_transcurridos + 1
+                _row_existente = _rows_existentes[0] if _rows_existentes else None
 
-            # Duración total en meses entre inicio y fin del contrato
-            _delta = dateutil.relativedelta.relativedelta(_fin_dt, _inicio_dt)
-            meses_totales_contrato = (_delta.years * 12) + _delta.months
-            if meses_totales_contrato <= 0:
-                meses_totales_contrato = int(c_datos.get('calc_duracion') or 0)
+                # Calcular saldos pendientes de períodos anteriores
+                # Leemos directamente la columna saldo_pendiente (suma por período, el último registro es el vigente)
+                _saldos_anteriores_detalle = {}
+                for _p, _monto, _coment in _todos_los_pagos:
+                    _abonado = float(_monto or 0)
+                    # Extraer saldo de comentarios (compatibilidad con registros viejos)
+                    import re as _re
+                    _match_tot = _re.search(r'Saldo: \$ ([\d\.,]+)', _coment or "")
+                    if _match_tot:
+                        _saldo_ese = float(_match_tot.group(1).replace('.','').replace(',','.'))
+                        _saldos_anteriores_detalle[_p] = _saldo_ese
 
-            # Generar lista de todos los meses del contrato
-            opciones_periodo = [f"Mes {m} de {meses_totales_contrato}" for m in range(1, meses_totales_contrato + 1)]
-            indice_default = max(0, min(mes_actual_num - 1, len(opciones_periodo) - 1))
+                # Complementar con la columna saldo_pendiente de registros nuevos
+                with conectar_db() as _conn_sp:
+                    _sp_rows = _conn_sp.execute(
+                        """SELECT periodo, saldo_pendiente FROM pagos_historial
+                           WHERE contrato_id = ? AND periodo != ?
+                           AND saldo_pendiente > 0
+                           ORDER BY id DESC""",
+                        (c_datos['codigo'], mes_periodo_texto)
+                    ).fetchall()
+                # La columna saldo_pendiente tiene prioridad sobre el texto del comentario
+                for _p_sp, _s_sp in _sp_rows:
+                    _saldos_anteriores_detalle[_p_sp] = float(_s_sp or 0)
 
-            mes_periodo_texto = st.selectbox(
-                "📅 Período a liquidar:",
-                options=opciones_periodo,
-                index=indice_default,
-                key=f"sel_periodo_{c_datos['codigo']}"
-            )
+                # Filtrar solo los que efectivamente tienen saldo > 0
+                _saldos_anteriores_detalle = {p: s for p, s in _saldos_anteriores_detalle.items() if s > 0}
+                _total_saldos_anteriores = sum(_saldos_anteriores_detalle.values())
 
-            # --- VERIFICAR SI YA EXISTE UN PAGO PARA ESTE PERÍODO ---
-            with conectar_db() as _conn_chk:
-                _rows_existentes = _conn_chk.execute(
-                    "SELECT monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo = ? ORDER BY id DESC",
-                    (c_datos['codigo'], mes_periodo_texto)
-                ).fetchall()
-
-                # Saldos pendientes de períodos ANTERIORES (todos excepto el seleccionado)
-                _todos_los_pagos = _conn_chk.execute(
-                    "SELECT periodo, monto_total, comentarios FROM pagos_historial WHERE contrato_id = ? AND periodo != ? ORDER BY id ASC",
-                    (c_datos['codigo'], mes_periodo_texto)
-                ).fetchall()
-
-            _row_existente = _rows_existentes[0] if _rows_existentes else None
-
-            # Calcular saldos pendientes de períodos anteriores
-            # Leemos directamente la columna saldo_pendiente (suma por período, el último registro es el vigente)
-            _saldos_anteriores_detalle = {}
-            for _p, _monto, _coment in _todos_los_pagos:
-                _abonado = float(_monto or 0)
-                # Extraer saldo de comentarios (compatibilidad con registros viejos)
-                import re as _re
-                _match_tot = _re.search(r'Saldo: \$ ([\d\.,]+)', _coment or "")
-                if _match_tot:
-                    _saldo_ese = float(_match_tot.group(1).replace('.','').replace(',','.'))
-                    _saldos_anteriores_detalle[_p] = _saldo_ese
-
-            # Complementar con la columna saldo_pendiente de registros nuevos
-            with conectar_db() as _conn_sp:
-                _sp_rows = _conn_sp.execute(
-                    """SELECT periodo, saldo_pendiente FROM pagos_historial
-                       WHERE contrato_id = ? AND periodo != ?
-                       AND saldo_pendiente > 0
-                       ORDER BY id DESC""",
-                    (c_datos['codigo'], mes_periodo_texto)
-                ).fetchall()
-            # La columna saldo_pendiente tiene prioridad sobre el texto del comentario
-            for _p_sp, _s_sp in _sp_rows:
-                _saldos_anteriores_detalle[_p_sp] = float(_s_sp or 0)
-
-            # Filtrar solo los que efectivamente tienen saldo > 0
-            _saldos_anteriores_detalle = {p: s for p, s in _saldos_anteriores_detalle.items() if s > 0}
-            _total_saldos_anteriores = sum(_saldos_anteriores_detalle.values())
-
-            # Calcular saldo acumulado real del período seleccionado
-            saldo_periodo_anterior = 0.0
-            _total_abonado_periodo = 0.0
-            if _row_existente:
-                _total_abonado_periodo = sum(float(r[0] or 0) for r in _rows_existentes)
-                saldo_periodo_anterior = max(0.0, total_pago_real - _total_abonado_periodo)
-                if saldo_periodo_anterior > 0:
-                    st.warning(
-                        f"⚠️ **Período {mes_periodo_texto} con pago parcial registrado.** "
-                        f"Total abonado hasta ahora: **$ {_total_abonado_periodo:,.2f}** — "
-                        f"Saldo pendiente: **$ {saldo_periodo_anterior:,.2f}**"
-                    )
+                # Calcular saldo acumulado real del período seleccionado
+                saldo_periodo_anterior = 0.0
+                _total_abonado_periodo = 0.0
+                if _row_existente:
+                    _total_abonado_periodo = sum(float(r[0] or 0) for r in _rows_existentes)
+                    saldo_periodo_anterior = max(0.0, total_pago_real - _total_abonado_periodo)
+                    if saldo_periodo_anterior > 0:
+                        st.warning(
+                            f"⚠️ **Período {mes_periodo_texto} con pago parcial registrado.** "
+                            f"Total abonado hasta ahora: **$ {_total_abonado_periodo:,.2f}** — "
+                            f"Saldo pendiente: **$ {saldo_periodo_anterior:,.2f}**"
+                        )
+                    else:
+                        st.error(f"🔒 **{mes_periodo_texto} ya fue liquidado en su totalidad** (Total abonado: $ {_total_abonado_periodo:,.2f}). No se puede volver a impactar.")
                 else:
-                    st.error(f"🔒 **{mes_periodo_texto} ya fue liquidado en su totalidad** (Total abonado: $ {_total_abonado_periodo:,.2f}). No se puede volver a impactar.")
-            else:
-                # Período nuevo: mostrar y sumar saldos anteriores si existen
-                if _total_saldos_anteriores > 0:
-                    _detalle_saldos = " | ".join([f"{p}: $ {s:,.2f}" for p, s in _saldos_anteriores_detalle.items() if s > 0])
-                    st.warning(f"📋 Saldos pendientes de períodos anteriores: $ {_total_saldos_anteriores:,.2f} ({_detalle_saldos})")
+                    # Período nuevo: mostrar y sumar saldos anteriores si existen
+                    if _total_saldos_anteriores > 0:
+                        _detalle_saldos = " | ".join([f"{p}: $ {s:,.2f}" for p, s in _saldos_anteriores_detalle.items() if s > 0])
+                        st.warning(f"📋 Saldos pendientes de períodos anteriores: $ {_total_saldos_anteriores:,.2f} ({_detalle_saldos})")
 
-            # Total a cubrir en este recibo:
-            # - Período con saldo parcial → cubrir ese saldo
-            # - Período nuevo → total del mes + saldos de períodos anteriores
-            if saldo_periodo_anterior > 0:
-                _total_a_cubrir = saldo_periodo_anterior
-            elif not _row_existente:
-                _total_a_cubrir = total_pago_real + _total_saldos_anteriores
-                if _total_saldos_anteriores > 0:
-                    cp_col3.empty()  # reemplazar el widget anterior
-                    st.info(f"💰 **TOTAL A RECAUDAR (con saldos anteriores): $ {_total_a_cubrir:,.2f}**  "
-                            f"*(Mes actual: $ {total_pago_real:,.2f} + Saldos anteriores: $ {_total_saldos_anteriores:,.2f})*")
-            else:
-                _total_a_cubrir = total_pago_real
+                # Total a cubrir en este recibo:
+                # - Período con saldo parcial → cubrir ese saldo
+                # - Período nuevo → total del mes + saldos de períodos anteriores
+                if saldo_periodo_anterior > 0:
+                    _total_a_cubrir = saldo_periodo_anterior
+                elif not _row_existente:
+                    _total_a_cubrir = total_pago_real + _total_saldos_anteriores
+                    if _total_saldos_anteriores > 0:
+                        cp_col3.empty()  # reemplazar el widget anterior
+                        st.info(f"💰 **TOTAL A RECAUDAR (con saldos anteriores): $ {_total_a_cubrir:,.2f}**  "
+                                f"*(Mes actual: $ {total_pago_real:,.2f} + Saldos anteriores: $ {_total_saldos_anteriores:,.2f})*")
+                else:
+                    _total_a_cubrir = total_pago_real
 
-            # --- MONTO ABONADO Y SALDO PENDIENTE ---
-            _valor_default_abonado = float(_total_a_cubrir)
+                # --- MONTO ABONADO Y SALDO PENDIENTE ---
+                _valor_default_abonado = float(_total_a_cubrir)
 
-            saldo_col1, saldo_col2 = st.columns(2)
-            monto_abonado = saldo_col1.number_input(
-                "💵 Monto Abonado por el Inquilino ($):",
-                min_value=0.0,
-                value=float(_valor_default_abonado),
-                step=1000.0,
-                key=f"monto_abonado_{c_datos['codigo']}_{mes_periodo_texto}"
-            )
-            saldo_pendiente = _total_a_cubrir - monto_abonado
-            if saldo_pendiente > 0:
-                saldo_col2.metric("⚠️ Saldo Pendiente ($):", f"$ {saldo_pendiente:,.2f}", delta=f"-{saldo_pendiente:,.2f}", delta_color="inverse")
-            elif saldo_pendiente < 0:
-                saldo_col2.metric("✅ A Favor del Inquilino ($):", f"$ {abs(saldo_pendiente):,.2f}", delta=f"+{abs(saldo_pendiente):,.2f}", delta_color="normal")
-            else:
-                saldo_col2.metric("✅ Saldo Pendiente ($):", "$ 0,00 — Cancelado", delta="Pago completo", delta_color="off")
+                saldo_col1, saldo_col2 = st.columns(2)
+                monto_abonado = saldo_col1.number_input(
+                    "💵 Monto Abonado por el Inquilino ($):",
+                    min_value=0.0,
+                    value=float(_valor_default_abonado),
+                    step=1000.0,
+                    key=f"monto_abonado_{c_datos['codigo']}_{mes_periodo_texto}"
+                )
+                saldo_pendiente = _total_a_cubrir - monto_abonado
+                if saldo_pendiente > 0:
+                    saldo_col2.metric("⚠️ Saldo Pendiente ($):", f"$ {saldo_pendiente:,.2f}", delta=f"-{saldo_pendiente:,.2f}", delta_color="inverse")
+                elif saldo_pendiente < 0:
+                    saldo_col2.metric("✅ A Favor del Inquilino ($):", f"$ {abs(saldo_pendiente):,.2f}", delta=f"+{abs(saldo_pendiente):,.2f}", delta_color="normal")
+                else:
+                    saldo_col2.metric("✅ Saldo Pendiente ($):", "$ 0,00 — Cancelado", delta="Pago completo", delta_color="off")
 
-            comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
-            
-            # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
-            # Resetear flag si el usuario cambió de contrato
-            if st.session_state.contrato_impactado_id != c_datos['codigo']:
-                st.session_state.pago_impactado = False
-                st.session_state.contrato_impactado_id = None
+                comentarios_pago = st.text_input("Notas / Comentarios Internos de Caja:", placeholder="Ej: Abonó del 1 al 5 en término")
+                
+                # --- BOTÓN IMPACTAR COBRO EN CAJA HISTORICA ---
+                # Resetear flag si el usuario cambió de contrato
+                if st.session_state.contrato_impactado_id != c_datos['codigo']:
+                    st.session_state.pago_impactado = False
+                    st.session_state.contrato_impactado_id = None
 
-            if st.button("📥 Impactar Cobro en Caja Histórica", type="primary",
-                           disabled=bool(_row_existente and saldo_periodo_anterior == 0)):
-                conn = conectar_db()
-                cursor = conn.cursor()
-                try:
-                    # 1. Guarda el registro en el historial de cobros con los montos recalculados
-                    # Saldo real = lo que faltó cubrir de este recibo
-                    _saldo_a_guardar = max(0.0, _total_a_cubrir - monto_abonado)
-                    _comentario_completo = comentarios_pago or ""
-                    if _saldo_a_guardar > 0:
-                        _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {_saldo_a_guardar:,.2f}"
-                    _val_ooss_insert = float(c_datos.get('ooss') or 0.0)
-                    _val_imp_insert = float(c_datos.get('imp_inmobiliario') or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
-                    cursor.execute('''
-                        INSERT INTO pagos_historial (
-                            contrato_id, periodo, monto_alquiler, monto_servicios, monto_total,
-                            fecha_pago, metodo_pago, comentarios,
+                if st.button("📥 Impactar Cobro en Caja Histórica", type="primary",
+                               disabled=bool(_row_existente and saldo_periodo_anterior == 0)):
+                    conn = conectar_db()
+                    cursor = conn.cursor()
+                    try:
+                        # 1. Guarda el registro en el historial de cobros con los montos recalculados
+                        # Saldo real = lo que faltó cubrir de este recibo
+                        _saldo_a_guardar = max(0.0, _total_a_cubrir - monto_abonado)
+                        _comentario_completo = comentarios_pago or ""
+                        if _saldo_a_guardar > 0:
+                            _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {_saldo_a_guardar:,.2f}"
+                        _val_ooss_insert = float(c_datos.get('ooss') or 0.0)
+                        _val_imp_insert = float(c_datos.get('imp_inmobiliario') or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
+                        # Calcular valores USD al tipo de cambio del momento
+                        _tc_insert = st.session_state.get("cotizacion_usd_hist", 0.0)
+                        _tc_insert = float(_tc_insert) if float(_tc_insert) > 0 else 0.0
+                        _alq_usd    = round(monto_alq_pago / _tc_insert, 2)    if _tc_insert > 0 else 0.0
+                        _coch_usd   = round(monto_cochera / _tc_insert, 2)     if _tc_insert > 0 else 0.0
+                        _imp_usd    = round(_val_imp_insert / _tc_insert, 2)   if _tc_insert > 0 else 0.0
+                        _ret_agencia = round(monto_abonado * float(c_datos.get('honorarios') or 0) / 100.0, 2)
+                        _ret_usd    = round(_ret_agencia / _tc_insert, 2)      if _tc_insert > 0 else 0.0
+                        cursor.execute('''
+                            INSERT INTO pagos_historial (
+                                contrato_id, periodo, monto_alquiler, monto_servicios, monto_total,
+                                fecha_pago, metodo_pago, comentarios,
+                                monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
+                                monto_cochera, monto_ooss, monto_imp_inmobiliario,
+                                monto_honorarios, monto_garantia,
+                                monto_abonado, saldo_pendiente, saldos_anteriores,
+                                cotizacion_usd,
+                                monto_alquiler_usd, monto_cochera_usd,
+                                monto_imp_inmobiliario_usd, retencion_agencia_usd
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, _total_a_cubrir,
+                            datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
-                            monto_cochera, monto_ooss, monto_imp_inmobiliario,
-                            monto_honorarios, monto_garantia,
-                            monto_abonado, saldo_pendiente, saldos_anteriores
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (
-                        c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, _total_a_cubrir,
-                        datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
-                        monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
-                        monto_cochera, _val_ooss_insert, _val_imp_insert,
-                        monto_honorarios_pago, monto_garantia_pago,
-                        monto_abonado, _saldo_a_guardar, _total_saldos_anteriores
-                    ))
+                            monto_cochera, _val_ooss_insert, _val_imp_insert,
+                            monto_honorarios_pago, monto_garantia_pago,
+                            monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
+                            _tc_insert,
+                            _alq_usd, _coch_usd, _imp_usd, _ret_usd
+                        ))
 
-                    # 2. Avanzar automáticamente el contador del mes vivo del contrato
-                    nuevo_mes_vivo = (c_datos['mes_contrato'] or 1) + 1
-                    cursor.execute("UPDATE contratos SET mes_contrato = ? WHERE codigo = ?", (nuevo_mes_vivo, c_datos['codigo']))
+                        # 2. Avanzar automáticamente el contador del mes vivo del contrato
+                        nuevo_mes_vivo = (c_datos['mes_contrato'] or 1) + 1
+                        cursor.execute("UPDATE contratos SET mes_contrato = ? WHERE codigo = ?", (nuevo_mes_vivo, c_datos['codigo']))
 
-                    # 3. Pisar el valor del alquiler base con el monto recién cobrado
-                    cursor.execute("UPDATE contratos SET alquiler = ? WHERE codigo = ?", (monto_alq_pago, c_datos['codigo']))
+                        # 3. Pisar el valor del alquiler base con el monto recién cobrado
+                        cursor.execute("UPDATE contratos SET alquiler = ? WHERE codigo = ?", (monto_alq_pago, c_datos['codigo']))
 
-                    # 4. Acumula el cobro de honorarios directamente sobre lo que ya pagó el Inquilino
-                    nuevos_honorarios_acumulados = pagado_honorarios_inquilino + monto_honorarios_pago
+                        # 4. Acumula el cobro de honorarios directamente sobre lo que ya pagó el Inquilino
+                        nuevos_honorarios_acumulados = pagado_honorarios_inquilino + monto_honorarios_pago
 
-                    # 4b. Acumula el cobro de garantía directamente sobre el Monto Depositado a la Fecha
-                    nueva_garantia_acumulada = pagado_garantia_inquilino + monto_garantia_pago
+                        # 4b. Acumula el cobro de garantía directamente sobre el Monto Depositado a la Fecha
+                        nueva_garantia_acumulada = pagado_garantia_inquilino + monto_garantia_pago
 
-                    # 5. Guardar los valores actualizados de manera persistente en la base de datos
-                    cursor.execute('''
-                        UPDATE contratos 
-                        SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?, honorarios_pagados = ?, garantia = ?, servicios_total = ?
-                        WHERE codigo = ?
-                    ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera, nuevos_honorarios_acumulados, str(nueva_garantia_acumulada), monto_serv_pago, c_datos['codigo']))
+                        # 5. Guardar los valores actualizados de manera persistente en la base de datos
+                        cursor.execute('''
+                            UPDATE contratos 
+                            SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?, honorarios_pagados = ?, garantia = ?, servicios_total = ?
+                            WHERE codigo = ?
+                        ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera, nuevos_honorarios_acumulados, str(nueva_garantia_acumulada), monto_serv_pago, c_datos['codigo']))
 
-                    conn.commit()
-                    st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
-                    if saldo_pendiente > 0:
-                        st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
-                    elif saldo_pendiente < 0:
-                        st.info(f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor).")
-                    st.info(f"🔄 Los honorarios pagados acumulados del inquilino subieron a: $ {nuevos_honorarios_acumulados:,.2f}")
-                    st.info(f"🛡️ El monto de garantía depositado a la fecha subió a: $ {nueva_garantia_acumulada:,.2f}")
+                        conn.commit()
+                        st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
+                        if saldo_pendiente > 0:
+                            st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
+                        elif saldo_pendiente < 0:
+                            st.info(f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor).")
+                        st.info(f"🔄 Los honorarios pagados acumulados del inquilino subieron a: $ {nuevos_honorarios_acumulados:,.2f}")
+                        st.info(f"🛡️ El monto de garantía depositado a la fecha subió a: $ {nueva_garantia_acumulada:,.2f}")
 
-                    # Activar flag para mostrar el PDF sin recargar la página
-                    st.session_state.pago_impactado = True
-                    st.session_state.contrato_impactado_id = c_datos['codigo']
+                        # Activar flag para mostrar el PDF sin recargar la página
+                        st.session_state.pago_impactado = True
+                        st.session_state.contrato_impactado_id = c_datos['codigo']
 
-                except Exception as e:
-                    st.error(f"Error al procesar el impacto en caja: {e}")
-                finally:
-                    conn.close()
+                    except Exception as e:
+                        st.error(f"Error al procesar el impacto en caja: {e}")
+                    finally:
+                        conn.close()
 
-            if st.session_state.pago_impactado and st.session_state.contrato_impactado_id == c_datos['codigo']:
-                st.markdown("---")
-                st.markdown("### 🚀 Generador Inteligente de Comprobantes (WhatsApp & PDF Profesional)")
-            
-                txt_alquiler_fmt = f"$ {monto_alq_pago:,.2f}"
-                txt_servicios_fmt = f"$ {monto_serv_pago:,.2f}"
-                txt_total_fmt = f"$ {total_pago_real:,.2f}"
-                servicios_str_whatsapp = "\n".join(detalles_recibo_servicios) if detalles_recibo_servicios else " - No se registran conceptos adicionales."
+                if st.session_state.pago_impactado and st.session_state.contrato_impactado_id == c_datos['codigo']:
+                    st.markdown("---")
+                    st.markdown("### 🚀 Generador Inteligente de Comprobantes (WhatsApp & PDF Profesional)")
                 
-                mes_actual_num = c_datos['mes_contrato'] or 1
-                meses_totales_contrato = c_datos['calc_duracion'] or 0
-                periodo_numerico_pdf = f"Mes {mes_actual_num} de {meses_totales_contrato}"
-
-                plantilla_texto = (
-                    f"¡Hola {c_datos['nombres']}! 👋 Te acercamos el detalle de liquidación correspondiente al período *{mes_periodo_texto}* para la propiedad ubicada en *{c_datos['propiedad_dir']}*.\n\n"
-                    f"🔹 *Concepto Alquiler:* {txt_alquiler_fmt}\n"
-                    f"🔹 *Conceptos Adicionales / Servicios / Especiales:* {txt_servicios_fmt}\n"
-                    f"{servicios_str_whatsapp}\n\n"
-                    f"💰 *TOTAL ABONADO:* *{txt_total_fmt}* ({metodo_pago})\n\n"
-                    f"📌 El presente sirve como comprobante de pago definitivo para los conceptos descritos. ¡Muchas gracias por tu responsabilidad!"
-                )
-                
-                texto_final_recibo = st.text_area(
-                    "Cuerpo de la Notificación comercial:", 
-                    value=plantilla_texto.replace("\\n", "\n"), 
-                    height=200
-                )
-                
-                # Obtener teléfono del usuario que emite el recibo (desde usuarios_central)
-                _tel_emisor = ""
-                try:
-                    with conectar_db_central() as _conn_em:
-                        _row_em = _conn_em.execute(
-                            "SELECT telefono FROM usuarios_central WHERE username = ?",
-                            (st.session_state.get("username", ""),)
-                        ).fetchone()
-                        if _row_em and _row_em[0]:
-                            _tel_emisor = str(_row_em[0]).strip()
-                except Exception:
-                    pass
-
-                def _normalizar_tel(tel):
-                    """Devuelve número limpio para wa.me (solo dígitos, con prefijo 54 si es ARG)"""
-                    t = tel.replace("+", "").replace(" ", "").replace("-", "")
-                    if len(t) == 10 and not t.startswith("54"):
-                        t = "54" + t
-                    return t
-
-                texto_url = urllib.parse.quote(texto_final_recibo)
-
-                btn_c1, btn_c2, btn_c3 = st.columns(3)
-
-                with btn_c1:
-                    tel_inquilino = str(c_datos['telefono'] or "").strip()
-                    if tel_inquilino:
-                        tel_wa_inq = _normalizar_tel(tel_inquilino)
-                        st.markdown(f'<a href="https://wa.me/{tel_wa_inq}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📲 Enviar al Inquilino</button></a>', unsafe_allow_html=True)
-                    else:
-                        st.warning("⚠️ Inquilino sin celular.")
-
-                with btn_c2:
-                    if _tel_emisor:
-                        tel_wa_emisor = _normalizar_tel(_tel_emisor)
-                        st.markdown(f'<a href="https://wa.me/{tel_wa_emisor}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#128C7E; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📋 Enviarme a mí ({_tel_emisor})</button></a>', unsafe_allow_html=True)
-                    else:
-                        st.info("📵 Sin teléfono configurado en tu perfil.")
-
-                with btn_c3:
-                    # Construir filas de servicios desde _desglose_editado (lista editable)
-                    _filas_pdf_editado = "".join(
-                        f"<tr><td>{d['Concepto']}</td><td style='text-align:right;'>$ {d['Monto']:,.2f}</td></tr>"
-                        for d in _desglose_editado if d['Monto'] > 0
+                    txt_alquiler_fmt = f"$ {monto_alq_pago:,.2f}"
+                    txt_servicios_fmt = f"$ {monto_serv_pago:,.2f}"
+                    txt_total_fmt = f"$ {total_pago_real:,.2f}"
+                    servicios_str_whatsapp = "\n".join(detalles_recibo_servicios) if detalles_recibo_servicios else " - No se registran conceptos adicionales."
+                    
+                    mes_actual_num = c_datos['mes_contrato'] or 1
+                    meses_totales_contrato = c_datos['calc_duracion'] or 0
+                    periodo_numerico_pdf = f"Mes {mes_actual_num} de {meses_totales_contrato}"
+    
+                    plantilla_texto = (
+                        f"¡Hola {c_datos['nombres']}! 👋 Te acercamos el detalle de liquidación correspondiente al período *{mes_periodo_texto}* para la propiedad ubicada en *{c_datos['propiedad_dir']}*.\n\n"
+                        f"🔹 *Concepto Alquiler:* {txt_alquiler_fmt}\n"
+                        f"🔹 *Conceptos Adicionales / Servicios / Especiales:* {txt_servicios_fmt}\n"
+                        f"{servicios_str_whatsapp}\n\n"
+                        f"💰 *TOTAL ABONADO:* *{txt_total_fmt}* ({metodo_pago})\n\n"
+                        f"📌 El presente sirve como comprobante de pago definitivo para los conceptos descritos. ¡Muchas gracias por tu responsabilidad!"
                     )
-                    _total_pdf_editado = monto_alq_pago + sum(d['Monto'] for d in _desglose_editado)
-
-                    # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
-                    html_pdf_profesional = f"""
-                    <html>
-                    <head>
-                    <meta charset="utf-8">
-                    <style>
-                        body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
-                        .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
-                        .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
-                        .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
-                        .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
-                        .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
-                        .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
-                        .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
-                        .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
-                        .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
-                        .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
-                        .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
-                        .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
-                    </style>
-                    </head>
-                    <body>
-                        <div class="invoice-card">
-                            <table class="header-table">
-                                <tr>
-                                    <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
-                                    <td class="meta-text">
-                                        <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}-{mes_periodo_texto.replace(' ','')}<br>
-                                        <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
-                                        <strong>Período:</strong> {mes_periodo_texto}<br>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Datos Comerciales del Contrato</div>
-                            <table class="info-grid">
-                                <tr>
-                                    <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
-                                    <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']}</td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Desglose de Conceptos Liquidados</div>
-                            <table class="items-table">
-                                <thead>
-                                    <tr>
-                                        <th>Descripción del Concepto Asociado</th>
-                                        <th style="text-align: right;">Subtotal</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td>{_alq_desc_edit}</td>
-                                        <td style="text-align: right;">{txt_alquiler_fmt}</td>
-                                    </tr>
-                                    {_filas_pdf_editado}
-                                    <tr class="total-row">
-                                        <td>TOTAL CONSOLIDADO PERCIBIDO</td>
-                                        <td style="text-align: right;">$ {_total_pdf_editado:,.2f}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-
-                            <table class="info-grid" style="margin-top:20px;">
-                                <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
-                            </table>
-
-                            <div style="text-align: right; margin-top: 40px;">
-                                <div class="signature-line"></div>
-                                <span style="font-size:13px; font-weight:bold; color:#4a5568;">{st.session_state.get('nombre_empresa', 'Mi Empresa')}</span>
-                            </div>
-
-                            <div class="footer-stamp">
-                                Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
-                            </div>
-                        </div>
-                        <script>window.print();</script>
-                    </body>
-                    </html>
-                    """
-                    st.download_button(
-                        label="🖨️ Descargar Comprobante PDF Corporativo",
-                        data=html_pdf_profesional,
-                        file_name=f"comprobante_oficial_C_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
-                        mime="text/html",
-                        help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
+                    
+                    texto_final_recibo = st.text_area(
+                        "Cuerpo de la Notificación comercial:", 
+                        value=plantilla_texto.replace("\\n", "\n"), 
+                        height=200
                     )
+                    
+                    # Obtener teléfono del usuario que emite el recibo (desde usuarios_central)
+                    _tel_emisor = ""
+                    try:
+                        with conectar_db_central() as _conn_em:
+                            _row_em = _conn_em.execute(
+                                "SELECT telefono FROM usuarios_central WHERE username = ?",
+                                (st.session_state.get("username", ""),)
+                            ).fetchone()
+                            if _row_em and _row_em[0]:
+                                _tel_emisor = str(_row_em[0]).strip()
+                    except Exception:
+                        pass
 
+                    def _normalizar_tel(tel):
+                        """Devuelve número limpio para wa.me (solo dígitos, con prefijo 54 si es ARG)"""
+                        t = tel.replace("+", "").replace(" ", "").replace("-", "")
+                        if len(t) == 10 and not t.startswith("54"):
+                            t = "54" + t
+                        return t
 
+                    texto_url = urllib.parse.quote(texto_final_recibo)
+
+                    btn_c1, btn_c2, btn_c3 = st.columns(3)
+
+                    with btn_c1:
+                        tel_inquilino = str(c_datos['telefono'] or "").strip()
+                        if tel_inquilino:
+                            tel_wa_inq = _normalizar_tel(tel_inquilino)
+                            st.markdown(f'<a href="https://wa.me/{tel_wa_inq}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#25D366; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📲 Enviar al Inquilino</button></a>', unsafe_allow_html=True)
+                        else:
+                            st.warning("⚠️ Inquilino sin celular.")
+
+                    with btn_c2:
+                        if _tel_emisor:
+                            tel_wa_emisor = _normalizar_tel(_tel_emisor)
+                            st.markdown(f'<a href="https://wa.me/{tel_wa_emisor}?text={texto_url}" target="_blank"><button style="width:100%; padding:12px; background-color:#128C7E; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">📋 Enviarme a mí ({_tel_emisor})</button></a>', unsafe_allow_html=True)
+                        else:
+                            st.info("📵 Sin teléfono configurado en tu perfil.")
+
+                    with btn_c3:
+                        # Construir filas de servicios desde _desglose_editado (lista editable)
+                        _filas_pdf_editado = "".join(
+                            f"<tr><td>{d['Concepto']}</td><td style='text-align:right;'>$ {d['Monto']:,.2f}</td></tr>"
+                            for d in _desglose_editado if d['Monto'] > 0
+                        )
+                        _total_pdf_editado = monto_alq_pago + sum(d['Monto'] for d in _desglose_editado)
+
+                        # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
+                        html_pdf_profesional = f"""
+                        <html>
+                        <head>
+                        <meta charset="utf-8">
+                        <style>
+                            body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
+                            .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
+                            .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
+                            .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
+                            .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
+                            .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
+                            .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
+                            .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
+                            .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
+                            .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
+                            .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
+                            .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
+                            .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
+                        </style>
+                        </head>
+                        <body>
+                            <div class="invoice-card">
+                                <table class="header-table">
+                                    <tr>
+                                        <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
+                                        <td class="meta-text">
+                                            <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}-{mes_periodo_texto.replace(' ','')}<br>
+                                            <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
+                                            <strong>Período:</strong> {mes_periodo_texto}<br>
+                                        </td>
+                                    </tr>
+                                </table>
+
+                                <div class="section-title">Datos Comerciales del Contrato</div>
+                                <table class="info-grid">
+                                    <tr>
+                                        <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
+                                        <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']}</td>
+                                    </tr>
+                                </table>
+
+                                <div class="section-title">Desglose de Conceptos Liquidados</div>
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Descripción del Concepto Asociado</th>
+                                            <th style="text-align: right;">Subtotal</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>{_alq_desc_edit}</td>
+                                            <td style="text-align: right;">{txt_alquiler_fmt}</td>
+                                        </tr>
+                                        {_filas_pdf_editado}
+                                        <tr class="total-row">
+                                            <td>TOTAL CONSOLIDADO PERCIBIDO</td>
+                                            <td style="text-align: right;">$ {_total_pdf_editado:,.2f}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+
+                                <table class="info-grid" style="margin-top:20px;">
+                                    <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
+                                </table>
+
+                                <div style="text-align: right; margin-top: 40px;">
+                                    <div class="signature-line"></div>
+                                    <span style="font-size:13px; font-weight:bold; color:#4a5568;">{st.session_state.get('nombre_empresa', 'Mi Empresa')}</span>
+                                </div>
+
+                                <div class="footer-stamp">
+                                    Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
+                                </div>
+                            </div>
+                            <script>window.print();</script>
+                        </body>
+                        </html>
+                        """
+                        st.download_button(
+                            label="🖨️ Descargar Comprobante PDF Corporativo",
+                            data=html_pdf_profesional,
+                            file_name=f"comprobante_oficial_C_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
+                            mime="text/html",
+                            help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
+                        )
+    
+    
 # =====================================================================
 # PESTAÑA 4: MÓDULO DE HISTORIAL DE PAGOS COMPLETO (MEJORA 1 VISUALIZACIÓN)
 # =====================================================================
@@ -1895,7 +1908,14 @@ if tab_historial_pagos:
                 COALESCE(ph.monto_garantia, 0)                AS [_garantia],
                 COALESCE(ph.monto_abonado, 0)                 AS [_abonado],
                 COALESCE(ph.saldo_pendiente, 0)               AS [_saldo_pendiente],
-                ph.comentarios                                 AS [_comentarios]
+                ph.comentarios                                 AS [_comentarios],
+                c.inicio_contrato                              AS [_inicio_contrato],
+                COALESCE(c.honorarios, 0)                     AS [_pct_admin],
+                COALESCE(ph.cotizacion_usd, 0)                AS [COTIZACIÓN USD],
+                COALESCE(ph.monto_alquiler_usd, 0)            AS [ALQUILER (USD)],
+                COALESCE(ph.monto_cochera_usd, 0)             AS [COCHERA (USD)],
+                COALESCE(ph.monto_imp_inmobiliario_usd, 0)    AS [IMP. INMOBILIARIO (USD)],
+                COALESCE(ph.retencion_agencia_usd, 0)         AS [RETENCIÓN AGENCIA (USD)]
             FROM pagos_historial ph
             JOIN contratos c  ON ph.contrato_id = c.codigo
             JOIN propiedades p ON c.propiedad_id = p.id
@@ -1909,6 +1929,8 @@ if tab_historial_pagos:
         if df_historial.empty:
             st.info("Aún no se registran cobros mensuales asentados de manera definitiva en el libro de caja.")
         else:
+            st.caption("💡 Los valores en USD se calculan con la cotización registrada al momento de cada cobro.")
+
             # ── Filtros ──────────────────────────────────────────────────
             f_periodo = st.text_input(
                 "Filtrar historial por palabra clave (Ej: Mayo o Efectivo):",
@@ -1921,17 +1943,38 @@ if tab_historial_pagos:
                     df_historial['METODO'].str.contains(f_periodo, case=False, na=False)
                 ]
 
-            # ── Columnas visibles en la tabla ────────────────────────────
-            _cols_vista = [
-                "ID PAGO", "COD CONTRATO", "PROPIEDAD", "INQUILINO", "PERIODO",
-                "ALQUILER ($)",
-                "IMP. INMOBILIARIO ($)", "EXPENSAS ($)", "LUZ EDESAL ($)",
-                "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)",
-                "COCHERA ($)", "HONORARIOS ($)", "GARANTÍA ($)",
-                "SERVICIOS ($)", "TOTAL ($)",
-                "ABONADO ($)", "SALDO PEND. ($)",
-                "FECHA IMPACTO", "METODO"
-            ]
+            # ── Calcular columna MES/AÑO a partir del periodo y fecha de inicio ──
+            _meses_es = {
+                1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+                5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+                9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"
+            }
+
+            def _calcular_mes_anio(row):
+                try:
+                    # Extraer número de mes del periodo (Ej: "Mes 3 de 24" → 3)
+                    _match = re.match(r'Mes\s+(\d+)\s+de\s+\d+', str(row['PERIODO']))
+                    if not _match:
+                        return ""
+                    _num_mes_contrato = int(_match.group(1))
+                    # Parsear fecha de inicio
+                    _inicio_str = str(row['_inicio_contrato'])
+                    try:
+                        _inicio_dt = datetime.strptime(_inicio_str, "%Y-%m-%d").date()
+                    except ValueError:
+                        _inicio_dt = datetime.strptime(_inicio_str, "%d/%m/%Y").date()
+                    # Sumar (num_mes - 1) meses al inicio para obtener el mes calendario
+                    _fecha_mes = _inicio_dt + dateutil.relativedelta.relativedelta(months=_num_mes_contrato - 1)
+                    return f"{_meses_es[_fecha_mes.month]} {_fecha_mes.year}"
+                except Exception:
+                    return ""
+
+            df_historial["MES/AÑO"] = df_historial.apply(_calcular_mes_anio, axis=1)
+
+            # ── Retención agencia en pesos (calculada; la versión USD viene de la BD) ──
+            df_historial["RETENCIÓN AGENCIA ($)"] = (
+                df_historial["_abonado"] / 100.0 * df_historial["_pct_admin"]
+            ).round(2)
 
             # Renombrar columnas internas al nombre de visualización
             df_historial = df_historial.rename(columns={
@@ -1947,6 +1990,20 @@ if tab_historial_pagos:
                 "_abonado":          "ABONADO ($)",
                 "_saldo_pendiente":  "SALDO PEND. ($)",
             })
+
+            # ── Columnas visibles en la tabla ────────────────────────────
+            _cols_vista = [
+                "ID PAGO", "COD CONTRATO", "PROPIEDAD", "INQUILINO",
+                "PERIODO", "MES/AÑO",
+                "ALQUILER ($)", "ALQUILER (USD)",
+                "IMP. INMOBILIARIO ($)", "IMP. INMOBILIARIO (USD)", "EXPENSAS ($)", "LUZ EDESAL ($)",
+                "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)",
+                "COCHERA ($)", "COCHERA (USD)", "HONORARIOS ($)", "GARANTÍA ($)",
+                "SERVICIOS ($)", "TOTAL ($)",
+                "ABONADO ($)", "RETENCIÓN AGENCIA ($)", "RETENCIÓN AGENCIA (USD)",
+                "SALDO PEND. ($)",
+                "COTIZACIÓN USD", "FECHA IMPACTO", "METODO"
+            ]
 
             st.dataframe(df_historial[_cols_vista], use_container_width=True, hide_index=True)
 
@@ -2456,8 +2513,7 @@ if tab_carga:
             valor_auto = None
             indice_upper = indice_final.upper()
     
-            # Se calcula siempre que el índice sea ICL o IPC (no solo en modo edición)
-            if indice_upper in ("ICL", "IPC"):
+            if permitir_edicion and indice_upper in ("ICL", "IPC"):
                 with st.spinner(f"⏳ Consultando {indice_upper}..."):
                     if indice_upper == "ICL":
                         valor_auto = calcular_valor_actualizado_icl(
@@ -2477,7 +2533,7 @@ if tab_carga:
                 )
                 valor_por_defecto_fmt = f"{valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             else:
-                if indice_upper in ("ICL", "IPC"):
+                if permitir_edicion and indice_upper in ("ICL", "IPC"):
                     c_web2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
                 valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
@@ -3025,7 +3081,7 @@ if tab_superadmin:
                 # Control visual y restricción de datos según el rol
                 if rol_sesion == "admin":
                     new_empresa = st.text_input("Nombre de la Empresa:", value=st.session_state.get("nombre_empresa"), disabled=True)
-                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario"])
+                    new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin"])
                 else:
                     new_empresa = st.text_input("Nombre de la Empresa / Inmobiliaria:").strip()
                     new_rol = st.selectbox("Rol del Usuario:", ["user", "propietario", "admin", "superadmin"])
@@ -3111,7 +3167,7 @@ if tab_superadmin:
                 cursor_central.execute('''
                     SELECT username, nombre_empresa, rol, archivo_db 
                     FROM usuarios_central 
-                    WHERE archivo_db = ? AND rol IN ('user', 'propietario')
+                    WHERE archivo_db = ?
                 ''', (st.session_state.get("empresa_db"),))
             else:
                 st.error("🚫 No tienes permisos suficientes para gestionar usuarios.")
@@ -3146,12 +3202,9 @@ if tab_superadmin:
                     st.markdown("#### 🔐 Acceso")
                     nueva_pass = st.text_input("🔑 Cambiar Contraseña (Dejar vacío para mantener la actual):", type="password")
 
+                    opciones_roles = ["user", "propietario", "admin"]
                     if rol_sesion == "superadmin":
-                        opciones_roles = ["user", "propietario", "admin", "superadmin"]
-                    elif rol_sesion == "admin":
-                        opciones_roles = ["user", "propietario"]
-                    else:
-                        opciones_roles = ["user", "propietario", "admin"]
+                        opciones_roles.append("superadmin")
 
                     nuevo_rol = st.selectbox("🎖️ Rol en el Sistema:", opciones_roles, index=opciones_roles.index(rol_actual_user) if rol_actual_user in opciones_roles else 0)
 
@@ -3196,31 +3249,28 @@ if tab_superadmin:
                     st.markdown("---")
                     if nuevo_rol == "propietario":
                         st.info("🏠 El rol **Propietario** tiene acceso fijo de solo lectura a: Dashboard, Planilla de Contratos e Historial de Caja. No requiere configuración de permisos.")
-                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
+                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para usuarios con rol 'user')")
                         
                     permisos_actuales = []
-                    if nuevo_rol != "propietario":
-                        if ruta_db_user and os.path.exists(ruta_db_user):
-                            try:
-                                conn_emp = sqlite3.connect(ruta_db_user)
-                                cursor_emp = conn_emp.cursor()
-                                cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
-                                if cursor_emp.fetchone():
-                                    cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
-                                    permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
-                                conn_emp.close()
-                            except Exception as e:
-                                st.warning(f"Aviso al recuperar permisos existentes: {e}")
-
-                        p_dash  = st.checkbox("📈 Tablero de Control",                  value=("dashboard"       in permisos_actuales))
-                        p_plan  = st.checkbox("📊 Planilla de Contratos",               value=("planilla"        in permisos_actuales))
-                        p_pagos = st.checkbox("💰 Registrar / Emitir Recibo",           value=("pagos"           in permisos_actuales))
-                        p_hist  = st.checkbox("🗄️ Historial de Caja",                  value=("historial_pagos" in permisos_actuales))
-                        p_carga = st.checkbox("📝 Carga de Contratos",                  value=("carga"           in permisos_actuales))
-                        p_aux   = st.checkbox("⚙️ Cargar Inquilinos / Propiedades",    value=("auxiliares"      in permisos_actuales))
-                        p_gastos= st.checkbox("🔧 Gastos de Propiedades",               value=("gastos"          in permisos_actuales))
-                    else:
-                        p_dash = p_plan = p_pagos = p_hist = p_carga = p_aux = p_gastos = False
+                    if ruta_db_user and os.path.exists(ruta_db_user):
+                        try:
+                            conn_emp = sqlite3.connect(ruta_db_user)
+                            cursor_emp = conn_emp.cursor()
+                            cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
+                            if cursor_emp.fetchone():
+                                cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
+                                permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
+                            conn_emp.close()
+                        except Exception as e:
+                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
+    
+                    p_dash = st.checkbox("📈 Tablero de Control", value=("dashboard" in permisos_actuales))
+                    p_plan = st.checkbox("📊 Planilla de Contratos", value=("planilla" in permisos_actuales))
+                    p_pagos = st.checkbox("💰 Registrar / Emitir Recibo", value=("pagos" in permisos_actuales))
+                    p_hist = st.checkbox("🗄️ Historial de Caja", value=("historial_pagos" in permisos_actuales))
+                    p_carga = st.checkbox("📝 Carga de Contratos", value=("carga" in permisos_actuales))
+                    p_aux = st.checkbox("⚙️ Cargar Inquilinos / Propiedades", value=("auxiliares" in permisos_actuales))
+                    p_gastos = st.checkbox("🔧 Gastos de Propiedades", value=("gastos" in permisos_actuales))
     
                     btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
     
@@ -3889,6 +3939,18 @@ if tab_gastos:
             else:
                 _dict_props = {f"{r['alias_propiedad']} ({r['propietario'] or 'Sin propietario'})": r['id'] for _, r in _props_gasto.iterrows()}
 
+                # Input de cotización fuera del form para que actualice session_state en tiempo real
+                _usd_g_reg_col, _ = st.columns([2, 3])
+                _cotizacion_usd_g_reg = _usd_g_reg_col.number_input(
+                    "💵 Cotización USD al momento del gasto ($ ARS por 1 USD):",
+                    min_value=1.0,
+                    value=float(st.session_state.get("cotizacion_usd_hist", 1300.0)),
+                    step=10.0,
+                    key="cotizacion_usd_gasto_reg_input",
+                    help="Este valor se guardará junto al gasto y no cambiará aunque la cotización cambie después"
+                )
+                st.session_state["cotizacion_usd_hist"] = _cotizacion_usd_g_reg
+
                 with st.form("form_gasto_propiedad", clear_on_submit=True):
                     st.markdown("#### 📝 Datos del Gasto")
 
@@ -3921,17 +3983,20 @@ if tab_gastos:
                         else:
                             try:
                                 conn = conectar_db()
+                                _tc_g = float(st.session_state.get("cotizacion_usd_hist", 0.0))
+                                _monto_usd_g = round(_monto / _tc_g, 2) if _tc_g > 0 else 0.0
                                 conn.execute(
                                     """INSERT INTO gastos_propiedades
-                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones)
-                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                       (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones, cotizacion_usd, monto_usd)
+                                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                     (_prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
                                      _descripcion.strip(), _monto, _proveedor.strip(),
-                                     _comprobante.strip(), _pagado_por, _observaciones.strip())
+                                     _comprobante.strip(), _pagado_por, _observaciones.strip(),
+                                     _tc_g, _monto_usd_g)
                                 )
                                 conn.commit()
                                 conn.close()
-                                st.success(f"✅ Gasto de $ {_monto:,.2f} registrado correctamente en {_prop_label}.")
+                                st.success(f"✅ Gasto de $ {_monto:,.2f} (U$S {_monto_usd_g:,.2f}) registrado correctamente en {_prop_label}.")
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -3944,7 +4009,10 @@ if tab_gastos:
             _df_gastos = pd.read_sql_query(f"""
                 SELECT gp.id as [ID], p.alias_propiedad as [PROPIEDAD], p.propietario as [PROPIETARIO],
                        gp.fecha as [FECHA], gp.categoria as [CATEGORÍA], gp.descripcion as [DESCRIPCIÓN],
-                       gp.monto as [MONTO ($)], gp.proveedor as [PROVEEDOR],
+                       gp.monto as [MONTO ($)],
+                       COALESCE(gp.cotizacion_usd, 0) as [COTIZACIÓN USD],
+                       COALESCE(gp.monto_usd, 0) as [MONTO (USD)],
+                       gp.proveedor as [PROVEEDOR],
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
@@ -3957,6 +4025,8 @@ if tab_gastos:
             if _df_gastos.empty:
                 st.info("Aún no se registraron gastos.")
             else:
+                st.caption("💡 Los valores en USD corresponden a la cotización del momento en que se registró cada gasto.")
+
                 # Filtros
                 _hcol1, _hcol2, _hcol3 = st.columns(3)
                 _f_prop = _hcol1.selectbox("Filtrar por propiedad:", ["Todas"] + list(_df_gastos["PROPIEDAD"].unique()))
@@ -3978,15 +4048,23 @@ if tab_gastos:
 
                 # Totales
                 _total_gastos = _df_f["MONTO ($)"].sum()
-                _mc1, _mc2, _mc3 = st.columns(3)
+                _total_gastos_usd = _df_f["MONTO (USD)"].sum()
+                _mc1, _mc2, _mc3, _mc4 = st.columns(4)
                 _mc1.metric("Total Gastos Filtrados", f"$ {_total_gastos:,.2f}")
-                _mc2.metric("Cantidad de Registros", len(_df_f))
-                _mc3.metric("Promedio por Gasto", f"$ {(_total_gastos / len(_df_f)):,.2f}" if len(_df_f) > 0 else "$ 0,00")
+                _mc2.metric("Total Gastos (USD)", f"U$S {_total_gastos_usd:,.2f}")
+                _mc3.metric("Cantidad de Registros", len(_df_f))
+                _mc4.metric("Promedio por Gasto", f"$ {(_total_gastos / len(_df_f)):,.2f}" if len(_df_f) > 0 else "$ 0,00")
 
-                st.dataframe(_df_f.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+                # Reordenar columnas para mostrar USD junto a pesos
+                _cols_gastos_vista = [
+                    "PROPIEDAD", "PROPIETARIO", "FECHA", "CATEGORÍA", "DESCRIPCIÓN",
+                    "MONTO ($)", "COTIZACIÓN USD", "MONTO (USD)",
+                    "PROVEEDOR", "COMPROBANTE", "PAGADO POR", "OBSERVACIONES"
+                ]
+                st.dataframe(_df_f[_cols_gastos_vista], use_container_width=True, hide_index=True)
 
                 # Exportar
-                _csv_gastos = _df_f.to_csv(index=False).encode("utf-8")
+                _csv_gastos = _df_f[_cols_gastos_vista].to_csv(index=False).encode("utf-8")
                 st.download_button("⬇️ Exportar a CSV", _csv_gastos, "gastos_propiedades.csv", "text/csv")
 
         # ── SUBPESTAÑA 3: MÉTRICAS POR PROPIEDAD ────────────────────────
@@ -4001,12 +4079,19 @@ if tab_gastos:
 
             _df_ingresos_raw = pd.read_sql_query(f"""
                 SELECT
-                    p.alias_propiedad                          AS propiedad,
-                    COALESCE(p.propietario, '')               AS propietario,
-                    ph.periodo                                 AS periodo,
-                    COALESCE(ph.monto_alquiler, 0)            AS alquiler,
-                    COALESCE(ph.monto_cochera, 0)             AS cochera,
-                    COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0) AS total_ingreso
+                    p.alias_propiedad                                                AS propiedad,
+                    COALESCE(p.propietario, '')                                     AS propietario,
+                    ph.periodo                                                       AS periodo,
+                    COALESCE(ph.monto_alquiler, 0)                                 AS alquiler,
+                    COALESCE(ph.monto_cochera, 0)                                  AS cochera,
+                    COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0) AS total_ingreso,
+                    COALESCE(ph.monto_abonado, 0) * COALESCE(c.honorarios, 0) / 100.0 AS gasto_admin,
+                    COALESCE(ph.monto_imp_inmobiliario, 0)                         AS imp_inmobiliario,
+                    COALESCE(ph.monto_alquiler_usd, 0)                             AS alquiler_usd,
+                    COALESCE(ph.monto_cochera_usd, 0)                              AS cochera_usd,
+                    COALESCE(ph.monto_alquiler_usd, 0) + COALESCE(ph.monto_cochera_usd, 0) AS total_ingreso_usd,
+                    COALESCE(ph.retencion_agencia_usd, 0)                          AS gasto_admin_usd,
+                    COALESCE(ph.monto_imp_inmobiliario_usd, 0)                     AS imp_inmobiliario_usd
                 FROM pagos_historial ph
                 JOIN contratos c  ON ph.contrato_id = c.codigo
                 JOIN propiedades p ON c.propiedad_id = p.id
@@ -4020,7 +4105,8 @@ if tab_gastos:
                     p.alias_propiedad                          AS propiedad,
                     COALESCE(p.propietario, '')               AS propietario,
                     strftime('%Y-%m', gp.fecha)               AS periodo,
-                    SUM(gp.monto)                             AS total_gasto
+                    SUM(gp.monto)                             AS total_gasto,
+                    SUM(COALESCE(gp.monto_usd, 0))           AS total_gasto_usd
                 FROM gastos_propiedades gp
                 JOIN propiedades p ON gp.propiedad_id = p.id
                 WHERE 1=1 {_where_m}
@@ -4033,6 +4119,8 @@ if tab_gastos:
             if _df_ingresos_raw.empty and _df_gastos_raw.empty:
                 st.info("Aún no hay datos de ingresos ni gastos para mostrar métricas.")
             else:
+                st.caption("💡 Los valores en USD corresponden a las cotizaciones registradas al momento de cada cobro/gasto.")
+
                 # ── Extraer año y mes de los periodos disponibles ──
                 _todos_periodos = pd.concat([
                     _df_ingresos_raw[["periodo"]] if not _df_ingresos_raw.empty else pd.DataFrame(columns=["periodo"]),
@@ -4046,7 +4134,7 @@ if tab_gastos:
                     "09": "Septiembre", "10": "Octubre", "11": "Noviembre", "12": "Diciembre"
                 }
 
-                # ── Lista de propietarios disponibles (solo si no hay filtro de rol) ──
+                # ── Lista de propietarios disponibles ──
                 _propietarios_disp = []
                 if not _pf_g_activo:
                     _todos_props = pd.concat([
@@ -4056,7 +4144,7 @@ if tab_gastos:
                     _propietarios_disp = sorted(_todos_props["propietario"].dropna().unique().tolist())
                     _propietarios_disp = [p for p in _propietarios_disp if p.strip()]
 
-                # ── Filtros: 4 columnas cuando hay filtro de propietario, 3 si no ──
+                # ── Filtros ──
                 if not _pf_g_activo and _propietarios_disp:
                     _mcol0, _mcol1, _mcol2, _mcol3 = st.columns(4)
                     _f_propietario_m = _mcol0.selectbox("👤 Propietario:", ["Todos"] + _propietarios_disp, key="met_propietario")
@@ -4065,13 +4153,11 @@ if tab_gastos:
                     _f_propietario_m = _pf_g if _pf_g_activo else "Todos"
 
                 _props_lista_m = ["Todas"] + sorted(_props_gasto["alias_propiedad"].tolist()) if not _props_gasto.empty else ["Todas"]
-                _f_prop_m = _mcol1.selectbox("🏠 Propiedad:", _props_lista_m, key="met_prop")
-
-                _anio_sel = _mcol2.selectbox("📅 Año:", ["Todos"] + _anios_disp, key="met_anio")
-
-                _meses_disp = ["Todos"] + [f"{k} – {v}" for k, v in _meses_nombres.items()]
-                _mes_sel_label = _mcol3.selectbox("📆 Mes:", _meses_disp, key="met_mes")
-                _mes_sel = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
+                _f_prop_m        = _mcol1.selectbox("🏠 Propiedad:", _props_lista_m, key="met_prop")
+                _anio_sel        = _mcol2.selectbox("📅 Año:", ["Todos"] + _anios_disp, key="met_anio")
+                _meses_disp      = ["Todos"] + [f"{k} – {v}" for k, v in _meses_nombres.items()]
+                _mes_sel_label   = _mcol3.selectbox("📆 Mes:", _meses_disp, key="met_mes")
+                _mes_sel         = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
 
                 # ── Aplicar filtros a ingresos ──
                 _dfi = _df_ingresos_raw.copy()
@@ -4099,79 +4185,150 @@ if tab_gastos:
                     if _mes_sel != "Todos":
                         _dfg = _dfg[_dfg["periodo"].str[5:7] == _mes_sel]
 
-                # ── KPIs resumen ──
-                _total_ing  = _dfi["total_ingreso"].sum() if not _dfi.empty else 0.0
-                _total_alq  = _dfi["alquiler"].sum()      if not _dfi.empty else 0.0
-                _total_coch = _dfi["cochera"].sum()        if not _dfi.empty else 0.0
-                _total_gas  = _dfg["total_gasto"].sum()   if not _dfg.empty else 0.0
-                _balance    = _total_ing - _total_gas
+                # ── Totales en PESOS ──
+                _total_ing     = _dfi["total_ingreso"].sum()    if not _dfi.empty else 0.0
+                _total_alq     = _dfi["alquiler"].sum()         if not _dfi.empty else 0.0
+                _total_coch    = _dfi["cochera"].sum()          if not _dfi.empty else 0.0
+                _total_gas     = _dfg["total_gasto"].sum()      if not _dfg.empty else 0.0
+                _total_adm     = _dfi["gasto_admin"].sum()      if not _dfi.empty else 0.0
+                _total_imp_inm = _dfi["imp_inmobiliario"].sum() if not _dfi.empty else 0.0
+                _total_pasivos = _total_gas + _total_adm + _total_imp_inm
+                _balance       = _total_ing - _total_pasivos
 
-                _km1, _km2, _km3, _km4 = st.columns(4)
-                _km1.metric("💰 Total Ingresos", f"$ {_total_ing:,.2f}",
-                            help="Alquiler + Cochera del período filtrado")
-                _km2.metric("🏠 Alquiler", f"$ {_total_alq:,.2f}")
-                _km3.metric("🚗 Cochera",  f"$ {_total_coch:,.2f}")
-                _km4.metric("🔧 Total Gastos", f"$ {_total_gas:,.2f}")
+                # ── Totales en USD (desde BD) ──
+                _total_ing_usd     = _dfi["total_ingreso_usd"].sum()    if not _dfi.empty else 0.0
+                _total_alq_usd     = _dfi["alquiler_usd"].sum()         if not _dfi.empty else 0.0
+                _total_coch_usd    = _dfi["cochera_usd"].sum()          if not _dfi.empty else 0.0
+                _total_gas_usd     = _dfg["total_gasto_usd"].sum()      if not _dfg.empty else 0.0
+                _total_adm_usd     = _dfi["gasto_admin_usd"].sum()      if not _dfi.empty else 0.0
+                _total_imp_inm_usd = _dfi["imp_inmobiliario_usd"].sum() if not _dfi.empty else 0.0
+                _total_pasivos_usd = _total_gas_usd + _total_adm_usd + _total_imp_inm_usd
+                _balance_usd       = _total_ing_usd - _total_pasivos_usd
+
+                # ── KPIs en PESOS ──
+                st.markdown("**📥 Ingresos — $**")
+                _km1, _km2, _km3 = st.columns(3)
+                _km1.metric("💰 Total Ingresos",  f"$ {_total_ing:,.2f}", help="Alquiler + Cochera del período filtrado")
+                _km2.metric("🏠 Alquiler",        f"$ {_total_alq:,.2f}")
+                _km3.metric("🚗 Cochera",         f"$ {_total_coch:,.2f}")
+
+                st.markdown("**📤 Pasivos — $**")
+                _kp1, _kp2, _kp3 = st.columns(3)
+                _kp1.metric("🔧 Gastos Propiedad",    f"$ {_total_gas:,.2f}")
+                _kp2.metric("🏢 Gasto Adm.",          f"$ {_total_adm:,.2f}")
+                _kp3.metric("🏛️ Imp. Inmobiliario",   f"$ {_total_imp_inm:,.2f}")
 
                 _bm1, _bm2 = st.columns([1, 3])
                 _color_balance = "normal" if _balance >= 0 else "inverse"
-                _bm1.metric("📈 Balance Neto", f"$ {_balance:,.2f}", delta_color=_color_balance)
+                _bm1.metric("📈 Balance Neto ($)", f"$ {_balance:,.2f}", delta_color=_color_balance)
+
+                st.divider()
+
+                # ── KPIs en USD ──
+                st.markdown("**📥 Ingresos — U$S**")
+                _ku1, _ku2, _ku3 = st.columns(3)
+                _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera en USD al tipo de cambio de cada cobro")
+                _ku2.metric("🏠 Alquiler",        f"U$S {_total_alq_usd:,.2f}")
+                _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
+
+                st.markdown("**📤 Pasivos — U$S**")
+                _kpu1, _kpu2, _kpu3 = st.columns(3)
+                _kpu1.metric("🔧 Gastos Propiedad",   f"U$S {_total_gas_usd:,.2f}")
+                _kpu2.metric("🏢 Gasto Adm.",         f"U$S {_total_adm_usd:,.2f}")
+                _kpu3.metric("🏛️ Imp. Inmobiliario",  f"U$S {_total_imp_inm_usd:,.2f}")
+
+                _bu1, _bu2 = st.columns([1, 3])
+                _color_balance_usd = "normal" if _balance_usd >= 0 else "inverse"
+                _bu1.metric("📈 Balance Neto (U$S)", f"U$S {_balance_usd:,.2f}", delta_color=_color_balance_usd)
 
                 st.divider()
 
                 # ── Tabla comparativa por período ──
                 st.markdown("##### 📋 Detalle por Período")
 
-                # Agrupar ingresos por propiedad + periodo
                 _dfi_grp = (
                     _dfi.groupby(["propiedad", "periodo"], as_index=False)
-                    .agg(alquiler=("alquiler", "sum"), cochera=("cochera", "sum"), total_ingreso=("total_ingreso", "sum"))
+                    .agg(
+                        alquiler=("alquiler", "sum"),
+                        cochera=("cochera", "sum"),
+                        total_ingreso=("total_ingreso", "sum"),
+                        gasto_admin=("gasto_admin", "sum"),
+                        imp_inmobiliario=("imp_inmobiliario", "sum"),
+                        alquiler_usd=("alquiler_usd", "sum"),
+                        cochera_usd=("cochera_usd", "sum"),
+                        total_ingreso_usd=("total_ingreso_usd", "sum"),
+                        gasto_admin_usd=("gasto_admin_usd", "sum"),
+                        imp_inmobiliario_usd=("imp_inmobiliario_usd", "sum"),
+                    )
                     if not _dfi.empty
-                    else pd.DataFrame(columns=["propiedad", "periodo", "alquiler", "cochera", "total_ingreso"])
+                    else pd.DataFrame(columns=["propiedad", "periodo", "alquiler", "cochera", "total_ingreso",
+                                               "gasto_admin", "imp_inmobiliario", "alquiler_usd", "cochera_usd",
+                                               "total_ingreso_usd", "gasto_admin_usd", "imp_inmobiliario_usd"])
                 )
 
-                # Combinar con gastos
+                _dfg_grp_cols = ["propiedad", "periodo", "total_gasto", "total_gasto_usd"]
                 _df_merge = pd.merge(
                     _dfi_grp,
-                    _dfg[["propiedad", "periodo", "total_gasto"]] if not _dfg.empty else pd.DataFrame(columns=["propiedad", "periodo", "total_gasto"]),
+                    _dfg[_dfg_grp_cols] if not _dfg.empty else pd.DataFrame(columns=_dfg_grp_cols),
                     on=["propiedad", "periodo"],
                     how="outer"
                 ).fillna(0)
 
                 if not _df_merge.empty:
-                    _df_merge["balance"] = _df_merge["total_ingreso"] - _df_merge["total_gasto"]
+                    _df_merge["total_pasivos"]     = _df_merge["total_gasto"] + _df_merge["gasto_admin"] + _df_merge["imp_inmobiliario"]
+                    _df_merge["total_pasivos_usd"] = _df_merge["total_gasto_usd"] + _df_merge["gasto_admin_usd"] + _df_merge["imp_inmobiliario_usd"]
+                    _df_merge["balance"]           = _df_merge["total_ingreso"] - _df_merge["total_pasivos"]
+                    _df_merge["balance_usd"]       = _df_merge["total_ingreso_usd"] - _df_merge["total_pasivos_usd"]
                     _df_merge = _df_merge.sort_values(["propiedad", "periodo"])
 
-                    # Renombrar para visualización
                     _df_display = _df_merge.rename(columns={
-                        "propiedad":     "PROPIEDAD",
-                        "periodo":       "PERÍODO",
-                        "alquiler":      "ALQUILER ($)",
-                        "cochera":       "COCHERA ($)",
-                        "total_ingreso": "TOTAL INGRESO ($)",
-                        "total_gasto":   "TOTAL GASTO ($)",
-                        "balance":       "BALANCE ($)",
+                        "propiedad":             "PROPIEDAD",
+                        "periodo":               "PERÍODO",
+                        "alquiler":              "ALQUILER ($)",
+                        "cochera":               "COCHERA ($)",
+                        "total_ingreso":         "TOTAL INGRESO ($)",
+                        "alquiler_usd":          "ALQUILER (USD)",
+                        "cochera_usd":           "COCHERA (USD)",
+                        "total_ingreso_usd":     "TOTAL INGRESO (USD)",
+                        "total_gasto":           "GASTOS PROP. ($)",
+                        "total_gasto_usd":       "GASTOS PROP. (USD)",
+                        "gasto_admin":           "GASTO ADM. ($)",
+                        "gasto_admin_usd":       "GASTO ADM. (USD)",
+                        "imp_inmobiliario":      "IMP. INMO. ($)",
+                        "imp_inmobiliario_usd":  "IMP. INMO. (USD)",
+                        "total_pasivos":         "TOTAL PASIVOS ($)",
+                        "total_pasivos_usd":     "TOTAL PASIVOS (USD)",
+                        "balance":               "BALANCE ($)",
+                        "balance_usd":           "BALANCE (USD)",
                     })
 
-                    # Colorear balance
+                    _cols_display = [
+                        "PROPIEDAD", "PERÍODO",
+                        "ALQUILER ($)", "ALQUILER (USD)",
+                        "COCHERA ($)", "COCHERA (USD)",
+                        "TOTAL INGRESO ($)", "TOTAL INGRESO (USD)",
+                        "GASTOS PROP. ($)", "GASTOS PROP. (USD)",
+                        "GASTO ADM. ($)", "GASTO ADM. (USD)",
+                        "IMP. INMO. ($)", "IMP. INMO. (USD)",
+                        "TOTAL PASIVOS ($)", "TOTAL PASIVOS (USD)",
+                        "BALANCE ($)", "BALANCE (USD)",
+                    ]
+
                     def _color_balance_row(val):
                         color = "#d4edda" if val >= 0 else "#f8d7da"
                         return f"background-color: {color}"
 
-                    _styled = _df_display.style.map(
-                        _color_balance_row, subset=["BALANCE ($)"]
-                    ).format({
-                        "ALQUILER ($)":      "$ {:,.2f}",
-                        "COCHERA ($)":       "$ {:,.2f}",
-                        "TOTAL INGRESO ($)": "$ {:,.2f}",
-                        "TOTAL GASTO ($)":   "$ {:,.2f}",
-                        "BALANCE ($)":       "$ {:,.2f}",
-                    })
+                    _fmt_dict = {c: "$ {:,.2f}"     for c in _cols_display if "($)"   in c}
+                    _fmt_dict.update({c: "U$S {:,.2f}" for c in _cols_display if "(USD)" in c})
+
+                    _styled = _df_display[_cols_display].style.map(
+                        _color_balance_row, subset=["BALANCE ($)", "BALANCE (USD)"]
+                    ).format(_fmt_dict)
 
                     st.dataframe(_styled, use_container_width=True, hide_index=True)
 
                     # Exportar
-                    _csv_m = _df_display.to_csv(index=False).encode("utf-8")
+                    _csv_m = _df_display[_cols_display].to_csv(index=False).encode("utf-8")
                     st.download_button("⬇️ Exportar métricas a CSV", _csv_m, "metricas_por_propiedad.csv", "text/csv")
 
                     # ── Gráfico de barras agrupadas ──
