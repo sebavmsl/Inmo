@@ -940,7 +940,7 @@ elif rol_actual == "admin":
         st.session_state.permisos_usuario = permisos_usuario
     else:
         permisos_usuario = st.session_state.get("permisos_usuario", [])
-    # Si el admin no tiene ningún permiso configurado, le damos acceso completo como fallback
+    # Si no tiene ningún permiso configurado, acceso completo como fallback
     if not permisos_usuario:
         permisos_usuario = list(pestanas_maestras.values())
         st.session_state.permisos_usuario = permisos_usuario
@@ -4171,6 +4171,15 @@ if tab_gastos:
                 _meses_disp      = ["Todos"] + [f"{k} – {v}" for k, v in _meses_nombres.items()]
                 _mes_sel_label   = _mcol3.selectbox("📆 Mes:", _meses_disp, key="met_mes")
                 _mes_sel         = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
+
+                # ── Selector de moneda ──
+                _moneda_sel = st.radio(
+                    "💱 Ver métricas en:",
+                    ["$ Pesos", "U$S Dólares"],
+                    horizontal=True,
+                    key="met_moneda"
+                )
+                _ver_usd = (_moneda_sel == "U$S Dólares")
 
                 # ── Selector de moneda ──
                 _moneda_sel = st.radio(
