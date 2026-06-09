@@ -932,8 +932,14 @@ if rol_actual == "superadmin":
     pestanas_visibles_nombres = list(pestanas_maestras.keys()) + ["⚙️ Panel de Gestión"]
     pestanas_visibles_claves = list(pestanas_maestras.values()) + ["panel_gestion"]
 elif rol_actual == "admin":
-    # Admin: acceso al Panel de Gestión siempre + solo las pestañas que tenga habilitadas en BD
-    permisos_usuario = st.session_state.get("permisos_usuario", [])
+    # Admin: recarga permisos desde BD en cada render (evita que queden desactualizados en sesión)
+    _username_admin = st.session_state.get("username", "")
+    _db_admin = st.session_state.get("empresa_db", "")
+    if _username_admin and _db_admin:
+        permisos_usuario = obtener_permisos_desde_db(_username_admin, _db_admin)
+        st.session_state.permisos_usuario = permisos_usuario
+    else:
+        permisos_usuario = st.session_state.get("permisos_usuario", [])
     pestanas_visibles_nombres = []
     pestanas_visibles_claves = []
     for nombre, clave in pestanas_maestras.items():
