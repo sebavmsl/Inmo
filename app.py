@@ -3256,28 +3256,30 @@ if tab_superadmin:
                     st.markdown("---")
                     if nuevo_rol == "propietario":
                         st.info("🏠 El rol **Propietario** tiene acceso fijo de solo lectura a: Dashboard, Planilla de Contratos e Historial de Caja. No requiere configuración de permisos.")
-                    st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para usuarios con rol 'user')")
-                        
-                    permisos_actuales = []
-                    if ruta_db_user and os.path.exists(ruta_db_user):
-                        try:
-                            conn_emp = sqlite3.connect(ruta_db_user)
-                            cursor_emp = conn_emp.cursor()
-                            cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
-                            if cursor_emp.fetchone():
-                                cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
-                                permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
-                            conn_emp.close()
-                        except Exception as e:
-                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
-    
-                    p_dash = st.checkbox("📈 Tablero de Control", value=("dashboard" in permisos_actuales))
-                    p_plan = st.checkbox("📊 Planilla de Contratos", value=("planilla" in permisos_actuales))
-                    p_pagos = st.checkbox("💰 Registrar / Emitir Recibo", value=("pagos" in permisos_actuales))
-                    p_hist = st.checkbox("🗄️ Historial de Caja", value=("historial_pagos" in permisos_actuales))
-                    p_carga = st.checkbox("📝 Carga de Contratos", value=("carga" in permisos_actuales))
-                    p_aux = st.checkbox("⚙️ Cargar Inquilinos / Propiedades", value=("auxiliares" in permisos_actuales))
-                    p_gastos = st.checkbox("🔧 Gastos de Propiedades", value=("gastos" in permisos_actuales))
+                        p_dash = p_plan = p_pagos = p_hist = p_carga = p_aux = p_gastos = False
+                    else:
+                        st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
+
+                        permisos_actuales = []
+                        if ruta_db_user and os.path.exists(ruta_db_user):
+                            try:
+                                conn_emp = sqlite3.connect(ruta_db_user)
+                                cursor_emp = conn_emp.cursor()
+                                cursor_emp.execute("SELECT name FROM sqlite_master WHERE name='permisos_usuario'")
+                                if cursor_emp.fetchone():
+                                    cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = ?", (user_seleccionado,))
+                                    permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
+                                conn_emp.close()
+                            except Exception as e:
+                                st.warning(f"Aviso al recuperar permisos existentes: {e}")
+
+                        p_dash  = st.checkbox("📈 Tablero de Control",              value=("dashboard"       in permisos_actuales))
+                        p_plan  = st.checkbox("📊 Planilla de Contratos",            value=("planilla"        in permisos_actuales))
+                        p_pagos = st.checkbox("💰 Registrar / Emitir Recibo",        value=("pagos"           in permisos_actuales))
+                        p_hist  = st.checkbox("🗄️ Historial de Caja",                value=("historial_pagos" in permisos_actuales))
+                        p_carga = st.checkbox("📝 Carga de Contratos",               value=("carga"           in permisos_actuales))
+                        p_aux   = st.checkbox("⚙️ Cargar Inquilinos / Propiedades",  value=("auxiliares"      in permisos_actuales))
+                        p_gastos= st.checkbox("🔧 Gastos de Propiedades",            value=("gastos"          in permisos_actuales))
     
                     btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
     
