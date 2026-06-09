@@ -18,7 +18,7 @@ from io import BytesIO
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
-st.set_page_config(page_title="Gestión de Alquileres - VER 09.06", layout="wide")
+st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
 
 # 2. Inyección de CSS para ocultar elementos
 hide_streamlit_style = """
@@ -940,6 +940,10 @@ elif rol_actual == "admin":
         st.session_state.permisos_usuario = permisos_usuario
     else:
         permisos_usuario = st.session_state.get("permisos_usuario", [])
+    # Si el admin no tiene ningún permiso configurado, le damos acceso completo como fallback
+    if not permisos_usuario:
+        permisos_usuario = list(pestanas_maestras.values())
+        st.session_state.permisos_usuario = permisos_usuario
     pestanas_visibles_nombres = []
     pestanas_visibles_claves = []
     for nombre, clave in pestanas_maestras.items():
