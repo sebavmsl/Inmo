@@ -4159,6 +4159,15 @@ if tab_gastos:
                 _mes_sel_label   = _mcol3.selectbox("📆 Mes:", _meses_disp, key="met_mes")
                 _mes_sel         = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
 
+                # ── Selector de moneda ──
+                _moneda_sel = st.radio(
+                    "💱 Ver métricas en:",
+                    ["$ Pesos", "U$S Dólares"],
+                    horizontal=True,
+                    key="met_moneda"
+                )
+                _ver_usd = (_moneda_sel == "U$S Dólares")
+
                 # ── Aplicar filtros a ingresos ──
                 _dfi = _df_ingresos_raw.copy()
                 if not _dfi.empty:
@@ -4205,41 +4214,41 @@ if tab_gastos:
                 _total_pasivos_usd = _total_gas_usd + _total_adm_usd + _total_imp_inm_usd
                 _balance_usd       = _total_ing_usd - _total_pasivos_usd
 
-                # ── KPIs en PESOS ──
-                st.markdown("**📥 Ingresos — $**")
-                _km1, _km2, _km3 = st.columns(3)
-                _km1.metric("💰 Total Ingresos",  f"$ {_total_ing:,.2f}", help="Alquiler + Cochera del período filtrado")
-                _km2.metric("🏠 Alquiler",        f"$ {_total_alq:,.2f}")
-                _km3.metric("🚗 Cochera",         f"$ {_total_coch:,.2f}")
+                # ── KPIs según moneda seleccionada ──
+                if not _ver_usd:
+                    # ── KPIs en PESOS ──
+                    st.markdown("**📥 Ingresos — $**")
+                    _km1, _km2, _km3 = st.columns(3)
+                    _km1.metric("💰 Total Ingresos",  f"$ {_total_ing:,.2f}", help="Alquiler + Cochera del período filtrado")
+                    _km2.metric("🏠 Alquiler",        f"$ {_total_alq:,.2f}")
+                    _km3.metric("🚗 Cochera",         f"$ {_total_coch:,.2f}")
 
-                st.markdown("**📤 Pasivos — $**")
-                _kp1, _kp2, _kp3 = st.columns(3)
-                _kp1.metric("🔧 Gastos Propiedad",    f"$ {_total_gas:,.2f}")
-                _kp2.metric("🏢 Gasto Adm.",          f"$ {_total_adm:,.2f}")
-                _kp3.metric("🏛️ Imp. Inmobiliario",   f"$ {_total_imp_inm:,.2f}")
+                    st.markdown("**📤 Pasivos — $**")
+                    _kp1, _kp2, _kp3 = st.columns(3)
+                    _kp1.metric("🔧 Gastos Propiedad",    f"$ {_total_gas:,.2f}")
+                    _kp2.metric("🏢 Gasto Adm.",          f"$ {_total_adm:,.2f}")
+                    _kp3.metric("🏛️ Imp. Inmobiliario",   f"$ {_total_imp_inm:,.2f}")
 
-                _bm1, _bm2 = st.columns([1, 3])
-                _color_balance = "normal" if _balance >= 0 else "inverse"
-                _bm1.metric("📈 Balance Neto ($)", f"$ {_balance:,.2f}", delta_color=_color_balance)
+                    _bm1, _bm2 = st.columns([1, 3])
+                    _color_balance = "normal" if _balance >= 0 else "inverse"
+                    _bm1.metric("📈 Balance Neto ($)", f"$ {_balance:,.2f}", delta_color=_color_balance)
+                else:
+                    # ── KPIs en USD ──
+                    st.markdown("**📥 Ingresos — U$S**")
+                    _ku1, _ku2, _ku3 = st.columns(3)
+                    _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera en USD al tipo de cambio de cada cobro")
+                    _ku2.metric("🏠 Alquiler",        f"U$S {_total_alq_usd:,.2f}")
+                    _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
 
-                st.divider()
+                    st.markdown("**📤 Pasivos — U$S**")
+                    _kpu1, _kpu2, _kpu3 = st.columns(3)
+                    _kpu1.metric("🔧 Gastos Propiedad",   f"U$S {_total_gas_usd:,.2f}")
+                    _kpu2.metric("🏢 Gasto Adm.",         f"U$S {_total_adm_usd:,.2f}")
+                    _kpu3.metric("🏛️ Imp. Inmobiliario",  f"U$S {_total_imp_inm_usd:,.2f}")
 
-                # ── KPIs en USD ──
-                st.markdown("**📥 Ingresos — U$S**")
-                _ku1, _ku2, _ku3 = st.columns(3)
-                _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera en USD al tipo de cambio de cada cobro")
-                _ku2.metric("🏠 Alquiler",        f"U$S {_total_alq_usd:,.2f}")
-                _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
-
-                st.markdown("**📤 Pasivos — U$S**")
-                _kpu1, _kpu2, _kpu3 = st.columns(3)
-                _kpu1.metric("🔧 Gastos Propiedad",   f"U$S {_total_gas_usd:,.2f}")
-                _kpu2.metric("🏢 Gasto Adm.",         f"U$S {_total_adm_usd:,.2f}")
-                _kpu3.metric("🏛️ Imp. Inmobiliario",  f"U$S {_total_imp_inm_usd:,.2f}")
-
-                _bu1, _bu2 = st.columns([1, 3])
-                _color_balance_usd = "normal" if _balance_usd >= 0 else "inverse"
-                _bu1.metric("📈 Balance Neto (U$S)", f"U$S {_balance_usd:,.2f}", delta_color=_color_balance_usd)
+                    _bu1, _bu2 = st.columns([1, 3])
+                    _color_balance_usd = "normal" if _balance_usd >= 0 else "inverse"
+                    _bu1.metric("📈 Balance Neto (U$S)", f"U$S {_balance_usd:,.2f}", delta_color=_color_balance_usd)
 
                 st.divider()
 
@@ -4302,57 +4311,71 @@ if tab_gastos:
                         "balance_usd":           "BALANCE (USD)",
                     })
 
-                    _cols_display = [
-                        "PROPIEDAD", "PERÍODO",
-                        "ALQUILER ($)", "ALQUILER (USD)",
-                        "COCHERA ($)", "COCHERA (USD)",
-                        "TOTAL INGRESO ($)", "TOTAL INGRESO (USD)",
-                        "GASTOS PROP. ($)", "GASTOS PROP. (USD)",
-                        "GASTO ADM. ($)", "GASTO ADM. (USD)",
-                        "IMP. INMO. ($)", "IMP. INMO. (USD)",
-                        "TOTAL PASIVOS ($)", "TOTAL PASIVOS (USD)",
-                        "BALANCE ($)", "BALANCE (USD)",
-                    ]
-
                     def _color_balance_row(val):
                         color = "#d4edda" if val >= 0 else "#f8d7da"
                         return f"background-color: {color}"
 
-                    _fmt_dict = {c: "$ {:,.2f}"     for c in _cols_display if "($)"   in c}
-                    _fmt_dict.update({c: "U$S {:,.2f}" for c in _cols_display if "(USD)" in c})
-
-                    _styled = _df_display[_cols_display].style.map(
-                        _color_balance_row, subset=["BALANCE ($)", "BALANCE (USD)"]
-                    ).format(_fmt_dict)
+                    if not _ver_usd:
+                        _cols_display = [
+                            "PROPIEDAD", "PERÍODO",
+                            "ALQUILER ($)", "COCHERA ($)", "TOTAL INGRESO ($)",
+                            "GASTOS PROP. ($)", "GASTO ADM. ($)", "IMP. INMO. ($)",
+                            "TOTAL PASIVOS ($)", "BALANCE ($)",
+                        ]
+                        _fmt_dict = {c: "$ {:,.2f}" for c in _cols_display if c not in ("PROPIEDAD", "PERÍODO")}
+                        _styled = _df_display[_cols_display].style.map(
+                            _color_balance_row, subset=["BALANCE ($)"]
+                        ).format(_fmt_dict)
+                        _csv_nombre = "metricas_pesos.csv"
+                    else:
+                        _cols_display = [
+                            "PROPIEDAD", "PERÍODO",
+                            "ALQUILER (USD)", "COCHERA (USD)", "TOTAL INGRESO (USD)",
+                            "GASTOS PROP. (USD)", "GASTO ADM. (USD)", "IMP. INMO. (USD)",
+                            "TOTAL PASIVOS (USD)", "BALANCE (USD)",
+                        ]
+                        _fmt_dict = {c: "U$S {:,.2f}" for c in _cols_display if c not in ("PROPIEDAD", "PERÍODO")}
+                        _styled = _df_display[_cols_display].style.map(
+                            _color_balance_row, subset=["BALANCE (USD)"]
+                        ).format(_fmt_dict)
+                        _csv_nombre = "metricas_dolares.csv"
 
                     st.dataframe(_styled, use_container_width=True, hide_index=True)
 
                     # Exportar
                     _csv_m = _df_display[_cols_display].to_csv(index=False).encode("utf-8")
-                    st.download_button("⬇️ Exportar métricas a CSV", _csv_m, "metricas_por_propiedad.csv", "text/csv")
+                    st.download_button("⬇️ Exportar métricas a CSV", _csv_m, _csv_nombre, "text/csv")
 
                     # ── Gráfico de barras agrupadas ──
                     st.markdown("##### 📊 Gráfico Ingresos vs. Gastos")
-                    _df_chart = _df_merge.groupby("periodo", as_index=False).agg(
-                        Ingresos=("total_ingreso", "sum"),
-                        Gastos=("total_gasto", "sum")
-                    ).sort_values("periodo")
+                    if not _ver_usd:
+                        _df_chart = _df_merge.groupby("periodo", as_index=False).agg(
+                            Ingresos=("total_ingreso", "sum"),
+                            Gastos=("total_gasto", "sum")
+                        ).sort_values("periodo")
+                    else:
+                        _df_chart = _df_merge.groupby("periodo", as_index=False).agg(
+                            Ingresos=("total_ingreso_usd", "sum"),
+                            Gastos=("total_gasto_usd", "sum")
+                        ).sort_values("periodo")
 
                     if not _df_chart.empty:
                         import altair as alt
                         _df_long = _df_chart.melt(id_vars="periodo", var_name="Tipo", value_name="Monto")
+                        _fmt_tooltip = "$,.2f" if not _ver_usd else ",.2f"
+                        _y_title = "$ Monto" if not _ver_usd else "U$S Monto"
                         _chart = (
                             alt.Chart(_df_long)
                             .mark_bar()
                             .encode(
                                 x=alt.X("periodo:N", title="Período", sort=None),
-                                y=alt.Y("Monto:Q", title="$ Monto"),
+                                y=alt.Y("Monto:Q", title=_y_title),
                                 color=alt.Color("Tipo:N", scale=alt.Scale(
                                     domain=["Ingresos", "Gastos"],
                                     range=["#28a745", "#dc3545"]
                                 )),
                                 xOffset="Tipo:N",
-                                tooltip=["periodo", "Tipo", alt.Tooltip("Monto:Q", format="$,.2f")]
+                                tooltip=["periodo", "Tipo", alt.Tooltip("Monto:Q", format=_fmt_tooltip)]
                             )
                             .properties(height=350)
                         )
