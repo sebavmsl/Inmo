@@ -1902,14 +1902,14 @@ if tab_pagos:
                                 <tr>
                                     <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
                                     <td class="meta-text">
-                                        <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}-{mes_periodo_texto.replace(' ','')}<br>
+                                        <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}<br>
                                         <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
                                         <strong>Período:</strong> {mes_periodo_texto}<br>
                                     </td>
                                 </tr>
                             </table>
 
-                            <div class="section-title">Datos Comerciales del Contrato</div>
+                            <div class="section-title">Datos del Contrato</div>
                             <table class="info-grid">
                                 <tr>
                                     <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
@@ -1958,7 +1958,7 @@ if tab_pagos:
                     st.download_button(
                         label="🖨️ Descargar Comprobante PDF Corporativo",
                         data=html_pdf_profesional,
-                        file_name=f"comprobante_oficial_C_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
+                        file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
                         mime="text/html",
                         help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
                     )
