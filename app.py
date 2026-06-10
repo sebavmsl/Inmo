@@ -1,4 +1,4 @@
-#SIN COTIZACION - ULTIMO
+#ICL. IPC REDONDEADO
 import streamlit as st
 import pandas as pd
 import os
