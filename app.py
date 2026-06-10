@@ -861,7 +861,7 @@ def calcular_valor_actualizado_icl(
         icl_actual  = _buscar_valor_mas_cercano(fecha_actualizacion, icl_data, dias_max=10)
 
         if icl_inicio and icl_actual and icl_inicio > 0:
-            return round(monto_inicial * (icl_actual / icl_inicio), 2)
+            return float(round(monto_inicial * (icl_actual / icl_inicio)))
         return None
     except Exception as e:
         logging.warning(f"[ICL] Error calculando: {e}")
@@ -890,7 +890,7 @@ def calcular_valor_actualizado_ipc(
         ipc_actual  = _buscar_valor_mas_cercano(fecha_actualizacion, ipc_data, dias_max=45)
 
         if ipc_inicio and ipc_actual and ipc_inicio > 0:
-            return round(monto_inicial * (ipc_actual / ipc_inicio), 2)
+            return float(round(monto_inicial * (ipc_actual / ipc_inicio)))
         return None
     except Exception as e:
         logging.warning(f"[IPC] Error calculando: {e}")
@@ -1249,7 +1249,10 @@ if tab_pagos:
                 i.apellidos, i.nombres, i.telefono, i.email,
                 c.prox_actualizacion, c.alquiler, c.indice, c.act_contrato, c.calc_duracion,
                 c.fin_contrato,
-                c.mes_contrato, c.monto_honorarios, c.honorarios_pagados, c.monto_garantia, c.garantia, c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
+                c.mes_contrato, c.monto_honorarios, c.honorarios_pagados,
+                c.cuota_honorarios, c.cuotas_honorarios_pagadas,
+                c.monto_garantia, c.garantia, c.cuotas_deposito, c.cuotas_deposito_pagadas,
+                c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
                 c.servicios, c.inicio_contrato, c.monto_inicial
             FROM contratos c
             JOIN propiedades p ON c.propiedad_id = p.id
@@ -1352,35 +1355,75 @@ if tab_pagos:
             # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
             st.markdown("#### 📑 Conceptos Especiales de Contrato")
             ed_col_esp1, ed_col_esp2 = st.columns(2)
-            
-            # Lógica de Honorarios
-            total_honorarios_inquilino = float(c_datos['monto_inicial'] or 0.0)
-            pagado_honorarios_inquilino = float(c_datos['honorarios_pagados'] or 0.0)
-            saldo_honorarios_inquilino = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
-            
+
+            # ── HONORARIOS (a cargo del inquilino) ──────────────────────────
+            # Se cobra desde el mes 1 hasta completar las cuotas pactadas.
+            # El valor por defecto de cada mes es el valor de la cuota (total / cuotas).
+            total_honorarios_inquilino  = float(c_datos.get('monto_honorarios') or c_datos.get('monto_inicial') or 0.0)
+            cuotas_hon_pactadas         = int(c_datos.get('cuota_honorarios') or 1)
+            pagado_honorarios_inquilino = float(c_datos.get('honorarios_pagados') or 0.0)
+            saldo_honorarios_inquilino  = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
+            cuotas_hon_pagadas          = int(c_datos.get('cuotas_honorarios_pagadas') or 0)
+            cuotas_hon_pendientes       = max(0, cuotas_hon_pactadas - cuotas_hon_pagadas)
+
+            # Valor de la cuota: total dividido en las cuotas pactadas
+            valor_cuota_hon = round(total_honorarios_inquilino / cuotas_hon_pactadas, 2) if cuotas_hon_pactadas > 0 else 0.0
+            # Default del mes: cuota normal, o el saldo si es la última y hay diferencia de redondeo
+            default_hon = min(valor_cuota_hon, saldo_honorarios_inquilino) if cuotas_hon_pendientes > 0 else 0.0
+
+            with ed_col_esp1:
+                if cuotas_hon_pendientes > 0:
+                    st.info(
+                        f"💼 Honorarios: cuota {cuotas_hon_pagadas + 1} de {cuotas_hon_pactadas} — "
+                        f"valor cuota: **$ {valor_cuota_hon:,.2f}** — saldo total: $ {saldo_honorarios_inquilino:,.2f}"
+                    )
+                else:
+                    st.success("💼 Honorarios: ✅ Completamente abonados.")
             monto_honorarios_pago = ed_col_esp1.number_input(
-                "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):", 
-                min_value=0.0, 
-                value=saldo_honorarios_inquilino, 
-                step=1000.0, 
-                help=f"Comisión Pactada Inquilino: ${total_honorarios_inquilino:.2f}. Pagado a la fecha: ${pagado_honorarios_inquilino:.2f}. Saldo restante: ${saldo_honorarios_inquilino:.2f}"
+                "💼 Honorarios Inmobiliaria (Comisión Contrato) ($):",
+                min_value=0.0,
+                value=default_hon,
+                step=1000.0,
+                help=(
+                    f"Total pactado: ${total_honorarios_inquilino:,.2f} en {cuotas_hon_pactadas} cuota(s). "
+                    f"Pagado: ${pagado_honorarios_inquilino:,.2f} ({cuotas_hon_pagadas} cuota(s)). "
+                    f"Pendientes: {cuotas_hon_pendientes} cuota(s) — Saldo: ${saldo_honorarios_inquilino:,.2f}"
+                )
             )
-            
-            # Lógica de Garantía REFORMADA (Sincronizada con el campo 'garantia' de la carga)
-            val_teorico_garantia = float(c_datos['monto_garantia'] or 0.0)
+
+            # ── DEPÓSITO DE GARANTÍA (a cargo del inquilino) ────────────────
+            # Idéntica lógica: se cobra desde el mes 1 hasta completar las cuotas pactadas.
+            val_teorico_garantia    = float(c_datos.get('monto_garantia') or 0.0)
+            cuotas_dep_pactadas     = int(c_datos.get('cuotas_deposito') or 1)
             try:
-                pagado_garantia_inquilino = float(c_datos['garantia'] or 0.0)
-            except ValueError:
+                pagado_garantia_inquilino = float(c_datos.get('garantia') or 0.0)
+            except (ValueError, TypeError):
                 pagado_garantia_inquilino = 0.0
-                
             saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
-            
+            cuotas_dep_pagadas       = int(c_datos.get('cuotas_deposito_pagadas') or 0)
+            cuotas_dep_pendientes    = max(0, cuotas_dep_pactadas - cuotas_dep_pagadas)
+
+            valor_cuota_dep = round(val_teorico_garantia / cuotas_dep_pactadas, 2) if cuotas_dep_pactadas > 0 else 0.0
+            default_dep = min(valor_cuota_dep, saldo_garantia_inquilino) if cuotas_dep_pendientes > 0 else 0.0
+
+            with ed_col_esp2:
+                if cuotas_dep_pendientes > 0:
+                    st.info(
+                        f"🛡️ Depósito: cuota {cuotas_dep_pagadas + 1} de {cuotas_dep_pactadas} — "
+                        f"valor cuota: **$ {valor_cuota_dep:,.2f}** — saldo total: $ {saldo_garantia_inquilino:,.2f}"
+                    )
+                else:
+                    st.success("🛡️ Depósito de Garantía: ✅ Completamente abonado.")
             monto_garantia_pago = ed_col_esp2.number_input(
-                "🛡️ Respaldo con Monto Depositado (Garantía) ($):", 
-                min_value=0.0, 
-                value=saldo_garantia_inquilino, 
-                step=5000.0, 
-                help=f"Monto de garantía estipulado: ${val_teorico_garantia:.2f}. Depositado a la fecha: ${pagado_garantia_inquilino:.2f}. Saldo faltante: ${saldo_garantia_inquilino:.2f}"
+                "🛡️ Respaldo con Monto Depositado (Garantía) ($):",
+                min_value=0.0,
+                value=default_dep,
+                step=1000.0,
+                help=(
+                    f"Total pactado: ${val_teorico_garantia:,.2f} en {cuotas_dep_pactadas} cuota(s). "
+                    f"Depositado: ${pagado_garantia_inquilino:,.2f} ({cuotas_dep_pagadas} cuota(s)). "
+                    f"Pendientes: {cuotas_dep_pendientes} cuota(s) — Saldo: ${saldo_garantia_inquilino:,.2f}"
+                )
             )
 
             # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
@@ -1441,25 +1484,42 @@ if tab_pagos:
             r_col1, r_col2, r_col3 = st.columns([2, 2, 2])
             r_col1.markdown(f"🔗 [Verificar en arquiler.com](https://arquiler.com/pwa?amount={int(val_monto_ini_recibo)}&date={inicio_contrato_dt.strftime('%Y-%m-%d')}&months={meses_a_sumar}&rate={indice_recibo.lower()})")
 
-            # Mismo bloque exacto que en pestaña de carga
+            # Calcular la última fecha de actualización ya aplicada.
+            # Ejemplo: inicio 1-ene-25, trimestral, hoy 10-jun-26 → prox = 1-jul-26 → última = 1-abr-26
+            try:
+                _ultima_act_dt = prox_actualizacion_calculada - dateutil.relativedelta.relativedelta(months=int(meses_a_sumar))
+                _delta_ultima = dateutil.relativedelta.relativedelta(_ultima_act_dt, inicio_contrato_dt)
+                _meses_hasta_ultima_act = (_delta_ultima.years * 12) + _delta_ultima.months
+                if _meses_hasta_ultima_act <= 0:
+                    _meses_hasta_ultima_act = int(meses_a_sumar)
+            except Exception:
+                _meses_hasta_ultima_act = int(meses_a_sumar)
+
+            # Calcula: monto_inicial × (ICL_ultima_actualizacion / ICL_inicio_contrato)
             valor_auto_recibo = None
             if indice_recibo in ("ICL", "IPC"):
                 with st.spinner(f"⏳ Consultando {indice_recibo}..."):
                     if indice_recibo == "ICL":
                         valor_auto_recibo = calcular_valor_actualizado_icl(
-                            val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            val_monto_ini_recibo, inicio_contrato_recibo, _meses_hasta_ultima_act
                         )
                     elif indice_recibo == "IPC":
                         valor_auto_recibo = calcular_valor_actualizado_ipc(
-                            val_monto_ini_recibo, inicio_contrato_recibo, int(meses_a_sumar)
+                            val_monto_ini_recibo, inicio_contrato_recibo, _meses_hasta_ultima_act
                         )
 
             if valor_auto_recibo is not None:
-                valor_auto_recibo_fmt = f"$ {valor_auto_recibo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                valor_auto_recibo_fmt = f"$ {int(valor_auto_recibo):,}".replace(",", ".")
+                _fecha_desde_fmt = inicio_contrato_dt.strftime("%d/%m/%Y")
+                _fecha_hasta_fmt = _ultima_act_dt.strftime("%d/%m/%Y")
                 r_col2.metric(
                     label=f"📡 Auto {indice_recibo} (oficial)",
                     value=valor_auto_recibo_fmt,
-                    help=f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}."
+                    help=(
+                        f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}. "
+                        f"Período: {_fecha_desde_fmt} → {_fecha_hasta_fmt} "
+                        f"({_meses_hasta_ultima_act} meses acumulados desde el inicio del contrato)."
+                    )
                 )
                 val_base_alq = valor_auto_recibo
             else:
@@ -1759,16 +1819,26 @@ if tab_pagos:
 
                     # 4. Acumula el cobro de honorarios directamente sobre lo que ya pagó el Inquilino
                     nuevos_honorarios_acumulados = pagado_honorarios_inquilino + monto_honorarios_pago
+                    # Incrementar cuotas_honorarios_pagadas solo si se cobró algo en este concepto
+                    nuevas_cuotas_hon_pagadas = cuotas_hon_pagadas + (1 if monto_honorarios_pago > 0 and cuotas_hon_pendientes > 0 else 0)
 
                     # 4b. Acumula el cobro de garantía directamente sobre el Monto Depositado a la Fecha
                     nueva_garantia_acumulada = pagado_garantia_inquilino + monto_garantia_pago
+                    # Incrementar cuotas_deposito_pagadas solo si se cobró algo en este concepto
+                    nuevas_cuotas_dep_pagadas = cuotas_dep_pagadas + (1 if monto_garantia_pago > 0 and cuotas_dep_pendientes > 0 else 0)
 
                     # 5. Guardar los valores actualizados de manera persistente en la base de datos
                     cursor.execute('''
-                        UPDATE contratos 
-                        SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?, honorarios_pagados = ?, garantia = ?, servicios_total = ?
+                        UPDATE contratos
+                        SET expensas = ?, edesal = ?, gas = ?, municipalidad = ?, cochera = ?,
+                            honorarios_pagados = ?, cuotas_honorarios_pagadas = ?,
+                            garantia = ?, cuotas_deposito_pagadas = ?,
+                            servicios_total = ?
                         WHERE codigo = ?
-                    ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera, nuevos_honorarios_acumulados, str(nueva_garantia_acumulada), monto_serv_pago, c_datos['codigo']))
+                    ''', (monto_expensas, monto_edesal, monto_gas, monto_municipalidad, monto_cochera,
+                          nuevos_honorarios_acumulados, nuevas_cuotas_hon_pagadas,
+                          str(nueva_garantia_acumulada), nuevas_cuotas_dep_pagadas,
+                          monto_serv_pago, c_datos['codigo']))
 
                     conn.commit()
                     st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
@@ -1776,8 +1846,10 @@ if tab_pagos:
                         st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
                     elif saldo_pendiente < 0:
                         st.info(f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor).")
-                    st.info(f"🔄 Los honorarios pagados acumulados del inquilino subieron a: $ {nuevos_honorarios_acumulados:,.2f}")
-                    st.info(f"🛡️ El monto de garantía depositado a la fecha subió a: $ {nueva_garantia_acumulada:,.2f}")
+                    if monto_honorarios_pago > 0:
+                        st.info(f"🔄 Honorarios: cuota {nuevas_cuotas_hon_pagadas} de {cuotas_hon_pactadas} cobrada. Acumulado: $ {nuevos_honorarios_acumulados:,.2f}")
+                    if monto_garantia_pago > 0:
+                        st.info(f"🛡️ Depósito Garantía: cuota {nuevas_cuotas_dep_pagadas} de {cuotas_dep_pactadas} cobrada. Acumulado: $ {nueva_garantia_acumulada:,.2f}")
 
                     # Activar flag para mostrar el PDF sin recargar la página
                     st.session_state.pago_impactado = True
