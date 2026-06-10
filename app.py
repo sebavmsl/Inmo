@@ -1,4 +1,4 @@
-#ICL. IPC REDONDEADO
+#SIN COTIZACION - ULTIMO
 import streamlit as st
 import pandas as pd
 import os
@@ -3123,8 +3123,21 @@ if tab_auxiliares:
                         if not apellidos or not nombres:
                             st.error("Apellidos y Nombres son obligatorios.")
                         else:
-                            # ... (tu lógica de conexión y guardado de inquilino) ...
-                            st.success("Inquilino guardado.")
+                            conn = conectar_db()
+                            try:
+                                cursor = conn.cursor()
+                                cursor.execute('''
+                                    INSERT INTO inquilinos (apellidos, nombres, dni, telefono, email)
+                                    VALUES (?, ?, ?, ?, ?)
+                                ''', (apellidos.strip(), nombres.strip(), dni.strip() or None, tel.strip() or None, email.strip() or None))
+                                conn.commit()
+                                st.success(f"✅ Inquilino '{apellidos}, {nombres}' guardado correctamente.")
+                            except sqlite3.IntegrityError:
+                                st.error("⚠️ Ya existe un inquilino con ese DNI o con el mismo apellido y nombre.")
+                            except Exception as e:
+                                st.error(f"Error al guardar el inquilino: {e}")
+                            finally:
+                                conn.close()
     
             with sub_tab2:
                 st.markdown("📝 Registrar Nueva Propiedad")
