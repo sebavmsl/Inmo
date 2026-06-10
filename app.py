@@ -14,6 +14,8 @@ import sqlite3
 import requests
 from io import BytesIO
 
+
+
 # Configuración de logging (reemplaza los print() de depuración)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -740,10 +742,32 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
                 resultado[fecha.strftime("%Y-%m-%d")] = valor
             except Exception:
                 continue
-        return resultado
+        if resultado:
+            logging.info(f"[ICL] BCRA: {len(resultado)} registros obtenidos para {año}.")
+            return resultado
+        raise ValueError("El XLS del BCRA no contenía datos válidos.")
     except Exception as e:
-        logging.warning(f"[ICL] No se pudo obtener XLS del BCRA para {año}: {e}")
-        return {}
+        logging.warning(f"[ICL] Fuente primaria BCRA falló para {año}: {e}")
+
+    # ── Fallback: API pública de IndecData / datos.gob.ar para ICL ──
+    try:
+        url_fb = (
+            "https://apis.datos.gob.ar/series/api/series/"
+            "?ids=174.1_ICL_0_0_32"
+            "&limit=5000&format=json"
+        )
+        resp_fb = requests.get(url_fb, timeout=15)
+        resp_fb.raise_for_status()
+        data_fb = resp_fb.json()
+        puntos_fb = [(p[0], p[1]) for p in data_fb.get("data", []) if p[1] is not None]
+        if puntos_fb:
+            resultado_fb = {f: float(v) for f, v in puntos_fb}
+            logging.info(f"[ICL] Fallback datos.gob.ar: {len(resultado_fb)} registros.")
+            return resultado_fb
+    except Exception as e2:
+        logging.warning(f"[ICL] Fallback datos.gob.ar también falló: {e2}")
+
+    return {}
 
 
 @st.cache_data(ttl=3600)
@@ -765,17 +789,41 @@ def _obtener_ipc_indec() -> dict:
         data = resp.json()
         puntos = [(p[0], p[1]) for p in data.get("data", []) if p[1] is not None]
         if not puntos:
-            return {}
+            raise ValueError("La API del INDEC no devolvió datos.")
         # Acumular: indice[0] = 1, indice[n] = indice[n-1] * (1 + variacion[n])
         resultado = {}
         indice_acum = 1.0
         for fecha_str, variacion in puntos:
             indice_acum *= (1.0 + float(variacion))
             resultado[fecha_str] = indice_acum
+        logging.info(f"[IPC] INDEC: {len(resultado)} períodos obtenidos.")
         return resultado
     except Exception as e:
-        logging.warning(f"[IPC] No se pudo obtener IPC de datos.gob.ar: {e}")
-        return {}
+        logging.warning(f"[IPC] Fuente primaria datos.gob.ar falló: {e}")
+
+    # ── Fallback: serie alternativa de IPC en datos.gob.ar ──
+    try:
+        url_fb2 = (
+            "https://apis.datos.gob.ar/series/api/series/"
+            "?ids=145.3_INGNACUAL_DICI_M_38,103.1_I2N_2016_M_19"
+            "&limit=1000&format=json"
+        )
+        resp_fb2 = requests.get(url_fb2, timeout=15)
+        resp_fb2.raise_for_status()
+        data_fb2 = resp_fb2.json()
+        puntos_fb2 = [(p[0], p[1]) for p in data_fb2.get("data", []) if p[1] is not None]
+        if puntos_fb2:
+            resultado_fb2 = {}
+            indice_acum2 = 1.0
+            for fecha_str, variacion in puntos_fb2:
+                indice_acum2 *= (1.0 + float(variacion))
+                resultado_fb2[fecha_str] = indice_acum2
+            logging.info(f"[IPC] Fallback serie alternativa: {len(resultado_fb2)} períodos.")
+            return resultado_fb2
+    except Exception as e2:
+        logging.warning(f"[IPC] Fallback alternativo también falló: {e2}")
+
+    return {}
 
 
 def _buscar_valor_mas_cercano(fecha_target: datetime, data: dict, dias_max: int = 45) -> float | None:
@@ -1243,11 +1291,21 @@ if tab_pagos:
                     inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%Y-%m-%d").date()
                 except ValueError:
                     inicio_contrato_dt = datetime.strptime(c_datos['inicio_contrato'], "%d/%m/%Y").date()
-                duracion_meses = int(c_datos['calc_duracion'] or 0)
-                fin_contrato_dt = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=duracion_meses)
+                try:
+                    fin_contrato_dt = datetime.strptime(c_datos['fin_contrato'], "%Y-%m-%d").date()
+                except ValueError:
+                    fin_contrato_dt = datetime.strptime(c_datos['fin_contrato'], "%d/%m/%Y").date()
                 
                 opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-                act_contrato_sel = c_datos['act_contrato']
+                meses_a_texto = {str(v): k for k, v in opciones_actualizacion.items()}
+                act_contrato_sel_raw = str(c_datos['act_contrato'] or "").strip()
+                # Soporta tanto "Cuatrimestral" como "4" guardado en la BD
+                if act_contrato_sel_raw in opciones_actualizacion:
+                    act_contrato_sel = act_contrato_sel_raw
+                elif act_contrato_sel_raw in meses_a_texto:
+                    act_contrato_sel = meses_a_texto[act_contrato_sel_raw]
+                else:
+                    act_contrato_sel = act_contrato_sel_raw
                 meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
                 
                 fecha_hoy = datetime.now().date()
@@ -1406,11 +1464,26 @@ if tab_pagos:
                 val_base_alq = valor_auto_recibo
             else:
                 if indice_recibo in ("ICL", "IPC"):
-                    r_col2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
+                    fuente_r = "BCRA" if indice_recibo == "ICL" else "INDEC"
+                    r_col2.warning(
+                        f"⚠️ No se pudo obtener el índice desde {fuente_r}. "
+                        "Ingresá el valor manualmente o verificá en arquiler.com (↖).",
+                    )
+                    if r_col2.button("🔄 Reintentar", key=f"retry_indice_recibo_{c_datos['codigo']}"):
+                        _obtener_icl_bcra_xls.clear()
+                        _obtener_ipc_indec.clear()
+                        st.rerun()
                 val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
 
+            # Resetear el campo si el valor calculado cambió (evita cacheo de session_state)
+            _key_alq_pago = f"monto_alq_pago_{c_datos['codigo']}"
+            _key_alq_ref  = f"_ref_alq_pago_{c_datos['codigo']}"
+            if st.session_state.get(_key_alq_ref) != val_base_alq:
+                st.session_state[_key_alq_pago] = val_base_alq
+                st.session_state[_key_alq_ref]  = val_base_alq
+
             cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
-            monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0)
+            monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0, key=_key_alq_pago)
             
             # Muestra el total consolidado de conceptos adicionales de forma informativa
             cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
@@ -1502,9 +1575,11 @@ if tab_pagos:
                 _meses_transcurridos = 0
             mes_actual_num = _meses_transcurridos + 1
 
-            # Duración total en meses entre inicio y fin del contrato
+            # Duración total en meses entre inicio y fin del contrato (ambos extremos inclusivos)
             _delta = dateutil.relativedelta.relativedelta(_fin_dt, _inicio_dt)
             meses_totales_contrato = (_delta.years * 12) + _delta.months
+            if _delta.days > 0 and _fin_dt.day != _inicio_dt.day:
+                meses_totales_contrato += 1
             if meses_totales_contrato <= 0:
                 meses_totales_contrato = int(c_datos.get('calc_duracion') or 0)
 
@@ -1599,6 +1674,13 @@ if tab_pagos:
 
             # --- MONTO ABONADO Y SALDO PENDIENTE ---
             _valor_default_abonado = float(_total_a_cubrir)
+            _key_abonado = f"monto_abonado_{c_datos['codigo']}_{mes_periodo_texto}"
+
+            # Si el total a cubrir cambió respecto al valor guardado en session_state, resetear
+            _key_ref = f"_ref_total_{c_datos['codigo']}_{mes_periodo_texto}"
+            if st.session_state.get(_key_ref) != _valor_default_abonado:
+                st.session_state[_key_abonado] = _valor_default_abonado
+                st.session_state[_key_ref] = _valor_default_abonado
 
             saldo_col1, saldo_col2 = st.columns(2)
             monto_abonado = saldo_col1.number_input(
@@ -1606,7 +1688,7 @@ if tab_pagos:
                 min_value=0.0,
                 value=float(_valor_default_abonado),
                 step=1000.0,
-                key=f"monto_abonado_{c_datos['codigo']}_{mes_periodo_texto}"
+                key=_key_abonado
             )
             saldo_pendiente = _total_a_cubrir - monto_abonado
             if saldo_pendiente > 0:
@@ -1716,7 +1798,19 @@ if tab_pagos:
                 servicios_str_whatsapp = "\n".join(detalles_recibo_servicios) if detalles_recibo_servicios else " - No se registran conceptos adicionales."
                 
                 mes_actual_num = c_datos['mes_contrato'] or 1
-                meses_totales_contrato = c_datos['calc_duracion'] or 0
+                try:
+                    _fin_pdf = datetime.strptime(str(c_datos['fin_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _fin_pdf = datetime.strptime(str(c_datos['fin_contrato']), "%d/%m/%Y").date()
+                try:
+                    _ini_pdf = datetime.strptime(str(c_datos['inicio_contrato']), "%Y-%m-%d").date()
+                except ValueError:
+                    _ini_pdf = datetime.strptime(str(c_datos['inicio_contrato']), "%d/%m/%Y").date()
+                _d_pdf = dateutil.relativedelta.relativedelta(_fin_pdf, _ini_pdf)
+                _meses_pdf = (_d_pdf.years * 12) + _d_pdf.months
+                if _d_pdf.days > 0 and _fin_pdf.day != _ini_pdf.day:
+                    _meses_pdf += 1
+                meses_totales_contrato = _meses_pdf or int(c_datos['calc_duracion'] or 0)
                 periodo_numerico_pdf = f"Mes {mes_actual_num} de {meses_totales_contrato}"
 
                 plantilla_texto = (
@@ -2444,17 +2538,16 @@ if tab_carga:
                         value=prox_actualizacion_calculada, 
                         format="DD/MM/YYYY", 
                         disabled=True,
-                        key="prox_act_display"
                     )
     
-            fin_con_un_dia_mas = fin_contrato + dateutil.relativedelta.relativedelta(days=1)
-            diff_contrato = dateutil.relativedelta.relativedelta(fin_con_un_dia_mas, inicio_contrato)
+            diff_contrato = dateutil.relativedelta.relativedelta(fin_contrato, inicio_contrato)
             duracion_meses_calculada = (diff_contrato.years * 12) + diff_contrato.months
+            if diff_contrato.days > 0 and fin_contrato.day != inicio_contrato.day:
+                duracion_meses_calculada += 1
             cf5.text_input(
                 "Duración del Contrato:", 
                 value=f"{duracion_meses_calculada} meses", 
                 disabled=True,
-                key="duracion_display"
             )
     
             # --- 3. VALORES ECONÓMICOS E ÍNDICES ---
@@ -2463,7 +2556,7 @@ if tab_carga:
                 
             # Valores con fallback seguro
             val_monto_ini = float(u['monto_inicial']) if u and u.get('monto_inicial') is not None else 80000.0
-            val_alq_ult = float(u['alquiler']) if u and u.get('alquiler') is not None else 80000.0
+            val_alq_ult = float(u['alquiler']) if u and u.get('alquiler') not in (None, 0, 0.0) else val_monto_ini
                 
             monto_inicial = cv1.number_input(
                 "Monto Inicial ($):", 
@@ -2540,7 +2633,15 @@ if tab_carga:
                 valor_por_defecto_fmt = f"{valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             else:
                 if permitir_edicion and indice_upper in ("ICL", "IPC"):
-                    c_web2.warning("⚠️ No se pudo obtener el índice. Ingresá el valor manualmente.")
+                    fuente_c = "BCRA" if indice_upper == "ICL" else "INDEC"
+                    c_web2.warning(
+                        f"⚠️ No se pudo obtener el índice desde {fuente_c}. "
+                        "Ingresá el valor manualmente o verificá en arquiler.com (↖)."
+                    )
+                    if c_web2.button("🔄 Reintentar", key="retry_indice_carga"):
+                        _obtener_icl_bcra_xls.clear()
+                        _obtener_ipc_indec.clear()
+                        st.rerun()
                 valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
             alquiler_actualizado_texto = c_web3.text_input(
@@ -4091,6 +4192,8 @@ if tab_gastos:
                     p.alias_propiedad                                                AS propiedad,
                     COALESCE(p.propietario, '')                                     AS propietario,
                     ph.periodo                                                       AS periodo,
+                    c.inicio_contrato                                               AS inicio_contrato,
+                    COALESCE(c.calc_duracion, 0)                                   AS calc_duracion,
                     COALESCE(ph.monto_alquiler, 0)                                 AS alquiler,
                     COALESCE(ph.monto_cochera, 0)                                  AS cochera,
                     COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0) AS total_ingreso,
@@ -4107,6 +4210,37 @@ if tab_gastos:
                 WHERE 1=1 {_where_m}
                 ORDER BY ph.periodo
             """, conn, params=_params_m)
+
+            # ── Calcular mes calendario desde el período del contrato ──
+            # periodo tiene formato "Mes N de M" (ej. "Mes 1 de 12")
+            # mes_calendario = inicio_contrato + (N-1) meses → YYYY-MM
+            if not _df_ingresos_raw.empty:
+                import re as _re
+                import dateutil.relativedelta
+
+                def _extraer_nro_mes(p):
+                    try:
+                        m = _re.search(r'Mes\s+(\d+)', str(p))
+                        return int(m.group(1)) if m else 0
+                    except Exception:
+                        return 0
+
+                def _calc_mes_cal(row):
+                    try:
+                        nro = _extraer_nro_mes(row["periodo"])
+                        if nro == 0:
+                            return ""
+                        inicio = pd.to_datetime(row["inicio_contrato"])
+                        cal = inicio + dateutil.relativedelta.relativedelta(months=nro - 1)
+                        return cal.strftime("%Y-%m")
+                    except Exception:
+                        return ""
+
+                _df_ingresos_raw["nro_periodo"]    = _df_ingresos_raw["periodo"].apply(_extraer_nro_mes)
+                _df_ingresos_raw["mes_calendario"] = _df_ingresos_raw.apply(_calc_mes_cal, axis=1)
+            else:
+                _df_ingresos_raw["nro_periodo"]    = pd.Series(dtype=int)
+                _df_ingresos_raw["mes_calendario"] = pd.Series(dtype=str)
 
             # ── Cargar gastos desde gastos_propiedades ──
             _df_gastos_raw = pd.read_sql_query(f"""
@@ -4130,13 +4264,18 @@ if tab_gastos:
             else:
                 st.caption("💡 Los valores en USD corresponden a las cotizaciones registradas al momento de cada cobro/gasto.")
 
-                # ── Extraer año y mes de los periodos disponibles ──
-                _todos_periodos = pd.concat([
-                    _df_ingresos_raw[["periodo"]] if not _df_ingresos_raw.empty else pd.DataFrame(columns=["periodo"]),
-                    _df_gastos_raw[["periodo"]]   if not _df_gastos_raw.empty   else pd.DataFrame(columns=["periodo"])
-                ]).dropna()
-                _todos_periodos["periodo"] = _todos_periodos["periodo"].astype(str).str[:7]
-                _anios_disp = sorted(_todos_periodos["periodo"].str[:4].unique(), reverse=True)
+                # ── Extraer años disponibles desde mes_calendario (ingresos) y periodo (gastos) ──
+                _cal_ing = (
+                    _df_ingresos_raw["mes_calendario"].dropna()
+                    if not _df_ingresos_raw.empty else pd.Series(dtype=str)
+                )
+                _cal_gas = (
+                    _df_gastos_raw["periodo"].dropna().astype(str).str[:7]
+                    if not _df_gastos_raw.empty else pd.Series(dtype=str)
+                )
+                _todos_cal = pd.concat([_cal_ing, _cal_gas])
+                _todos_cal = _todos_cal[_todos_cal.str.match(r"^\d{4}-\d{2}$", na=False)]
+                _anios_disp = sorted(_todos_cal.str[:4].unique(), reverse=True)
                 _meses_nombres = {
                     "01": "Enero", "02": "Febrero", "03": "Marzo", "04": "Abril",
                     "05": "Mayo",  "06": "Junio",   "07": "Julio", "08": "Agosto",
@@ -4153,20 +4292,45 @@ if tab_gastos:
                     _propietarios_disp = sorted(_todos_props["propietario"].dropna().unique().tolist())
                     _propietarios_disp = [p for p in _propietarios_disp if p.strip()]
 
+                # ── Opciones de período de contrato (ej. "Mes 1 de 12") ──
+                _periodos_contrato_disp = []
+                if not _df_ingresos_raw.empty:
+                    _pc_vals = (
+                        _df_ingresos_raw[["nro_periodo", "periodo"]]
+                        .dropna()
+                        .drop_duplicates()
+                        .sort_values("nro_periodo")
+                    )
+                    _periodos_contrato_disp = _pc_vals["periodo"].tolist()
+
                 # ── Filtros ──
+                st.markdown("**🔎 Filtros**")
+
+                # Fila 1: Propietario + Propiedad
                 if not _pf_g_activo and _propietarios_disp:
-                    _mcol0, _mcol1, _mcol2, _mcol3 = st.columns(4)
+                    _mcol0, _mcol1 = st.columns(2)
                     _f_propietario_m = _mcol0.selectbox("👤 Propietario:", ["Todos"] + _propietarios_disp, key="met_propietario")
                 else:
-                    _mcol1, _mcol2, _mcol3 = st.columns(3)
+                    _mcol1, = st.columns([1])
                     _f_propietario_m = _pf_g if _pf_g_activo else "Todos"
 
                 _props_lista_m = ["Todas"] + sorted(_props_gasto["alias_propiedad"].tolist()) if not _props_gasto.empty else ["Todas"]
-                _f_prop_m        = _mcol1.selectbox("🏠 Propiedad:", _props_lista_m, key="met_prop")
-                _anio_sel        = _mcol2.selectbox("📅 Año:", ["Todos"] + _anios_disp, key="met_anio")
-                _meses_disp      = ["Todos"] + [f"{k} – {v}" for k, v in _meses_nombres.items()]
-                _mes_sel_label   = _mcol3.selectbox("📆 Mes:", _meses_disp, key="met_mes")
-                _mes_sel         = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
+                _f_prop_m = _mcol1.selectbox("🏠 Propiedad:", _props_lista_m, key="met_prop")
+
+                # Fila 2: Mes calendario (Año + Mes) + Período de contrato
+                _fcol1, _fcol2, _fcol3 = st.columns(3)
+                _anio_sel      = _fcol1.selectbox("📅 Año (calendario):", ["Todos"] + _anios_disp, key="met_anio")
+                _meses_disp    = ["Todos"] + [f"{k} – {v}" for k, v in _meses_nombres.items()]
+                _mes_sel_label = _fcol2.selectbox("📆 Mes calendario:", _meses_disp, key="met_mes",
+                                                  help="Filtra por el mes real del calendario en que corresponde el cobro")
+                _mes_sel       = _mes_sel_label[:2] if _mes_sel_label != "Todos" else "Todos"
+
+                _f_periodo_contrato = _fcol3.selectbox(
+                    "📋 Período del contrato:",
+                    ["Todos"] + _periodos_contrato_disp,
+                    key="met_periodo_contrato",
+                    help="Filtra por el número de mes dentro del contrato (ej: Mes 1 de 12 = primer mes)"
+                )
 
                 # ── Selector de moneda ──
                 _moneda_sel = st.radio(
@@ -4180,17 +4344,20 @@ if tab_gastos:
                 # ── Aplicar filtros a ingresos ──
                 _dfi = _df_ingresos_raw.copy()
                 if not _dfi.empty:
-                    _dfi["periodo"] = _dfi["periodo"].astype(str).str[:7]
                     if _f_propietario_m != "Todos":
                         _dfi = _dfi[_dfi["propietario"] == _f_propietario_m]
                     if _f_prop_m != "Todas":
                         _dfi = _dfi[_dfi["propiedad"] == _f_prop_m]
+                    # Filtro por período del contrato ("Mes N de M")
+                    if _f_periodo_contrato != "Todos":
+                        _dfi = _dfi[_dfi["periodo"] == _f_periodo_contrato]
+                    # Filtro por mes calendario (calculado desde inicio_contrato + nro_periodo)
                     if _anio_sel != "Todos":
-                        _dfi = _dfi[_dfi["periodo"].str[:4] == _anio_sel]
+                        _dfi = _dfi[_dfi["mes_calendario"].str[:4] == _anio_sel]
                     if _mes_sel != "Todos":
-                        _dfi = _dfi[_dfi["periodo"].str[5:7] == _mes_sel]
+                        _dfi = _dfi[_dfi["mes_calendario"].str[5:7] == _mes_sel]
 
-                # ── Aplicar filtros a gastos ──
+                # ── Aplicar filtros a gastos (su campo periodo ya es YYYY-MM) ──
                 _dfg = _df_gastos_raw.copy()
                 if not _dfg.empty:
                     _dfg["periodo"] = _dfg["periodo"].astype(str).str[:7]
@@ -4202,6 +4369,10 @@ if tab_gastos:
                         _dfg = _dfg[_dfg["periodo"].str[:4] == _anio_sel]
                     if _mes_sel != "Todos":
                         _dfg = _dfg[_dfg["periodo"].str[5:7] == _mes_sel]
+                    # Si se filtra por período de contrato, alinear gastos al mismo mes calendario
+                    if _f_periodo_contrato != "Todos" and not _dfi.empty:
+                        _meses_cal_dfi = _dfi["mes_calendario"].dropna().unique()
+                        _dfg = _dfg[_dfg["periodo"].isin(_meses_cal_dfi)]
 
                 # ── Totales en PESOS ──
                 _total_ing     = _dfi["total_ingreso"].sum()    if not _dfi.empty else 0.0
@@ -4264,9 +4435,12 @@ if tab_gastos:
                 # ── Tabla comparativa por período ──
                 st.markdown("##### 📋 Detalle por Período")
 
+                # Agrupar ingresos por propiedad + mes_calendario (clave para merge con gastos)
+                # Conservar "periodo" (texto del contrato) como primer valor del grupo
                 _dfi_grp = (
-                    _dfi.groupby(["propiedad", "periodo"], as_index=False)
+                    _dfi.groupby(["propiedad", "mes_calendario"], as_index=False)
                     .agg(
+                        periodo_contrato=("periodo", "first"),
                         alquiler=("alquiler", "sum"),
                         cochera=("cochera", "sum"),
                         total_ingreso=("total_ingreso", "sum"),
@@ -4279,10 +4453,13 @@ if tab_gastos:
                         imp_inmobiliario_usd=("imp_inmobiliario_usd", "sum"),
                     )
                     if not _dfi.empty
-                    else pd.DataFrame(columns=["propiedad", "periodo", "alquiler", "cochera", "total_ingreso",
+                    else pd.DataFrame(columns=["propiedad", "mes_calendario", "periodo_contrato",
+                                               "alquiler", "cochera", "total_ingreso",
                                                "gasto_admin", "imp_inmobiliario", "alquiler_usd", "cochera_usd",
                                                "total_ingreso_usd", "gasto_admin_usd", "imp_inmobiliario_usd"])
                 )
+                # Renombrar mes_calendario → periodo para el merge con gastos (que usa YYYY-MM)
+                _dfi_grp = _dfi_grp.rename(columns={"mes_calendario": "periodo"})
 
                 _dfg_grp_cols = ["propiedad", "periodo", "total_gasto", "total_gasto_usd"]
                 _df_merge = pd.merge(
@@ -4290,7 +4467,12 @@ if tab_gastos:
                     _dfg[_dfg_grp_cols] if not _dfg.empty else pd.DataFrame(columns=_dfg_grp_cols),
                     on=["propiedad", "periodo"],
                     how="outer"
-                ).fillna(0)
+                )
+                # Rellenar numéricos con 0, pero preservar strings como periodo_contrato
+                _numeric_cols_merge = [c for c in _df_merge.columns if c not in ("propiedad", "periodo", "periodo_contrato")]
+                _df_merge[_numeric_cols_merge] = _df_merge[_numeric_cols_merge].fillna(0)
+                if "periodo_contrato" in _df_merge.columns:
+                    _df_merge["periodo_contrato"] = _df_merge["periodo_contrato"].fillna("")
 
                 if not _df_merge.empty:
                     _df_merge["total_pasivos"]     = _df_merge["total_gasto"] + _df_merge["gasto_admin"] + _df_merge["imp_inmobiliario"]
@@ -4299,9 +4481,20 @@ if tab_gastos:
                     _df_merge["balance_usd"]       = _df_merge["total_ingreso_usd"] - _df_merge["total_pasivos_usd"]
                     _df_merge = _df_merge.sort_values(["propiedad", "periodo"])
 
-                    _df_display = _df_merge.rename(columns={
+                    # Formatear periodo (YYYY-MM) a "Octubre 2024"
+                    def _fmt_mes_anio(v):
+                        try:
+                            partes = str(v)[:7].split("-")
+                            return f"{_meses_nombres.get(partes[1], partes[1])} {partes[0]}"
+                        except Exception:
+                            return str(v)
+
+                    _df_display = _df_merge.copy()
+                    _df_display["periodo"] = _df_display["periodo"].apply(_fmt_mes_anio)
+                    _df_display = _df_display.rename(columns={
                         "propiedad":             "PROPIEDAD",
-                        "periodo":               "PERÍODO",
+                        "periodo":               "MES / AÑO",
+                        "periodo_contrato":      "PERÍODO CONTRATO",
                         "alquiler":              "ALQUILER ($)",
                         "cochera":               "COCHERA ($)",
                         "total_ingreso":         "TOTAL INGRESO ($)",
@@ -4324,26 +4517,27 @@ if tab_gastos:
                         color = "#d4edda" if val >= 0 else "#f8d7da"
                         return f"background-color: {color}"
 
+                    _no_fmt = ("PROPIEDAD", "MES / AÑO", "PERÍODO CONTRATO")
                     if not _ver_usd:
                         _cols_display = [
-                            "PROPIEDAD", "PERÍODO",
+                            "PROPIEDAD", "MES / AÑO", "PERÍODO CONTRATO",
                             "ALQUILER ($)", "COCHERA ($)", "TOTAL INGRESO ($)",
                             "GASTOS PROP. ($)", "GASTO ADM. ($)", "IMP. INMO. ($)",
                             "TOTAL PASIVOS ($)", "BALANCE ($)",
                         ]
-                        _fmt_dict = {c: "$ {:,.2f}" for c in _cols_display if c not in ("PROPIEDAD", "PERÍODO")}
+                        _fmt_dict = {c: "$ {:,.2f}" for c in _cols_display if c not in _no_fmt}
                         _styled = _df_display[_cols_display].style.map(
                             _color_balance_row, subset=["BALANCE ($)"]
                         ).format(_fmt_dict)
                         _csv_nombre = "metricas_pesos.csv"
                     else:
                         _cols_display = [
-                            "PROPIEDAD", "PERÍODO",
+                            "PROPIEDAD", "MES / AÑO", "PERÍODO CONTRATO",
                             "ALQUILER (USD)", "COCHERA (USD)", "TOTAL INGRESO (USD)",
                             "GASTOS PROP. (USD)", "GASTO ADM. (USD)", "IMP. INMO. (USD)",
                             "TOTAL PASIVOS (USD)", "BALANCE (USD)",
                         ]
-                        _fmt_dict = {c: "U$S {:,.2f}" for c in _cols_display if c not in ("PROPIEDAD", "PERÍODO")}
+                        _fmt_dict = {c: "U$S {:,.2f}" for c in _cols_display if c not in _no_fmt}
                         _styled = _df_display[_cols_display].style.map(
                             _color_balance_row, subset=["BALANCE (USD)"]
                         ).format(_fmt_dict)
