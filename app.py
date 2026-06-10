@@ -4003,98 +4003,88 @@ if tab_superadmin:
                     )
                         
                     # --- CONEXIÓN DINÁMICA A LA BASE DE DATOS DE LA EMPRESA SELECCIONADA ---
-                    # Validación de lista blanca para evitar SQL Injection en nombre de tabla
                     TABLAS_PERMITIDAS = {"contratos", "inquilinos", "propiedades", "pagos_historial"}
                     if tabla_seleccionada not in TABLAS_PERMITIDAS:
                         st.error(f"❌ Tabla '{tabla_seleccionada}' no permitida.")
                     else:
                         try:
-                            with sqlite3.connect(ruta_db_objetivo) as conn_operativa:
-                                try:
-                                    # Nombre de tabla validado contra lista blanca — seguro usar en f-string
-                                    query_fetch = f"SELECT * FROM {tabla_seleccionada}"
-                                    df_completo = pd.read_sql_query(query_fetch, conn_operativa)
-                                        
-                                    if not df_completo.empty:
-                                        # Identificamos la columna clave primaria automáticamente
-                                        if "codigo" in df_completo.columns:
-                                            id_col_name = "codigo"
-                                        elif "id" in df_completo.columns:
-                                            id_col_name = "id"
-                                        else:
-                                            st.error(f"❌ La tabla '{tabla_seleccionada.upper()}' no tiene una columna de clave primaria reconocida ('id' o 'codigo'). No se puede proceder con el borrado.")
-                                            id_col_name = None
-                                            
-                                        if id_col_name:
-                                            st.info("💡 **Tip para seleccionar TODO:** Haz clic en la casilla vacía que aparece arriba de todo en el encabezado izquierdo de la tabla.")
-                                                
-                                            # 3. Renderizado con Selección de Filas Nativo de Streamlit
-                                            tabla_interactiva = st.dataframe(
-                                                df_completo,
-                                                use_container_width=True,
-                                                hide_index=True,
-                                                selection_mode="multi-row",  # Habilita checkboxes y selección múltiple
-                                                on_select="rerun",           # Actualiza la vista reactivamente al marcar
-                                                key=f"tabla_seleccion_borrado_{empresa_datos_seleccionada}_{tabla_seleccionada}" # Key única combinada
-                                            )
-                                                
-                                            # Extraemos los índices numéricos seleccionados
-                                            indices_seleccionados = tabla_interactiva.get("selection", {}).get("rows", [])
-                                                
-                                            if indices_seleccionados:
-                                                # Filtramos los IDs correspondientes usando los índices posicionales reales del DataFrame
-                                                ids_a_borrar = df_completo.iloc[indices_seleccionados][id_col_name].tolist()
-                                                cant_filas = len(ids_a_borrar)
-                                                    
-                                                st.error(f"🔴 Has seleccionado **{cant_filas}** registro(s) de la empresa **{empresa_datos_seleccionada}** para FORZAR su eliminación permanente de la tabla `{tabla_seleccionada.upper()}`.")
-                                                st.caption(f"Elementos marcados para destrucción ({id_col_name.upper()}): {ids_a_borrar}")
-                                                    
-                                                # Frase de seguridad dinámica y estricta
-                                                confirmacion_palabra = st.text_input(
-                                                    f"Para confirmar la eliminación masiva, escriba exactamente **FORZAR BORRADO {cant_filas} FILAS**:",
-                                                    key="txt_confirmacion_multi_del"
-                                                )
-                                                    
-                                                btn_eliminar_bloque = st.button(f"💥 FORZAR ELIMINACIÓN DE {cant_filas} REGISTROS", type="primary", use_container_width=True)
-                                                    
-                                                if btn_eliminar_bloque:
-                                                    frase_esperada = f"FORZAR BORRADO {cant_filas} FILAS"
-                                                    if confirmacion_palabra == frase_esperada:
-                                                        cursor_op = conn_operativa.cursor()
-                                                            
-                                                        try:
-                                                            # A. DESACTIVAR VALIDACIONES DE INTEGRIDAD
-                                                            cursor_op.execute("PRAGMA foreign_keys = OFF;")
-                                                                
-                                                            # B. EJECUTAR EL DELETE EN BLOQUE
-                                                            # Nombre de tabla y columna validados — los placeholders '?' protegen los valores
-                                                            placeholder = ",".join(["?"] * cant_filas)
-                                                            query_delete = f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})"
-                                                                
-                                                            cursor_op.execute(query_delete, tuple(ids_a_borrar))
-                                                            conn_operativa.commit()
-                                                                
-                                                            st.success(f"✅ Se han destruido correctamente {cant_filas} registros de la tabla '{tabla_seleccionada.upper()}' pertenecientes a la empresa '{empresa_datos_seleccionada}'.")
-                                                            st.balloons()
-                                                            st.rerun()
-                                                                
-                                                        except Exception as sql_e:
-                                                            conn_operativa.rollback()
-                                                            st.error(f"❌ Error interno de la base de datos al borrar: {sql_e}")
-                                                        finally:
-                                                            # C. REACTIVAR VALIDACIONES DE INTEGRIDAD
-                                                            cursor_op.execute("PRAGMA foreign_keys = ON;")
-                                                    else:
-                                                        st.error(f"❌ La frase de confirmación no coincide. Escriba exactamente: **{frase_esperada}**")
+                            # Lectura de datos en conexión propia (separada del borrado)
+                            conn_lect = sqlite3.connect(ruta_db_objetivo)
+                            df_completo = pd.read_sql_query(f"SELECT * FROM {tabla_seleccionada}", conn_lect)
+                            conn_lect.close()
+
+                            if df_completo.empty:
+                                st.info(f"La tabla '{tabla_seleccionada.upper()}' de '{empresa_datos_seleccionada}' está vacía.")
+                            else:
+                                if "codigo" in df_completo.columns:
+                                    id_col_name = "codigo"
+                                elif "id" in df_completo.columns:
+                                    id_col_name = "id"
+                                else:
+                                    st.error(f"❌ La tabla '{tabla_seleccionada.upper()}' no tiene columna 'id' ni 'codigo'.")
+                                    id_col_name = None
+
+                                if id_col_name:
+                                    st.info("💡 **Tip:** Hacé clic en la casilla del encabezado para seleccionar todo.")
+
+                                    # Tabla interactiva con checkboxes
+                                    tabla_interactiva = st.dataframe(
+                                        df_completo,
+                                        use_container_width=True,
+                                        hide_index=True,
+                                        selection_mode="multi-row",
+                                        on_select="rerun",
+                                        key=f"tabla_sel_{empresa_datos_seleccionada}_{tabla_seleccionada}"
+                                    )
+
+                                    indices_seleccionados = tabla_interactiva.get("selection", {}).get("rows", [])
+
+                                    if indices_seleccionados:
+                                        ids_a_borrar = df_completo.iloc[indices_seleccionados][id_col_name].tolist()
+                                        cant_filas = len(ids_a_borrar)
+
+                                        st.error(f"🔴 **{cant_filas}** registro(s) seleccionados de `{tabla_seleccionada.upper()}` — empresa: **{empresa_datos_seleccionada}**")
+                                        st.caption(f"IDs marcados ({id_col_name.upper()}): {ids_a_borrar}")
+
+                                        frase_esperada = f"FORZAR BORRADO {cant_filas} FILAS"
+                                        confirmacion_palabra = st.text_input(
+                                            f"Escriba exactamente: **{frase_esperada}**",
+                                            key="txt_confirmacion_multi_del"
+                                        )
+
+                                        btn_eliminar_bloque = st.button(
+                                            f"💥 FORZAR ELIMINACIÓN DE {cant_filas} REGISTROS",
+                                            type="primary",
+                                            use_container_width=True,
+                                            key="btn_forzar_borrado"
+                                        )
+
+                                        if btn_eliminar_bloque:
+                                            if confirmacion_palabra == frase_esperada:
+                                                try:
+                                                    conn_del = sqlite3.connect(ruta_db_objetivo)
+                                                    cursor_del = conn_del.cursor()
+                                                    cursor_del.execute("PRAGMA foreign_keys = OFF;")
+                                                    placeholder = ",".join(["?"] * cant_filas)
+                                                    cursor_del.execute(
+                                                        f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})",
+                                                        tuple(ids_a_borrar)
+                                                    )
+                                                    conn_del.commit()
+                                                    cursor_del.execute("PRAGMA foreign_keys = ON;")
+                                                    conn_del.close()
+                                                    st.success(f"✅ {cant_filas} registros eliminados de '{tabla_seleccionada.upper()}' — '{empresa_datos_seleccionada}'.")
+                                                    st.balloons()
+                                                    st.rerun()
+                                                except Exception as sql_e:
+                                                    st.error(f"❌ Error al borrar: {sql_e}")
                                             else:
-                                                st.info("💡 Selecciona una o más casillas de la izquierda para desplegar el cuadro de ejecución de borrado.")
+                                                st.error(f"❌ La frase no coincide. Escriba exactamente: **{frase_esperada}**")
                                     else:
-                                        st.info(f"La tabla '{tabla_seleccionada.upper()}' de la empresa '{empresa_datos_seleccionada}' se encuentra completamente vacía.")
-                                            
-                                except Exception as e:
-                                    st.error(f"Error al leer o procesar la eliminación masiva: {e}")
-                        except Exception as conn_err:
-                            st.error(f"❌ No se pudo conectar a la base de datos de '{empresa_datos_seleccionada}': {conn_err}")
+                                        st.info("💡 Seleccioná una o más filas para habilitar el borrado.")
+
+                        except Exception as e:
+                            st.error(f"❌ Error al conectar o leer '{empresa_datos_seleccionada}': {e}")
                 else:
                     st.info("No hay empresas registradas en la base central para auditar o borrar datos.")
 
