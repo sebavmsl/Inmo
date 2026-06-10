@@ -1359,7 +1359,8 @@ if tab_pagos:
             # ── HONORARIOS (a cargo del inquilino) ──────────────────────────
             # Se cobra desde el mes 1 hasta completar las cuotas pactadas.
             # El valor por defecto de cada mes es el valor de la cuota (total / cuotas).
-            total_honorarios_inquilino  = float(c_datos.get('monto_honorarios') or c_datos.get('monto_inicial') or 0.0)
+            _raw_hon = c_datos.get('monto_honorarios')
+            total_honorarios_inquilino  = float(_raw_hon if _raw_hon is not None else (c_datos.get('monto_inicial') or 0.0))
             cuotas_hon_pactadas         = int(c_datos.get('cuota_honorarios') or 1)
             pagado_honorarios_inquilino = float(c_datos.get('honorarios_pagados') or 0.0)
             saldo_honorarios_inquilino  = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
@@ -1466,10 +1467,11 @@ if tab_pagos:
                 detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
                 desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
 
-            # Sumatoria dinámica de la parte variable de servicios modificada en pantalla + los nuevos conceptos
+            # monto_serv_pago se calculará después del expander, desde _desglose_editado
+            # Aquí solo definimos los auxiliares que se necesitan antes
             val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
             val_ooss = float(c_datos['ooss'] or 0.0)
-            
+            # Subtotal provisorio para el campo "Adicionales" (se reemplaza tras el expander)
             monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
 
             # ── MONTO NETO ALQUILER con cálculo automático de índice ─────────
@@ -1544,12 +1546,9 @@ if tab_pagos:
 
             cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
             monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0, key=_key_alq_pago)
-            
-            # Muestra el total consolidado de conceptos adicionales de forma informativa
-            cp_col2.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=monto_serv_pago, disabled=True)
-            
-            total_pago_real = monto_alq_pago + monto_serv_pago
-            cp_col3.number_input("TOTAL A RECAUDAR ($):", value=total_pago_real, disabled=True)
+            # cp_col2 y cp_col3 se llenan después del expander con el total real
+            _ph_servicios = cp_col2.empty()
+            _ph_total     = cp_col3.empty()
             metodo_pago = cp_col4.selectbox("Método de Pago:", ["Transferencia Bancaria", "Efectivo", "Depósito", "Cheque"])
 
             
@@ -1617,6 +1616,14 @@ if tab_pagos:
                 _total_servicios_editado = sum(d["Monto"] for d in _desglose_editado)
                 _total_comprobante_editado = monto_alq_pago + _total_servicios_editado
                 st.markdown(f"**Total comprobante: $ {_total_comprobante_editado:,.2f}**")
+
+            # Recalcular monto_serv_pago y total_pago_real desde el desglose editado
+            # Esto sincroniza el expander con el campo "Monto Abonado"
+            monto_serv_pago = _total_servicios_editado
+            total_pago_real = monto_alq_pago + monto_serv_pago
+            # Llenar los placeholders con los totales reales
+            _ph_servicios.number_input("Monto Adicionales / Servicios ($):", min_value=0.0, value=float(monto_serv_pago), disabled=True, key=f"ph_serv_{c_datos['codigo']}")
+            _ph_total.number_input("TOTAL A RECAUDAR ($):", min_value=0.0, value=float(total_pago_real), disabled=True, key=f"ph_total_{c_datos['codigo']}")
 
             # --- NUEVA LÓGICA: Período calculado dinámicamente desde fechas ---
             try:
