@@ -1,4 +1,4 @@
-#SIN COTIZACION - ULTIMO
+#ULTIMO 12-jun
 import streamlit as st
 import pandas as pd
 import os
