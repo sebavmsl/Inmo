@@ -5,3 +5,4 @@ bcrypt
 python-dateutil
 openpyxl
 xlrd>=2.0.1
+reportlab
