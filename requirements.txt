@@ -1,7 +1,9 @@
 streamlit
 pandas
-requests
+psycopg2-binary
 bcrypt
 python-dateutil
-openpyxl
-xlrd>=2.0.1
+reportlab
+requests
+altair
+numpy
