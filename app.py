@@ -1,4 +1,4 @@
-#ULTIMO 12-jun
+#ULTIMO 14-jun con pdf
 import streamlit as st
 import pandas as pd
 import os
@@ -13,6 +13,168 @@ import bcrypt
 import sqlite3
 import requests
 from io import BytesIO
+
+# ── ReportLab: generación real de PDF ──
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+
+
+def _rl_seccion_titulo(texto, color_texto, color_fondo, ancho):
+    """Título de sección con fondo de color para el PDF."""
+    data = [[Paragraph(texto, ParagraphStyle(
+        "sec", fontSize=10, fontName="Helvetica-Bold",
+        textColor=color_texto, leading=14,
+    ))]]
+    tbl = Table(data, colWidths=[ancho])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), color_fondo),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+    ]))
+    return tbl
+
+
+def generar_pdf_recibo(
+    comprobante_nro, fecha_emision, periodo,
+    locatario, propiedad,
+    alquiler_desc, alquiler_monto,
+    filas_servicios,   # lista de {"Concepto": str, "Monto": float}
+    total, metodo_pago, nombre_empresa,
+    observaciones="",
+    es_reimpresion=False, fecha_original="", id_registro="",
+):
+    """Genera el PDF del recibo y devuelve bytes listos para st.download_button."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=18*mm, leftMargin=18*mm,
+        topMargin=18*mm, bottomMargin=18*mm,
+    )
+
+    AZUL_OSC  = colors.HexColor("#1a365d")
+    AZUL_MED  = colors.HexColor("#2c5282")
+    AZUL_CLAR = colors.HexColor("#edf2f7")
+    GRIS_BG   = colors.HexColor("#f0f4f8")
+    GRIS_TEXT = colors.HexColor("#4a5568")
+    AMARILLO  = colors.HexColor("#fff3cd")
+    AMARILLO_B= colors.HexColor("#ffc107")
+    BLANCO    = colors.white
+
+    styles = getSampleStyleSheet()
+    normal = styles["Normal"]
+
+    def _p(text, size=10, bold=False, color=colors.black, align=TA_LEFT):
+        return Paragraph(text, ParagraphStyle(
+            "c", parent=normal, fontSize=size, leading=size * 1.45,
+            textColor=color, alignment=align,
+            fontName="Helvetica-Bold" if bold else "Helvetica",
+        ))
+
+    story = []
+
+    # Badge reimpresión
+    if es_reimpresion:
+        bd = [[_p(f"🖨  REIMPRESIÓN — Documento original registrado el {fecha_original}",
+                   size=9, color=colors.HexColor("#856404"))]]
+        bt = Table(bd, colWidths=[doc.width])
+        bt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(-1,-1), AMARILLO),
+            ("BOX",        (0,0),(-1,-1), 0.5, AMARILLO_B),
+            ("TOPPADDING", (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",(0,0),(-1,-1), 8),
+        ]))
+        story += [bt, Spacer(1, 6)]
+
+    # Encabezado
+    meta = [
+        f"<b>Comprobante N°:</b> {comprobante_nro}",
+        f"<b>Fecha Emisión:</b> {fecha_emision}",
+        f"<b>Período:</b> {periodo}",
+    ]
+    if es_reimpresion and id_registro:
+        meta.append(f"<b>ID Registro:</b> #{id_registro}")
+    hd = [[
+        _p("RECIBO DE ALQUILER", size=20, bold=True, color=AZUL_OSC),
+        _p("<br/>".join(meta), size=9.5, color=colors.HexColor("#555555"), align=TA_RIGHT),
+    ]]
+    ht = Table(hd, colWidths=[doc.width*0.5, doc.width*0.5])
+    ht.setStyle(TableStyle([
+        ("VALIGN",        (0,0),(-1,-1),"BOTTOM"),
+        ("LINEBELOW",     (0,0),(-1,-1), 2, AZUL_OSC),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+    ]))
+    story += [ht, Spacer(1, 14)]
+
+    # Datos del contrato
+    story.append(_rl_seccion_titulo("Datos del Contrato", AZUL_MED, GRIS_BG, doc.width))
+    story.append(Spacer(1, 6))
+    dt = Table([[
+        _p("<b>Locatario:</b>"), _p(locatario),
+        _p("<b>Propiedad:</b>"), _p(propiedad),
+    ]], colWidths=[doc.width*0.15, doc.width*0.35, doc.width*0.15, doc.width*0.35])
+    dt.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+    ]))
+    story += [dt, Spacer(1, 14)]
+
+    # Desglose de conceptos
+    story.append(_rl_seccion_titulo("Desglose de Conceptos Liquidados", AZUL_MED, GRIS_BG, doc.width))
+    story.append(Spacer(1, 6))
+    rows = [
+        [_p("Descripción del Concepto", bold=True, color=BLANCO),
+         _p("Subtotal", bold=True, color=BLANCO, align=TA_RIGHT)],
+        [_p(alquiler_desc), _p(f"$ {alquiler_monto:,.2f}", align=TA_RIGHT)],
+    ]
+    for f in filas_servicios:
+        if float(f.get("Monto", 0)) > 0:
+            rows.append([_p(f["Concepto"]), _p(f"$ {float(f['Monto']):,.2f}", align=TA_RIGHT)])
+    rows.append([
+        _p("TOTAL CONSOLIDADO PERCIBIDO", bold=True, color=AZUL_OSC),
+        _p(f"$ {total:,.2f}", bold=True, color=AZUL_OSC, align=TA_RIGHT),
+    ])
+    n = len(rows)
+    it = Table(rows, colWidths=[doc.width*0.72, doc.width*0.28])
+    it.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0), AZUL_MED),
+        ("BACKGROUND",    (0,n-1),(-1,n-1), AZUL_CLAR),
+        ("LINEBELOW",     (0,1),(-1,n-2), 0.5, colors.HexColor("#e2e8f0")),
+        ("TOPPADDING",    (0,0),(-1,-1), 8), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8), ("RIGHTPADDING", (0,0),(-1,-1),8),
+        ("VALIGN",        (0,0),(-1,-1),"MIDDLE"),
+    ]))
+    story += [it, Spacer(1, 14)]
+
+    # Método de pago
+    story.append(_p(f"<b>Forma de Cancelación:</b> {metodo_pago}"))
+    if observaciones and str(observaciones).strip():
+        story += [Spacer(1,4), _p(f"<b>Observaciones:</b> {observaciones}")]
+
+    # Firma
+    story.append(Spacer(1, 30))
+    ft = Table([["", _p(f"_________________________<br/><b>{nombre_empresa}</b>",
+                         size=11, color=GRIS_TEXT, align=TA_CENTER)]],
+               colWidths=[doc.width*0.55, doc.width*0.45])
+    story.append(ft)
+
+    # Pie
+    story += [Spacer(1,20),
+              HRFlowable(width=doc.width, thickness=0.5, color=colors.HexColor("#e2e8f0")),
+              Spacer(1,6)]
+    pie = ("Comprobante emitido de manera electrónica. Reimpresión autorizada — "
+           f"Datos extraídos del registro original N° {id_registro}."
+           if es_reimpresion and id_registro
+           else "Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.")
+    story.append(_p(pie, size=9, color=colors.HexColor("#718096"), align=TA_CENTER))
+
+    doc.build(story)
+    return buffer.getvalue()
 
 
 
@@ -1947,99 +2109,27 @@ if tab_pagos:
                         st.info("📵 Sin teléfono configurado en tu perfil.")
 
                 with btn_c3:
-                    # Construir filas de servicios desde _desglose_editado (lista editable)
-                    _filas_pdf_editado = "".join(
-                        f"<tr><td>{d['Concepto']}</td><td style='text-align:right;'>$ {d['Monto']:,.2f}</td></tr>"
-                        for d in _desglose_editado if d['Monto'] > 0
-                    )
                     _total_pdf_editado = monto_alq_pago + sum(d['Monto'] for d in _desglose_editado)
 
-                    # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
-                    html_pdf_profesional = f"""
-                    <html>
-                    <head>
-                    <meta charset="utf-8">
-                    <style>
-                        body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
-                        .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
-                        .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
-                        .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
-                        .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
-                        .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
-                        .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
-                        .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
-                        .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
-                        .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
-                        .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
-                        .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
-                        .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
-                    </style>
-                    </head>
-                    <body>
-                        <div class="invoice-card">
-                            <table class="header-table">
-                                <tr>
-                                    <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
-                                    <td class="meta-text">
-                                        <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}<br>
-                                        <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
-                                        <strong>Período:</strong> {mes_periodo_texto}<br>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Datos del Contrato</div>
-                            <table class="info-grid">
-                                <tr>
-                                    <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
-                                    <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']}</td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Desglose de Conceptos Liquidados</div>
-                            <table class="items-table">
-                                <thead>
-                                    <tr>
-                                        <th>Descripción del Concepto Asociado</th>
-                                        <th style="text-align: right;">Subtotal</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td>{_alq_desc_edit}</td>
-                                        <td style="text-align: right;">{txt_alquiler_fmt}</td>
-                                    </tr>
-                                    {_filas_pdf_editado}
-                                    <tr class="total-row">
-                                        <td>TOTAL CONSOLIDADO PERCIBIDO</td>
-                                        <td style="text-align: right;">$ {_total_pdf_editado:,.2f}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-
-                            <table class="info-grid" style="margin-top:20px;">
-                                <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
-                            </table>
-
-                            <div style="text-align: right; margin-top: 40px;">
-                                <div class="signature-line"></div>
-                                <span style="font-size:13px; font-weight:bold; color:#4a5568;">{st.session_state.get('nombre_empresa', 'Mi Empresa')}</span>
-                            </div>
-
-                            <div class="footer-stamp">
-                                Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
-                            </div>
-                        </div>
-                        <script>window.print();</script>
-                    </body>
-                    </html>
-                    """
+                    _pdf_bytes = generar_pdf_recibo(
+                        comprobante_nro=f"RC-00{c_datos['codigo']}",
+                        fecha_emision=datetime.now().strftime('%d/%m/%Y'),
+                        periodo=mes_periodo_texto,
+                        locatario=f"{c_datos['apellidos']}, {c_datos['nombres']}",
+                        propiedad=c_datos['propiedad_dir'],
+                        alquiler_desc=_alq_desc_edit,
+                        alquiler_monto=monto_alq_pago,
+                        filas_servicios=_desglose_editado,
+                        total=_total_pdf_editado,
+                        metodo_pago=metodo_pago,
+                        nombre_empresa=st.session_state.get('nombre_empresa', 'Mi Empresa'),
+                    )
                     st.download_button(
-                        label="🖨️ Descargar Comprobante PDF Corporativo",
-                        data=html_pdf_profesional,
-                        file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
-                        mime="text/html",
-                        help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
+                        label="📄 Descargar Comprobante PDF",
+                        data=_pdf_bytes,
+                        file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.pdf",
+                        mime="application/pdf",
+                        help="Descarga el comprobante como PDF listo para archivar o enviar.",
                     )
 
 
