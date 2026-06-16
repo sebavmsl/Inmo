@@ -1085,11 +1085,14 @@ if tab_dashboard:
                 pass
                 
             opciones_meses = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
-            frecuencia = opciones_meses.get(row['act_contrato'], 6)
+            _act_raw = row['act_contrato']
+            frecuencia = _act_raw if isinstance(_act_raw, int) else opciones_meses.get(str(_act_raw), 6)
             mes_vivo = row['mes_contrato'] or 1
             if ((mes_vivo - 1) % frecuencia) == 0:
                 actualizan_este_mes += 1
-                lista_alertas_actualizacion.append(f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {row['act_contrato']}.")
+                _meses_a_txt = {1:'Mensual',2:'Bimensual',3:'Trimestral',4:'Cuatrimestral',6:'Semestral',12:'Anual',24:'Bianual'}
+                _act_lbl = _meses_a_txt.get(row['act_contrato'], str(row['act_contrato']))
+                lista_alertas_actualizacion.append(f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {_act_lbl}.")
 
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         kpi1.metric("Contratos Activos", total_activos)
@@ -2498,6 +2501,7 @@ if tab_carga:
             cf3, cf4, cf5 = st.columns([2, 1, 1])
             opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
                 
+            _opciones_act_map = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
             act_contrato_seleccionado = cf3.selectbox(
                 "Actualización Contrato (Frecuencia):", 
                 list(opciones_actualizacion.keys()), 
@@ -2986,7 +2990,7 @@ if tab_carga:
                             WHERE codigo = %s AND empresa_id = %s
                         ''', (
                             _alias_prop, _dni_inq, state_contrato, inicio_str, fin_str,
-                            duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
+                            duracion_meses_calculada, _opciones_act_map.get(act_contrato_seleccionado, act_contrato_seleccionado), indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
                             tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
@@ -3018,7 +3022,7 @@ if tab_carga:
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ''', (
                             _eid_c, _alias_prop, _dni_inq, state_contrato, inicio_str, fin_str,
-                            duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
+                            duracion_meses_calculada, _opciones_act_map.get(act_contrato_seleccionado, act_contrato_seleccionado), indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
                             tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
@@ -4313,14 +4317,13 @@ if tab_gastos:
                 _df_ingresos_raw["mes_calendario"] = pd.Series(dtype=str)
 
             # ── Cargar gastos desde gastos_propiedades ──
-            _df_gastos_raw = None
             with _pg_conn() as _conn_gr:
                 with _conn_gr.cursor() as _cur_gr:
                     _cur_gr.execute(f"""
                 SELECT
                     p.alias_propiedad                              AS propiedad,
                     COALESCE(p.propietario, '')                   AS propietario,
-                    TO_CHAR(gp.fecha::date, 'YYYY-MM')          AS periodo,
+                    TO_CHAR(gp.fecha::date, 'YYYY-MM')           AS periodo,
                     SUM(gp.monto)                                 AS total_gasto,
                     0                                             AS total_gasto_usd
                 FROM gastos_propiedades gp
@@ -4329,11 +4332,9 @@ if tab_gastos:
                 GROUP BY p.alias_propiedad, p.propietario, TO_CHAR(gp.fecha::date, 'YYYY-MM')
                 ORDER BY periodo
             """, _params_m)
-                    _rows_ir = _cur_ir.fetchall()
-                    _cols_ir = [x.name for x in _cur_ir.description]
-            _df_ingresos_raw = pd.DataFrame([dict(r) for r in _rows_ir], columns=_cols_ir) if _rows_ir else pd.DataFrame(columns=_cols_ir)
-
-            conn.close()
+                    _rows_gr = _cur_gr.fetchall()
+                    _cols_gr = [x.name for x in _cur_gr.description]
+            _df_gastos_raw = pd.DataFrame([dict(r) for r in _rows_gr], columns=_cols_gr) if _rows_gr else pd.DataFrame(columns=_cols_gr)
 
             if _df_ingresos_raw.empty and _df_gastos_raw.empty:
                 st.info("Aún no hay datos de ingresos ni gastos para mostrar métricas.")
