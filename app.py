@@ -377,9 +377,10 @@ def cargar_datos_iniciales_contrato(propiedad_id):
             cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM contratos 
-                WHERE propiedad_id = %s 
+                WHERE alias_propiedad = (SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s)
+                  AND empresa_id = %s
                 ORDER BY codigo DESC LIMIT 1
-            ''', (propiedad_id,))
+            ''', (propiedad_id, st.session_state.get('empresa_id', 0), st.session_state.get('empresa_id', 0)))
             resultado = cursor.fetchone()
             if resultado:
                 return dict(resultado)
@@ -557,6 +558,16 @@ if not st.session_state.autenticado:
                     # Obtener empresa_id desde PostgreSQL
                     try:
                         _eid = _get_empresa_id(datos_sesion["archivo_db"])
+                        if not _eid and datos_sesion["rol"] != "superadmin":
+                            # Buscar por nombre de empresa como fallback
+                            with _pg_conn() as _fc:
+                                with _fc.cursor() as _cur:
+                                    _cur.execute(
+                                        "SELECT id FROM empresas WHERE nombre_comercial = %s",
+                                        (datos_sesion["nombre_empresa"],)
+                                    )
+                                    _row = _cur.fetchone()
+                                    _eid = _row["id"] if _row else None
                         st.session_state.empresa_id = _eid if _eid else 0
                     except RuntimeError as _e:
                         st.error(f"❌ Error de conexión a la BD: {_e}")
@@ -826,8 +837,8 @@ def verificar_contrato_existente(propiedad_id):
         with conectar_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT codigo, estado FROM contratos WHERE propiedad_id = %s ORDER BY codigo DESC LIMIT 1",
-                (propiedad_id,)
+                "SELECT codigo, estado FROM contratos WHERE alias_propiedad = (SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s) AND empresa_id = %s ORDER BY codigo DESC LIMIT 1",
+                (propiedad_id, st.session_state.get("empresa_id", 0), st.session_state.get("empresa_id", 0))
             )
             return cursor.fetchone()
     except Exception as e:
@@ -991,20 +1002,13 @@ if tab_dashboard:
             SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
                 c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
             FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
+            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
         conn = conectar_db()
-        try:
-            df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
-        except Exception as _qe:
-            st.error(f"❌ Error en query dashboard: `{_qe}`")
-            st.code(query_dash)
-            st.write("Params:", _params_pf)
-            conn.close()
-            st.stop()
+        df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
         _pagos_q = f"SELECT ph.monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
         _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
         df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
@@ -1103,8 +1107,8 @@ if tab_planilla:
                     c.servicios_total AS "SERVICIOS_TOTAL",
                     c.total_pagado AS "TOTAL_ESTIMADO"
                 FROM contratos c
-                JOIN propiedades p ON c.propiedad_id = p.id
-                JOIN inquilinos i ON c.inquilino_id = i.id
+                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+                JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                 WHERE c.empresa_id = %s AND 1=1 {_where_plan}
                 ORDER BY c.codigo DESC
             '''
@@ -1179,8 +1183,8 @@ if tab_pagos:
                 c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
                 c.servicios, c.inicio_contrato, c.monto_inicial
             FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
+            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE c.empresa_id = %(eid)s AND c.estado = 'Activo'
             ORDER BY c.codigo DESC
         '''
@@ -2892,10 +2896,20 @@ if tab_carga:
                 conn = conectar_db()
                 cursor = conn.cursor()
                 try:
+                    _eid_c = st.session_state.get("empresa_id", 0)
+                    # Resolver alias y dni desde los IDs del selector
+                    cursor.execute("SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s", (propiedad_id, _eid_c))
+                    _pr = cursor.fetchone()
+                    _alias_prop = _pr["alias_propiedad"] if _pr else ""
+                    cursor.execute("SELECT dni FROM inquilinos WHERE id = %s AND empresa_id = %s", (inquilino_id, _eid_c))
+                    _ir = cursor.fetchone()
+                    _dni_inq = _ir["dni"] if _ir else ""
+
                     if contrato_previo and "Actualizar" in modo_guardado:
                         cursor.execute('''
                             UPDATE contratos 
-                            SET propiedad_id=%s, inquilino_id=%s, estado=%s, inicio_contrato=%s, fin_contrato=%s,
+                            SET alias_propiedad=%s, dni_inquilino=%s,
+                                estado=%s, inicio_contrato=%s, fin_contrato=%s,
                                 calc_duracion=%s, act_contrato=%s, indice=%s, monto_inicial=%s, alquiler=%s, prox_actualizacion=%s,
                                 mes_contrato=%s, mes_actualizacion_contrato=%s, servicios=%s, honorarios=%s, monto_honorarios=%s,
                                 cuota_honorarios=%s, honorarios_pagados=%s, cuotas_honorarios_pagadas=%s,
@@ -2903,16 +2917,17 @@ if tab_carga:
                                 cuotas_deposito=%s, cuotas_deposito_pagadas=%s,
                                 imp_inmobiliario=%s, expensas=%s, edesal=%s, gas=%s, municipalidad=%s, ooss=%s, servicios_total=%s,
                                 cochera=%s, alquiler_cobrado=%s, total_pagado=%s
-                            WHERE codigo = %s
+                            WHERE codigo = %s AND empresa_id = %s
                         ''', (
-                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            _alias_prop, _dni_inq, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
                             tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
                             cuotas_deposito, cuotas_deposito_pagadas,
                             imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
-                            cochera, alquiler_cobrado, total_pagado_calculado, id_contrato_a_modificar
+                            cochera, alquiler_cobrado, total_pagado_calculado,
+                            id_contrato_a_modificar, _eid_c
                         ))
                         st.success(f"✔️ ¡Contrato N° {id_contrato_a_modificar} actualizado correctamente!")
     
@@ -2921,13 +2936,12 @@ if tab_carga:
                             cursor.execute('''
                                 UPDATE contratos 
                                 SET estado = 'Finalizado' 
-                                WHERE propiedad_id = %s AND estado = 'Activo'
-                            ''', (propiedad_id,))
+                                WHERE alias_propiedad = %s AND empresa_id = %s AND estado = 'Activo'
+                            ''', (_alias_prop, _eid_c))
                             
-                        _eid_c = st.session_state.get("empresa_id", 0)
                         cursor.execute('''
                             INSERT INTO contratos (
-                                empresa_id, propiedad_id, inquilino_id, estado, inicio_contrato, fin_contrato,
+                                empresa_id, alias_propiedad, dni_inquilino, estado, inicio_contrato, fin_contrato,
                                 calc_duracion, act_contrato, indice, monto_inicial, alquiler, prox_actualizacion,
                                 mes_contrato, mes_actualizacion_contrato, servicios, honorarios, monto_honorarios,
                                 cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -2937,7 +2951,7 @@ if tab_carga:
                                 cochera, alquiler_cobrado, total_pagado
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ''', (
-                            _eid_c, propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            _eid_c, _alias_prop, _dni_inq, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -3391,8 +3405,8 @@ if tab_superadmin:
                     
                 # MAPEO ACTUALIZADO: Sin 'SERVICIOS PACTADOS'
                 MAPEO_CONTRATOS = {
-                    "ALIAS PROPIEDAD": "propiedad_id",
-                    "DNI INQUILINO": "inquilino_id",
+                    "ALIAS PROPIEDAD": "alias_propiedad",
+                    "DNI INQUILINO": "dni_inquilino",
                     "ESTADO": "estado",
                     "INICIO CONTRATO": "inicio_contrato",
                     "FIN CONTRATO": "fin_contrato",
@@ -3487,8 +3501,8 @@ if tab_superadmin:
                                         c.ooss AS "AGUA BASE",
                                         c.cochera AS "COCHERA BASE"
                                     FROM contratos c
-                                    JOIN propiedades p ON c.propiedad_id = p.id
-                                    JOIN inquilinos i ON c.inquilino_id = i.id
+                                    JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+                                    JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                                     ORDER BY c.codigo DESC
                                 '''
                             else:
@@ -3601,12 +3615,12 @@ if tab_superadmin:
                                                 continue
                                                 
                                             registro_fila = {}
-                                            registro_fila['propiedad_id'] = res_prop[0]
-                                            registro_fila['inquilino_id'] = res_inq[0]
+                                            registro_fila['alias_propiedad'] = res_prop['alias_propiedad']
+                                            registro_fila['dni_inquilino'] = res_inq['dni']
                                                 
                                             # Extraemos y sanitizamos todos los campos del mapeo
                                             for alias_sql, col_db in MAPEO_CONTRATOS.items():
-                                                if col_db not in ['propiedad_id', 'inquilino_id']:
+                                                if col_db not in ['alias_propiedad', 'dni_inquilino']:
                                                     valor_celda = fila[alias_sql] if alias_sql in df.columns else None
                                                         
                                                     # Tratar campos especiales (Fechas)
@@ -4057,7 +4071,7 @@ if tab_gastos:
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id
+                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
                 WHERE 1=1 {_where_g}
                 ORDER BY gp.fecha DESC, gp.id DESC
             """, conn, params=_params_g)
@@ -4137,8 +4151,8 @@ if tab_gastos:
                     COALESCE(ph.retencion_agencia_usd, 0)                          AS gasto_admin_usd,
                     COALESCE(ph.monto_imp_inmobiliario_usd, 0)                     AS imp_inmobiliario_usd
                 FROM pagos_historial ph
-                JOIN contratos c  ON ph.contrato_id = c.codigo
-                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
+                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
                 WHERE 1=1 {_where_m}
                 ORDER BY ph.periodo
             """, conn, params=_params_m)
@@ -4183,7 +4197,7 @@ if tab_gastos:
                     SUM(gp.monto)                             AS total_gasto,
                     SUM(COALESCE(gp.monto_usd, 0))           AS total_gasto_usd
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id
+                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
                 WHERE 1=1 {_where_m}
                 GROUP BY p.alias_propiedad, p.propietario, strftime('%Y-%m', gp.fecha)
                 ORDER BY periodo
