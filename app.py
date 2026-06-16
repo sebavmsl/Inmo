@@ -1009,7 +1009,8 @@ if tab_dashboard:
 
         conn = conectar_db()
         df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
-        _pagos_q = f"SELECT ph.monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
+        # Suma de cobros: usar monto_abonado (nombre real en schema migrado)
+        _pagos_q = f"SELECT COALESCE(ph.monto_abonado, 0) AS monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
         _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
         try:
             df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
@@ -1017,10 +1018,13 @@ if tab_dashboard:
             st.error(f"❌ Error en _pagos_q: `{_qe2}`")
             st.code(_pagos_q)
             try:
-                _cols_ph = pd.read_sql_query("SELECT * FROM pagos_historial LIMIT 1", conn)
-                st.write("Columnas de pagos_historial:", list(_cols_ph.columns))
+                with _pg_conn() as _conn2:
+                    with _conn2.cursor() as _cur2:
+                        _cur2.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pagos_historial' ORDER BY ordinal_position")
+                        _cols_ph = [r["column_name"] for r in _cur2.fetchall()]
+                st.write("Columnas reales de pagos_historial:", _cols_ph)
             except Exception as _ce:
-                st.write(f"No se pudo leer pagos_historial: {_ce}")
+                st.write(f"No se pudo leer schema: {_ce}")
             conn.close()
             st.stop()
         conn.close()
