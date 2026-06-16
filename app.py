@@ -227,6 +227,25 @@ def generar_pdf_recibo(
 
 
 
+
+def _safe_float(val, default=0.0):
+    """Convierte a float de forma segura — maneja None, NaN, strings vacíos."""
+    if val is None:
+        return default
+    try:
+        import math
+        f = float(val)
+        return default if math.isnan(f) or math.isinf(f) else f
+    except (ValueError, TypeError):
+        return default
+
+def _safe_int(val, default=0):
+    """Convierte a int de forma segura."""
+    try:
+        return int(_safe_float(val, default))
+    except (ValueError, TypeError):
+        return default
+
 # Configuración de logging (reemplaza los print() de depuración)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -602,14 +621,17 @@ if not st.session_state.autenticado:
 def obtener_datos_desplegables():
     try:
         _eid = st.session_state.get("empresa_id", 0)
-        with conectar_db() as conn:
-            propiedades = pd.read_sql_query(
-                "SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo "
-                "FROM propiedades WHERE empresa_id = %s",
-                conn, params=(_eid,))
-            inquilinos = pd.read_sql_query(
-                "SELECT id, apellidos, nombres FROM inquilinos WHERE empresa_id = %s",
-                conn, params=(_eid,))
+        with _pg_conn() as _conn_desp:
+            with _conn_desp.cursor() as _cur_desp:
+                _cur_desp.execute(
+                    "SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo "
+                    "FROM propiedades WHERE empresa_id = %s", (_eid,)
+                )
+                propiedades = pd.DataFrame([dict(r) for r in _cur_desp.fetchall()])
+                _cur_desp.execute(
+                    "SELECT id, apellidos, nombres FROM inquilinos WHERE empresa_id = %s", (_eid,)
+                )
+                inquilinos = pd.DataFrame([dict(r) for r in _cur_desp.fetchall()])
     except Exception as e:
         logging.error(f"Error al obtener datos desplegables: {e}")
         return {}, {}
@@ -1008,12 +1030,22 @@ if tab_dashboard:
         '''
 
         conn = conectar_db()
-        df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
+        with _pg_conn() as _conn_d:
+            with _conn_d.cursor() as _cur_d:
+                _cur_d.execute(query_dash, _params_pf)
+                _rows_d = _cur_d.fetchall()
+                _cols_d = [x.name for x in _cur_d.description]
+        df_dash = pd.DataFrame([dict(r) for r in _rows_d], columns=_cols_d) if _rows_d else pd.DataFrame(columns=_cols_d)
         # Suma de cobros: usar monto_abonado (nombre real en schema migrado)
         _pagos_q = f"SELECT COALESCE(ph.monto_abonado, 0) AS monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
         _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
         try:
-            df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
+            with _pg_conn() as _conn_pq:
+                with _conn_pq.cursor() as _cur_pq:
+                    _cur_pq.execute(_pagos_q, _params_pagos)
+                    _rows_pq = _cur_pq.fetchall()
+                    _cols_pq = [x.name for x in _cur_pq.description]
+            df_pagos_totales = pd.DataFrame([dict(r) for r in _rows_pq], columns=_cols_pq) if _rows_pq else pd.DataFrame(columns=_cols_pq)
         except Exception as _qe2:
             st.error(f"❌ Error en _pagos_q: `{_qe2}`")
             st.code(_pagos_q)
@@ -1127,7 +1159,12 @@ if tab_planilla:
                 WHERE c.empresa_id = %s AND 1=1 {_where_plan}
                 ORDER BY c.codigo DESC
             '''
-            df = pd.read_sql_query(query, conn, params=_params_plan)
+            with _pg_conn() as _conn_pl:
+                with _conn_pl.cursor() as _cur_pl:
+                    _cur_pl.execute(query, _params_plan)
+                    _rows_pl = _cur_pl.fetchall()
+                    _cols_pl = [x.name for x in _cur_pl.description]
+            df = pd.DataFrame([dict(r) for r in _rows_pl], columns=_cols_pl) if _rows_pl else pd.DataFrame(columns=_cols_pl)
 
             # 2. AGREGA ESTAS LÍNEAS PARA VOLVER A PONER LAS BARRAS:
             if not df.empty:
@@ -1204,8 +1241,12 @@ if tab_pagos:
             ORDER BY c.codigo DESC
         '''
         
-        df_activos = pd.read_sql_query(query_activos, conn, params=(st.session_state.get("empresa_id", 0),))
-        conn.close()
+        with _pg_conn() as _conn_act:
+            with _conn_act.cursor() as _cur_act:
+                _cur_act.execute(query_activos, (st.session_state.get("empresa_id", 0),))
+                _rows_act = _cur_act.fetchall()
+                _cols_act = [d.name for d in _cur_act.description]
+        df_activos = pd.DataFrame([dict(r) for r in _rows_act], columns=_cols_act) if _rows_act else pd.DataFrame(columns=_cols_act)
         
         # --- PROCESAMIENTO DINÁMICO DEL ALQUILER ACTUALIZADO ---
         dict_activos = {}
@@ -1283,11 +1324,11 @@ if tab_pagos:
             st.markdown("#### 🔧 Ajustar montos para el período actual")
             ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
             
-            val_base_expensas = float(c_datos['expensas'] or 0.0)
-            val_base_edesal = float(c_datos['edesal'] or 0.0)
-            val_base_gas = float(c_datos['gas'] or 0.0)
-            val_base_municipalidad = float(c_datos['municipalidad'] or 0.0)
-            val_base_cochera = float(c_datos['cochera'] or 0.0)
+            val_base_expensas = _safe_float(c_datos.get('expensas'))
+            val_base_edesal = _safe_float(c_datos.get('edesal'))
+            val_base_gas = _safe_float(c_datos.get('gas'))
+            val_base_municipalidad = _safe_float(c_datos.get('municipalidad'))
+            val_base_cochera = _safe_float(c_datos.get('cochera'))
             
             monto_expensas = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, value=val_base_expensas, step=500.0)
             monto_edesal = ed_col2.number_input("⚡ Luz (EDESAL) ($):", min_value=0.0, value=val_base_edesal, step=500.0)
@@ -1300,14 +1341,15 @@ if tab_pagos:
             ed_col_esp1, ed_col_esp2 = st.columns(2)
 
             # ── HONORARIOS (a cargo del inquilino) ──────────────────────────
-            # Se cobra desde el mes 1 hasta completar las cuotas pactadas.
-            # El valor por defecto de cada mes es el valor de la cuota (total / cuotas).
+            _monto_inicial = _safe_float(c_datos.get('monto_inicial'))
             _raw_hon = c_datos.get('monto_honorarios')
-            total_honorarios_inquilino  = float(_raw_hon if _raw_hon is not None else (c_datos.get('monto_inicial') or 0.0))
-            cuotas_hon_pactadas         = int(c_datos.get('cuota_honorarios') or 1)
-            pagado_honorarios_inquilino = float(c_datos.get('honorarios_pagados') or 0.0)
+            total_honorarios_inquilino  = _safe_float(_raw_hon) if _raw_hon is not None else _monto_inicial
+            if total_honorarios_inquilino == 0.0:
+                total_honorarios_inquilino = _monto_inicial
+            cuotas_hon_pactadas         = _safe_int(c_datos.get('cuota_honorarios'), 1)
+            pagado_honorarios_inquilino = _safe_float(c_datos.get('honorarios_pagados'))
             saldo_honorarios_inquilino  = max(0.0, total_honorarios_inquilino - pagado_honorarios_inquilino)
-            cuotas_hon_pagadas          = int(c_datos.get('cuotas_honorarios_pagadas') or 0)
+            cuotas_hon_pagadas          = _safe_int(c_datos.get('cuotas_honorarios_pagadas'), 0)
             cuotas_hon_pendientes       = max(0, cuotas_hon_pactadas - cuotas_hon_pagadas)
 
             # Valor de la cuota: total dividido en las cuotas pactadas
@@ -1336,15 +1378,17 @@ if tab_pagos:
             )
 
             # ── DEPÓSITO DE GARANTÍA (a cargo del inquilino) ────────────────
-            # Idéntica lógica: se cobra desde el mes 1 hasta completar las cuotas pactadas.
-            val_teorico_garantia    = float(c_datos.get('monto_garantia') or 0.0)
-            cuotas_dep_pactadas     = int(c_datos.get('cuotas_deposito') or 1)
+            _raw_garantia = c_datos.get('monto_garantia')
+            val_teorico_garantia = _safe_float(_raw_garantia) if _raw_garantia is not None else _monto_inicial
+            if val_teorico_garantia == 0.0:
+                val_teorico_garantia = _monto_inicial
+            cuotas_dep_pactadas     = _safe_int(c_datos.get('cuotas_deposito'), 1)
             try:
-                pagado_garantia_inquilino = float(c_datos.get('garantia') or 0.0)
+                pagado_garantia_inquilino = _safe_float(c_datos.get('garantia'))
             except (ValueError, TypeError):
                 pagado_garantia_inquilino = 0.0
             saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
-            cuotas_dep_pagadas       = int(c_datos.get('cuotas_deposito_pagadas') or 0)
+            cuotas_dep_pagadas       = _safe_int(c_datos.get('cuotas_deposito_pagadas'), 0)
             cuotas_dep_pendientes    = max(0, cuotas_dep_pactadas - cuotas_dep_pagadas)
 
             valor_cuota_dep = round(val_teorico_garantia / cuotas_dep_pactadas, 2) if cuotas_dep_pactadas > 0 else 0.0
@@ -1412,14 +1456,14 @@ if tab_pagos:
 
             # monto_serv_pago se calculará después del expander, desde _desglose_editado
             # Aquí solo definimos los auxiliares que se necesitan antes
-            val_imp_inmob = float(c_datos['imp_inmobiliario'] or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
-            val_ooss = float(c_datos['ooss'] or 0.0)
+            val_imp_inmob = _safe_float(c_datos.get('imp_inmobiliario')) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
+            val_ooss = _safe_float(c_datos.get('ooss'))
             # Subtotal provisorio para el campo "Adicionales" (se reemplaza tras el expander)
             monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
 
             # ── MONTO NETO ALQUILER con cálculo automático de índice ─────────
-            val_monto_ini_recibo = float(c_datos['monto_inicial'] or 0.0)
-            val_alq_ultimo_recibo = float(c_datos['alquiler'] or 0.0)
+            val_monto_ini_recibo = _safe_float(c_datos.get('monto_inicial'))
+            val_alq_ultimo_recibo = _safe_float(c_datos.get('alquiler'))
             indice_recibo = str(c_datos.get('indice') or 'ICL').upper()
 
             # Convertir date a datetime igual que en la pestaña de carga
@@ -1591,7 +1635,7 @@ if tab_pagos:
             if _delta.days > 0 and _fin_dt.day != _inicio_dt.day:
                 meses_totales_contrato += 1
             if meses_totales_contrato <= 0:
-                meses_totales_contrato = int(c_datos.get('calc_duracion') or 0)
+                meses_totales_contrato = _safe_int(c_datos.get('calc_duracion'), 0)
 
             # Generar lista de todos los meses del contrato
             opciones_periodo = [f"Mes {m} de {meses_totales_contrato}" for m in range(1, meses_totales_contrato + 1)]
@@ -1657,7 +1701,7 @@ if tab_pagos:
             saldo_periodo_anterior = 0.0
             _total_abonado_periodo = 0.0
             if _row_existente:
-                _total_abonado_periodo = sum(float(r[0] or 0) for r in _rows_existentes)
+                _total_abonado_periodo = sum(float(r["monto_total"] or 0) for r in _rows_existentes)
                 saldo_periodo_anterior = max(0.0, total_pago_real - _total_abonado_periodo)
                 if saldo_periodo_anterior > 0:
                     st.warning(
@@ -1732,15 +1776,15 @@ if tab_pagos:
                     _comentario_completo = comentarios_pago or ""
                     if _saldo_a_guardar > 0:
                         _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {_saldo_a_guardar:,.2f}"
-                    _val_ooss_insert = float(c_datos.get('ooss') or 0.0)
-                    _val_imp_insert = float(c_datos.get('imp_inmobiliario') or 0.0) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
+                    _val_ooss_insert = _safe_float(c_datos.get('ooss'))
+                    _val_imp_insert = _safe_float(c_datos.get('imp_inmobiliario')) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
                     # Calcular valores USD al tipo de cambio del momento
                     _tc_insert = st.session_state.get("cotizacion_usd_hist", 0.0)
                     _tc_insert = float(_tc_insert) if float(_tc_insert) > 0 else 0.0
                     _alq_usd    = round(monto_alq_pago / _tc_insert, 2)    if _tc_insert > 0 else 0.0
                     _coch_usd   = round(monto_cochera / _tc_insert, 2)     if _tc_insert > 0 else 0.0
                     _imp_usd    = round(_val_imp_insert / _tc_insert, 2)   if _tc_insert > 0 else 0.0
-                    _ret_agencia = round(monto_abonado * float(c_datos.get('honorarios') or 0) / 100.0, 2)
+                    _ret_agencia = round(monto_abonado * _safe_float(c_datos.get('honorarios')) / 100.0, 2)
                     _ret_usd    = round(_ret_agencia / _tc_insert, 2)      if _tc_insert > 0 else 0.0
                     cursor.execute('''
                         INSERT INTO pagos_historial (
@@ -1973,7 +2017,12 @@ if tab_historial_pagos:
             WHERE ph.empresa_id = %s {_where_hist}
             ORDER BY ph.id DESC
         """
-        df_historial = pd.read_sql_query(query_historial, conn, params=_params_hist)
+        with _pg_conn() as _conn_h:
+            with _conn_h.cursor() as _cur_h:
+                _cur_h.execute(query_historial, _params_hist)
+                _rows_h = _cur_h.fetchall()
+                _cols_h = [x.name for x in _cur_h.description]
+        df_historial = pd.DataFrame([dict(r) for r in _rows_h], columns=_cols_h) if _rows_h else pd.DataFrame(columns=_cols_h)
         conn.close()
 
         if df_historial.empty:
@@ -2416,8 +2465,8 @@ if tab_carga:
             id_contrato_a_modificar = None
     
             if contrato_previo:
-                id_contrato_a_modificar = contrato_previo[0]
-                st.info(f"ℹ️ **Aviso:** Esta propiedad ya posee un contrato registrado (Código Interno: {id_contrato_a_modificar} - Estado: {contrato_previo[1]}).")
+                id_contrato_a_modificar = contrato_previo["codigo"]
+                st.info(f"ℹ️ **Aviso:** Esta propiedad ya posee un contrato registrado (Código Interno: {id_contrato_a_modificar} - Estado: {contrato_previo['estado']}).")
                 modo_guardado = st.radio(
                     "¿Qué acción desea realizar al guardar?",
                     ["Actualizar (Modificar el contrato existente)", "Crear uno nuevo (Nuevo Registro Histórico)"],
@@ -3492,13 +3541,11 @@ if tab_superadmin:
                     with col_exp:
                         st.markdown("#### 📥 Extraer Datos (Bajar CSV)")
                         try:
-                            conn_target = conectar_db()
-                                
                             if tabla_seleccionada == "contratos":
                                 query = '''
                                     SELECT 
-                                        p.alias_propiedad AS "ALIAS PROPIEDAD",
-                                        i.dni AS "DNI INQUILINO",
+                                        c.alias_propiedad AS "ALIAS PROPIEDAD",
+                                        c.dni_inquilino AS "DNI INQUILINO",
                                         c.estado AS "ESTADO",
                                         c.inicio_contrato AS "INICIO CONTRATO",
                                         c.fin_contrato AS "FIN CONTRATO",
@@ -3526,27 +3573,38 @@ if tab_superadmin:
                                         c.ooss AS "AGUA BASE",
                                         c.cochera AS "COCHERA BASE"
                                     FROM contratos c
-                                    JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-                                    JOIN inquilinos i ON c.dni_inquilino = i.dni
+                                    WHERE c.empresa_id = %s
                                     ORDER BY c.codigo DESC
                                 '''
+                                _params_exp = (_empresa_id_csv,)
                             else:
-                                query = f"SELECT * FROM {tabla_seleccionada}"
-    
-                            df_export = pd.read_sql_query(query, conn_target)
-                            conn_target.close()
-                                
+                                # permisos_usuario no tiene empresa_id — filtrar solo por username
+                                TABLAS_SIN_EMPRESA_ID = {"permisos_usuario", "empresas", "usuarios_central"}
+                                if tabla_seleccionada in TABLAS_SIN_EMPRESA_ID:
+                                    query = f"SELECT * FROM {tabla_seleccionada}"
+                                    _params_exp = ()
+                                else:
+                                    query = f"SELECT * FROM {tabla_seleccionada} WHERE empresa_id = %s"
+                                    _params_exp = (_empresa_id_csv,)
+
+                            with _pg_conn() as _conn_exp:
+                                with _conn_exp.cursor() as _cur_exp:
+                                    _cur_exp.execute(query, _params_exp)
+                                    _rows_exp = _cur_exp.fetchall()
+                                    _cols_exp = [d.name for d in _cur_exp.description]
+
+                            df_export = pd.DataFrame(_rows_exp, columns=_cols_exp) if _rows_exp else pd.DataFrame(columns=_cols_exp)
+
                             if tabla_seleccionada != "contratos":
                                 if 'id' in df_export.columns:
                                     df_export = df_export.drop(columns=['id'])
+                                if 'empresa_id' in df_export.columns:
+                                    df_export = df_export.drop(columns=['empresa_id'])
                             else:
-                                # MODIFICACIONES EXPORTACIÓN:
-                                if "[DNI INQUILINO]" in df_export.columns:
+                                if "DNI INQUILINO" in df_export.columns:
                                     df_export["DNI INQUILINO"] = df_export["DNI INQUILINO"].astype(str).str.split('.').str[0]
-                                    
                                 if "ACTUALIZACIÓN" in df_export.columns:
                                     df_export["ACTUALIZACIÓN"] = pd.to_numeric(df_export["ACTUALIZACIÓN"], errors='coerce').fillna(0).astype(int)
-                                    
                                 if "MONTO HONORARIOS" in df_export.columns:
                                     df_export["MONTO HONORARIOS"] = pd.to_numeric(df_export["MONTO HONORARIOS"], errors='coerce').round(2)
                                 
@@ -3600,83 +3658,92 @@ if tab_superadmin:
                                     
                                 # --- PROCESADOR EXCLUSIVO PARA CONTRATOS ---
                                 if tabla_seleccionada == "contratos":
-                                    if "ALIAS PROPIEDAD" not in columnas_csv or "DNI INQUILINO" not in columnas_csv:
-                                        st.error("❌ El CSV debe incluir obligatoriamente las columnas 'ALIAS PROPIEDAD' y 'DNI INQUILINO'.")
-                                        st.info(f"Columnas detectadas en tu archivo: {columnas_csv}")
+                                    if "ALIAS PROPIEDAD" not in columnas_csv:
+                                        st.error("❌ El CSV debe incluir la columna 'ALIAS PROPIEDAD'.")
+                                        st.info(f"Columnas detectadas: {columnas_csv}")
                                     else:
                                         _eid_cont_imp = _empresa_id_csv or st.session_state.get("empresa_id", 0)
-
-                                        # ── Procesar todas las filas para validar y preparar ──
                                         contratos_listos_para_db = []
                                         errores_relacion = []
 
                                         with _pg_conn() as _conn_val:
                                             with _conn_val.cursor() as _cur_val:
                                                 for index, fila in df.iterrows():
-                                                    alias_prop_limpio = str(fila['ALIAS PROPIEDAD']).strip() if fila['ALIAS PROPIEDAD'] is not None else ""
-                                                    if alias_prop_limpio == "":
-                                                        errores_relacion.append(f"Fila {index+2}: 'ALIAS PROPIEDAD' vacío.")
-                                                        continue
-                                                    if fila['DNI INQUILINO'] is None or str(fila['DNI INQUILINO']).strip() == "":
-                                                        errores_relacion.append(f"Fila {index+2}: 'DNI INQUILINO' vacío.")
+                                                    # ── Solo ALIAS PROPIEDAD es obligatorio ──
+                                                    alias_prop_limpio = str(fila['ALIAS PROPIEDAD']).strip() if fila.get('ALIAS PROPIEDAD') is not None else ""
+                                                    if not alias_prop_limpio or alias_prop_limpio.lower() == 'nan':
+                                                        errores_relacion.append(f"Fila {index+2}: 'ALIAS PROPIEDAD' vacío — fila omitida.")
                                                         continue
 
-                                                    _cur_val.execute("SELECT alias_propiedad FROM propiedades WHERE TRIM(alias_propiedad) = %s AND empresa_id = %s", (alias_prop_limpio, _eid_cont_imp))
+                                                    # Verificar que la propiedad exista
+                                                    _cur_val.execute(
+                                                        "SELECT alias_propiedad FROM propiedades WHERE TRIM(alias_propiedad) = %s AND empresa_id = %s",
+                                                        (alias_prop_limpio, _eid_cont_imp)
+                                                    )
                                                     res_prop = _cur_val.fetchone()
-                                                    dni_limpio = str(fila['DNI INQUILINO']).split('.')[0].strip()
-                                                    _cur_val.execute("SELECT dni FROM inquilinos WHERE dni = %s AND empresa_id = %s", (dni_limpio, _eid_cont_imp))
-                                                    res_inq = _cur_val.fetchone()
-
                                                     if not res_prop:
                                                         errores_relacion.append(f"Fila {index+2}: Propiedad '{alias_prop_limpio}' no existe.")
                                                         continue
-                                                    if not res_inq:
-                                                        errores_relacion.append(f"Fila {index+2}: Inquilino con DNI '{dni_limpio}' no existe.")
-                                                        continue
 
-                                                    registro_fila = {'alias_propiedad': res_prop['alias_propiedad'], 'dni_inquilino': res_inq['dni'], '_fila_csv': index+2}
+                                                    # DNI INQUILINO — opcional
+                                                    dni_limpio = None
+                                                    if 'DNI INQUILINO' in columnas_csv:
+                                                        _dni_raw = fila.get('DNI INQUILINO')
+                                                        if _dni_raw is not None and str(_dni_raw).strip() not in ('', 'nan'):
+                                                            dni_limpio = str(_dni_raw).split('.')[0].strip()
+                                                            _cur_val.execute(
+                                                                "SELECT dni FROM inquilinos WHERE dni = %s AND empresa_id = %s",
+                                                                (dni_limpio, _eid_cont_imp)
+                                                            )
+                                                            res_inq = _cur_val.fetchone()
+                                                            if not res_inq:
+                                                                errores_relacion.append(f"Fila {index+2}: Inquilino DNI '{dni_limpio}' no existe — se importará sin inquilino.")
+                                                                dni_limpio = None
+
+                                                    registro_fila = {
+                                                        'alias_propiedad': res_prop['alias_propiedad'],
+                                                        'dni_inquilino': dni_limpio,
+                                                        '_fila_csv': index + 2
+                                                    }
+
+                                                    # Procesar el resto de columnas — todas opcionales
                                                     for alias_sql, col_db in MAPEO_CONTRATOS.items():
-                                                        if col_db not in ['alias_propiedad', 'dni_inquilino']:
-                                                            valor_celda = fila[alias_sql] if alias_sql in df.columns else None
-                                                            if col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
-                                                                if valor_celda is not None and str(valor_celda).strip() != "":
-                                                                    try: valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
-                                                                    except: valor_celda = str(valor_celda).strip()
-                                                                else: valor_celda = None
-                                                            elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
-                                                                try: valor_celda = int(float(str(valor_celda).split('.')[0]))
-                                                                except: valor_celda = 0
-                                                            elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
-                                                                try: valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
-                                                                except: valor_celda = 0.0
-                                                            elif valor_celda is not None: valor_celda = str(valor_celda).strip()
-                                                            registro_fila[col_db] = valor_celda
+                                                        if col_db in ('alias_propiedad', 'dni_inquilino'):
+                                                            continue
+                                                        valor_celda = fila.get(alias_sql) if alias_sql in df.columns else None
+                                                        if valor_celda is None or str(valor_celda).strip() in ('', 'nan', 'None'):
+                                                            valor_celda = None
+                                                        elif col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
+                                                            try: valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
+                                                            except: valor_celda = None
+                                                        elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
+                                                            try: valor_celda = int(float(str(valor_celda).split('.')[0]))
+                                                            except: valor_celda = None
+                                                        elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
+                                                            try: valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
+                                                            except: valor_celda = None
+                                                        else:
+                                                            valor_celda = str(valor_celda).strip()
+                                                        registro_fila[col_db] = valor_celda
 
-                                                    if registro_fila.get('inicio_contrato') is None:
-                                                        errores_relacion.append(f"Fila {index+2}: Fecha 'INICIO CONTRATO' inválida.")
-                                                        continue
                                                     contratos_listos_para_db.append(registro_fila)
 
                                         if errores_relacion:
-                                            st.error("❌ Errores en el CSV:")
-                                            for err in errores_relacion[:12]: st.write(err)
-                                            if len(errores_relacion) > 12: st.write(f"...y otros {len(errores_relacion)-12} errores.")
+                                            st.warning(f"⚠️ Avisos ({len(errores_relacion)}):")
+                                            for err in errores_relacion[:8]: st.caption(err)
+                                            if len(errores_relacion) > 8: st.caption(f"...y otros {len(errores_relacion)-8} avisos.")
 
                                         if contratos_listos_para_db:
-                                            # ── Vista previa con selección ──
                                             df_preview = pd.DataFrame(contratos_listos_para_db)
                                             fila_nums = df_preview.pop('_fila_csv')
                                             df_preview.insert(0, 'Fila CSV', fila_nums)
 
-                                            st.markdown(f"**{len(df_preview)} contrato(s) válidos listos para importar**")
+                                            st.markdown(f"**{len(df_preview)} contrato(s) listos para importar**")
                                             st.caption("Seleccioná los que querés importar o usá el botón para importar todos.")
 
                                             sel_cont = st.dataframe(
-                                                df_preview,
-                                                use_container_width=True,
-                                                hide_index=True,
-                                                selection_mode="multi-row",
-                                                on_select="rerun",
+                                                df_preview, use_container_width=True, hide_index=True,
+                                                selection_mode="multi-row", on_select="rerun",
                                                 key=f"sel_contratos_{archivo_subido.name}"
                                             )
                                             indices_cont = sel_cont.get("selection", {}).get("rows", [])
@@ -3694,17 +3761,20 @@ if tab_superadmin:
                                             if registros_a_importar:
                                                 cols_cont = ["empresa_id", "alias_propiedad", "dni_inquilino"] + [v for v in MAPEO_CONTRATOS.values() if v not in ("alias_propiedad", "dni_inquilino")]
                                                 placeholders_cont = ", ".join(["%s"] * len(cols_cont))
-                                                query_cont = f"INSERT INTO contratos ({', '.join(cols_cont)}) VALUES ({placeholders_cont})"
+                                                query_cont = f"INSERT INTO contratos ({', '.join(cols_cont)}) VALUES ({placeholders_cont}) ON CONFLICT DO NOTHING"
                                                 datos_cont = [tuple([_eid_cont_imp] + [r.get(c) for c in cols_cont[1:]]) for r in registros_a_importar]
-                                                try:
-                                                    with _pg_conn() as _conn_imp_c:
-                                                        with _conn_imp_c.cursor() as _cur_imp_c:
-                                                            _cur_imp_c.executemany(query_cont, datos_cont)
-                                                    st.success(f"✅ {len(datos_cont)} contrato(s) importado(s) correctamente.")
-                                                    st.balloons()
-                                                    st.rerun()
-                                                except psycopg2.Error as op_err:
-                                                    st.error(f"❌ Error al importar: {op_err}")
+                                                _cont_key = f"imported_contratos_{archivo_subido.name}_{len(datos_cont)}"
+                                                if _cont_key not in st.session_state:
+                                                    try:
+                                                        with _pg_conn() as _conn_imp_c:
+                                                            with _conn_imp_c.cursor() as _cur_imp_c:
+                                                                _cur_imp_c.executemany(query_cont, datos_cont)
+                                                        st.session_state[_cont_key] = True
+                                                        st.success(f"✅ {len(datos_cont)} contrato(s) importado(s) correctamente.")
+                                                        st.balloons()
+                                                        st.rerun()
+                                                    except psycopg2.Error as op_err:
+                                                        st.error(f"❌ Error al importar: {op_err}")
                                                 
                                 # --- LÓGICA ESTÁNDAR PARA OTRAS TABLAS ---
                                 else:
@@ -3784,8 +3854,9 @@ if tab_superadmin:
                                             if not _btn_confirmar:
                                                 df_a_importar = pd.DataFrame()
 
-                                        # ── Ejecutar importación ──
-                                        if not df_a_importar.empty:
+                                        # ── Ejecutar importación — solo una vez con flag en session_state ──
+                                        _import_key = f"imported_{tabla_seleccionada}_{archivo_subido.name}_{len(df_a_importar)}"
+                                        if not df_a_importar.empty and _import_key not in st.session_state:
                                             cols_pg = ", ".join(["empresa_id"] + list(esquema_esperado))
                                             placeholders = ", ".join(["%s"] * (1 + len(esquema_esperado)))
                                             query_imp = f"INSERT INTO {tabla_seleccionada} ({cols_pg}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
@@ -3796,6 +3867,7 @@ if tab_superadmin:
                                             with _pg_conn() as _conn_imp:
                                                 with _conn_imp.cursor() as _cur_imp:
                                                     _cur_imp.executemany(query_imp, datos)
+                                            st.session_state[_import_key] = True
                                             st.success(f"✅ ¡{len(datos)} registro(s) importados en '{tabla_seleccionada}'!")
                                             st.balloons()
                                             st.rerun()
@@ -3813,71 +3885,55 @@ if tab_superadmin:
             st.markdown("### 🚨 Zona de Peligro: Eliminar Empresa y Entorno")
                 
             with st.expander("❌ Hacer clic aquí para gestionar la eliminación de empresas", expanded=False):
-                st.warning("⚠️ Esta acción es irreversible. Se borrarán permanentemente todos los registros del sistema central y el archivo físico de la base de datos.")
+                st.warning("⚠️ Esta acción es irreversible. Se borrarán permanentemente todos los registros de la empresa en Supabase.")
                     
-                # 1. Volvemos a leer las empresas registradas para tener la lista fresca
-                conn_central = conectar_db_central()
-                df_empresas_del = pd.read_sql_query("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
-                conn_central.close()
-                    
-                if not df_empresas_del.empty:
-                    # Mapeamos los nombres comerciales a su ruta de base de datos
-                    dict_empresas_del = {row['nombre_empresa']: row['archivo_db'] for _, row in df_empresas_del.iterrows()}
+                with _pg_conn() as _conn_emp_del:
+                    with _conn_emp_del.cursor() as _cur_emp_del:
+                        _cur_emp_del.execute("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central")
+                        _rows_emp_del = _cur_emp_del.fetchall()
+
+                if _rows_emp_del:
+                    dict_empresas_del = {r["nombre_empresa"]: r["archivo_db"] for r in _rows_emp_del if r["nombre_empresa"]}
                         
                     empresa_a_eliminar = st.selectbox(
-                        "Seleccione la empresa que desea destruir por completo:",
+                        "Seleccione la empresa que desea eliminar por completo:",
                         options=list(dict_empresas_del.keys()),
                         key="sb_eliminar_empresa"
                     )
                         
-                    # Campo de doble confirmación por seguridad escribiendo el nombre de la empresa
                     confirmacion_texto = st.text_input(
                         f"Para confirmar, escriba exactamente el nombre de la empresa (**{empresa_a_eliminar}**):"
                     )
                         
-                    btn_destruir_empresa = st.button("💥 ELIMINAR EMPRESA Y BORRAR DISCO", type="primary", use_container_width=True)
+                    btn_destruir_empresa = st.button("💥 ELIMINAR EMPRESA", type="primary", use_container_width=True)
                         
                     if btn_destruir_empresa:
                         if confirmacion_texto == empresa_a_eliminar:
                             ruta_db_a_borrar = dict_empresas_del[empresa_a_eliminar]
-                                
                             try:
-                                # A. ELIMINACIÓN FÍSICA DEL ARCHIVO Y SU CARPETA OFUSCADA
-                                if ruta_db_a_borrar:
-                                    carpeta_ofuscada = os.path.dirname(ruta_db_a_borrar)
-                                        
-                                    if False:  # PostgreSQL: no hay archivos físicos
-                                        os.remove(ruta_db_a_borrar)
-                                        st.info("🗑️ Archivo de base de datos `.db` removido del almacenamiento.")
-                                        
-                                    if carpeta_ofuscada and os.path.exists(carpeta_ofuscada):
-                                        if not os.listdir(carpeta_ofuscada):
-                                            os.rmdir(carpeta_ofuscada)
-                                            st.info("📁 Carpeta ofuscada eliminada de forma física.")
-                                        else:
-                                            import shutil
-                                            shutil.rmtree(carpeta_ofuscada)
-                                            st.info("📁 Directorio y contenidos residuales eliminados por completo.")
-                                    
-                                # B. ELIMINACIÓN LÓGICA EN LA BASE CENTRAL
-                                conn_central = conectar_db_central()
-                                cursor_central = conn_central.cursor()
-                                    
-                                cursor_central.execute(
-                                    "DELETE FROM usuarios_central WHERE nombre_empresa = %s", 
-                                    (empresa_a_eliminar,)
-                                )
-                                conn_central.commit()
-                                conn_central.close()
-                                    
-                                st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todo su entorno han sido destruidos con éxito.")
+                                _eid_a_borrar = _get_empresa_id(ruta_db_a_borrar)
+                                with _pg_conn() as _conn_borrar:
+                                    with _conn_borrar.cursor() as _cur_borrar:
+                                        if _eid_a_borrar:
+                                            # Borrar todos los datos de la empresa en orden (FK)
+                                            for _tbl in ["pagos_historial", "gastos_propiedades",
+                                                         "permisos_usuario", "contratos",
+                                                         "inquilinos", "propiedades"]:
+                                                try:
+                                                    _cur_borrar.execute(f"DELETE FROM {_tbl} WHERE empresa_id = %s", (_eid_a_borrar,))
+                                                except Exception:
+                                                    pass
+                                            _cur_borrar.execute("DELETE FROM empresas WHERE id = %s", (_eid_a_borrar,))
+                                        _cur_borrar.execute("DELETE FROM usuarios_central WHERE nombre_empresa = %s", (empresa_a_eliminar,))
+
+                                st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todos sus datos han sido eliminados de Supabase.")
                                 st.balloons()
                                 st.rerun()
                                     
                             except Exception as e:
                                 st.error(f"Error crítico durante el proceso de borrado: {e}")
                         else:
-                            st.error("❌ El nombre ingresado no coincide con la empresa seleccionada. Operación cancelada.")
+                            st.error("❌ El nombre ingresado no coincide. Operación cancelada.")
                 else:
                     st.info("No hay empresas registradas disponibles para eliminar.")
     
@@ -3889,59 +3945,60 @@ if tab_superadmin:
             st.markdown("### 🗑️ Gestión de Datos Central: Eliminar Filas / Registros en Bloque")
                 
             with st.expander("🛠️ [SuperAdmin] Panel de Eliminación Múltiple Forzada", expanded=False):
-                st.warning("⚠️ **Zona Crítica:** Al borrar registros con este panel se forzará la eliminación en la base de datos operativa de la empresa seleccionada saltándose las restricciones de integridad (FOREIGN KEYs). Use con extrema precaución.")
+                st.warning("⚠️ **Zona Crítica:** Al borrar registros con este panel se forzará la eliminación en la base de datos operativa de la empresa seleccionada. Use con extrema precaución.")
                     
-                # 1. PASO NUEVO: El SuperAdmin selecciona de qué empresa quiere gestionar los datos
-                conn_central = conectar_db_central()
-                df_empresas_filas = pd.read_sql_query("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
-                conn_central.close()
-                    
-                if not df_empresas_filas.empty:
-                    dict_empresas_filas = {row['nombre_empresa']: row['archivo_db'] for _, row in df_empresas_filas.iterrows()}
+                # Selector de empresa — usar cursor directo (pd.read_sql_query falla con RealDictCursor)
+                with _pg_conn() as _conn_del_list:
+                    with _conn_del_list.cursor() as _cur_del_list:
+                        _cur_del_list.execute("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central")
+                        _rows_del = _cur_del_list.fetchall()
+
+                if _rows_del:
+                    dict_empresas_filas = {r["nombre_empresa"]: r["archivo_db"] for r in _rows_del if r["nombre_empresa"] and r["archivo_db"]}
                         
                     empresa_datos_seleccionada = st.selectbox(
-                        "1. Seleccione la Empresa a la que desea gestionar/borrar datos:",
+                        "1. Seleccione la Empresa:",
                         options=list(dict_empresas_filas.keys()),
                         key="sb_empresa_datos_del_multi"
                     )
                         
-                    # Obtener la ruta del archivo .db físico de la empresa seleccionada
                     ruta_db_objetivo = dict_empresas_filas[empresa_datos_seleccionada]
-                        
-                    # 2. El SuperAdmin elige qué tabla de la empresa seleccionada quiere limpiar
+                    _eid_del = _get_empresa_id(ruta_db_objetivo)
+
                     tabla_seleccionada = st.selectbox(
-                        "2. Seleccione la tabla que desea gestionar:",
+                        "2. Seleccione la tabla:",
                         options=["contratos", "inquilinos", "propiedades", "pagos_historial"],
                         format_func=lambda x: x.upper(),
                         key="sb_tabla_operativa_del_multi"
                     )
                         
-                    # --- CONEXIÓN DINÁMICA A LA BASE DE DATOS DE LA EMPRESA SELECCIONADA ---
                     TABLAS_PERMITIDAS = {"contratos", "inquilinos", "propiedades", "pagos_historial"}
                     if tabla_seleccionada not in TABLAS_PERMITIDAS:
                         st.error(f"❌ Tabla '{tabla_seleccionada}' no permitida.")
                     else:
                         try:
-                            # Lectura de datos en conexión propia (separada del borrado)
-                            conn_lect = conectar_db()
-                            df_completo = pd.read_sql_query(f"SELECT * FROM {tabla_seleccionada}", conn_lect)
-                            conn_lect.close()
+                            _TABLAS_SIN_EID = {"permisos_usuario", "empresas", "usuarios_central"}
+                            with _pg_conn() as _conn_lect:
+                                with _conn_lect.cursor() as _cur_lect:
+                                    if tabla_seleccionada in _TABLAS_SIN_EID:
+                                        _cur_lect.execute(f"SELECT * FROM {tabla_seleccionada}")
+                                    else:
+                                        _cur_lect.execute(
+                                            f"SELECT * FROM {tabla_seleccionada} WHERE empresa_id = %s",
+                                            (_eid_del,)
+                                        )
+                                    _rows_lect = _cur_lect.fetchall()
+                                    _cols_lect = [d.name for d in _cur_lect.description]
+                            df_completo = pd.DataFrame(_rows_lect, columns=_cols_lect) if _rows_lect else pd.DataFrame(columns=_cols_lect)
 
                             if df_completo.empty:
                                 st.info(f"La tabla '{tabla_seleccionada.upper()}' de '{empresa_datos_seleccionada}' está vacía.")
                             else:
-                                if "codigo" in df_completo.columns:
-                                    id_col_name = "codigo"
-                                elif "id" in df_completo.columns:
-                                    id_col_name = "id"
-                                else:
-                                    st.error(f"❌ La tabla '{tabla_seleccionada.upper()}' no tiene columna 'id' ni 'codigo'.")
-                                    id_col_name = None
+                                id_col_name = "codigo" if "codigo" in df_completo.columns else "id" if "id" in df_completo.columns else None
 
                                 if id_col_name:
                                     st.info("💡 **Tip:** Hacé clic en la casilla del encabezado para seleccionar todo.")
 
-                                    # Tabla interactiva con checkboxes
                                     tabla_interactiva = st.dataframe(
                                         df_completo,
                                         use_container_width=True,
@@ -3976,15 +4033,19 @@ if tab_superadmin:
                                         if btn_eliminar_bloque:
                                             if confirmacion_palabra == frase_esperada:
                                                 try:
-                                                    conn_del = conectar_db()
-                                                    cursor_del = conn_del.cursor()
                                                     placeholder = ",".join(["%s"] * cant_filas)
-                                                    cursor_del.execute(
-                                                        f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})",
-                                                        tuple(ids_a_borrar)
-                                                    )
-                                                    conn_del.commit()
-                                                    conn_del.close()
+                                                    with _pg_conn() as conn_del:
+                                                        with conn_del.cursor() as cursor_del:
+                                                            if tabla_seleccionada in _TABLAS_SIN_EID:
+                                                                cursor_del.execute(
+                                                                    f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})",
+                                                                    tuple(ids_a_borrar)
+                                                                )
+                                                            else:
+                                                                cursor_del.execute(
+                                                                    f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder}) AND empresa_id = %s",
+                                                                    tuple(ids_a_borrar) + (_eid_del,)
+                                                                )
                                                     st.success(f"✅ {cant_filas} registros eliminados de '{tabla_seleccionada.upper()}' — '{empresa_datos_seleccionada}'.")
                                                     st.balloons()
                                                     st.rerun()
@@ -3996,9 +4057,9 @@ if tab_superadmin:
                                         st.info("💡 Seleccioná una o más filas para habilitar el borrado.")
 
                         except Exception as e:
-                            st.error(f"❌ Error al conectar o leer '{empresa_datos_seleccionada}': {e}")
+                            st.error(f"❌ Error al leer '{empresa_datos_seleccionada}': {e}")
                 else:
-                    st.info("No hay empresas registradas en la base central para auditar o borrar datos.")
+                    st.info("No hay empresas registradas.")
 
 # =====================================================================
 # PESTAÑA: GASTOS DE PROPIEDADES
@@ -4013,14 +4074,15 @@ if tab_gastos:
         _pf_g = st.session_state.get("propietario_filtro", "")
         _pf_g_activo = rol_actual == "propietario" and bool(_pf_g)
         if _pf_g_activo:
-            _props_gasto = pd.read_sql_query(
-                "SELECT id, alias_propiedad, propietario FROM propiedades WHERE propietario = %s ORDER BY alias_propiedad",
-                conn, params=(_pf_g,)
-            )
+            with _pg_conn() as _cpg1:
+                with _cpg1.cursor() as _cupg1:
+                    _cupg1.execute("SELECT id, alias_propiedad, propietario FROM propiedades WHERE empresa_id = %s AND propietario = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0), _pf_g))
+                    _props_gasto = pd.DataFrame([dict(r) for r in _cupg1.fetchall()])
         else:
-            _props_gasto = pd.read_sql_query(
-                "SELECT id, alias_propiedad, propietario FROM propiedades ORDER BY alias_propiedad", conn
-            )
+            with _pg_conn() as _cpg2:
+                with _cpg2.cursor() as _cupg2:
+                    _cupg2.execute("SELECT id, alias_propiedad, propietario FROM propiedades WHERE empresa_id = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0),))
+                    _props_gasto = pd.DataFrame([dict(r) for r in _cupg2.fetchall()])
         conn.close()
 
         _categorias_gasto = [
@@ -4111,7 +4173,11 @@ if tab_gastos:
             _eid_g = st.session_state.get("empresa_id", 0)
             _where_g = "AND p.propietario = %s" if _pf_g_activo else ""
             _params_g = (_eid_g, _pf_g) if _pf_g_activo else (_eid_g,)
-            _df_gastos = pd.read_sql_query(f"""
+            with _pg_conn() as _cg, _cg.cursor() as _cug:
+              _df_gastos = None
+            with _pg_conn() as _conn_dg:
+                with _conn_dg.cursor() as _cur_dg:
+                    _cur_dg.execute(f"""
                 SELECT gp.id AS "ID", p.alias_propiedad AS "PROPIEDAD", p.propietario AS "PROPIETARIO",
                        gp.fecha AS "FECHA", gp.categoria AS "CATEGORÍA", gp.descripcion AS "DESCRIPCIÓN",
                        gp.monto AS "MONTO ($)",
@@ -4122,9 +4188,12 @@ if tab_gastos:
                        gp.observaciones AS "OBSERVACIONES"
                 FROM gastos_propiedades gp
                 JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
-                WHERE 1=1 {_where_g}
+                WHERE gp.empresa_id = %s {_where_g}
                 ORDER BY gp.fecha DESC, gp.id DESC
-            """, conn, params=_params_g)
+            """, _params_g)
+                    _rows_dg = _cur_dg.fetchall()
+                    _cols_dg = [x.name for x in _cur_dg.description]
+            _df_gastos = pd.DataFrame([dict(r) for r in _rows_dg], columns=_cols_dg) if _rows_dg else pd.DataFrame(columns=_cols_dg)
             conn.close()
 
             if _df_gastos.empty:
@@ -4183,7 +4252,10 @@ if tab_gastos:
             _where_m = "AND p.propietario = %s" if _pf_g_activo else ""
             _params_m = (_eid_m, _pf_g) if _pf_g_activo else (_eid_m,)
 
-            _df_ingresos_raw = pd.read_sql_query(f"""
+            _df_ingresos_raw = None
+            with _pg_conn() as _conn_ir:
+                with _conn_ir.cursor() as _cur_ir:
+                    _cur_ir.execute(f"""
                 SELECT
                     ph.propiedad                                                        AS propiedad,
                     COALESCE(p.propietario, '')                                        AS propietario,
@@ -4204,7 +4276,10 @@ if tab_gastos:
                 LEFT JOIN propiedades p ON ph.propiedad = p.alias_propiedad AND p.empresa_id = ph.empresa_id
                 WHERE ph.empresa_id = %s {_where_m}
                 ORDER BY ph.periodo
-            """, conn, params=_params_m)
+            """, _params_m)
+                    _rows_ir = _cur_ir.fetchall()
+                    _cols_ir = [x.name for x in _cur_ir.description]
+            _df_ingresos_raw = pd.DataFrame([dict(r) for r in _rows_ir], columns=_cols_ir) if _rows_ir else pd.DataFrame(columns=_cols_ir)
 
             # ── Calcular mes calendario desde el período del contrato ──
             # periodo tiene formato "Mes N de M" (ej. "Mes 1 de 12")
@@ -4238,7 +4313,10 @@ if tab_gastos:
                 _df_ingresos_raw["mes_calendario"] = pd.Series(dtype=str)
 
             # ── Cargar gastos desde gastos_propiedades ──
-            _df_gastos_raw = pd.read_sql_query(f"""
+            _df_gastos_raw = None
+            with _pg_conn() as _conn_gr:
+                with _conn_gr.cursor() as _cur_gr:
+                    _cur_gr.execute(f"""
                 SELECT
                     p.alias_propiedad                              AS propiedad,
                     COALESCE(p.propietario, '')                   AS propietario,
@@ -4250,7 +4328,10 @@ if tab_gastos:
                 WHERE gp.empresa_id = %s {"AND p.propietario = %s" if _pf_g_activo else ""}
                 GROUP BY p.alias_propiedad, p.propietario, TO_CHAR(gp.fecha::date, 'YYYY-MM')
                 ORDER BY periodo
-            """, conn, params=_params_m)
+            """, _params_m)
+                    _rows_ir = _cur_ir.fetchall()
+                    _cols_ir = [x.name for x in _cur_ir.description]
+            _df_ingresos_raw = pd.DataFrame([dict(r) for r in _rows_ir], columns=_cols_ir) if _rows_ir else pd.DataFrame(columns=_cols_ir)
 
             conn.close()
 
