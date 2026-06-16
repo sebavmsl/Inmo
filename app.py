@@ -536,7 +536,7 @@ st.session_state.usuario_rol = st.session_state.rol
 if not st.session_state.autenticado:
     st.markdown("<br><br>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.subheader("🔑 Control de Acceso - Demostración")
+        st.subheader("🔑 Control de Acceso ")
         
         user_input = st.text_input("Usuario:")
         pass_input = st.text_input("Contraseña:", type="password")
