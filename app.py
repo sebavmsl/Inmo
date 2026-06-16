@@ -762,8 +762,7 @@ except RuntimeError as _e:
         "2. Sección **Connection string** → elegí **Transaction pooler**\n"
         "3. Copiá la URL (contiene `pooler.supabase.com:6543`)\n\n"
         "```toml\n[database]\n"
-        'supabase_url = "postgresql://postgres.PROJECT_REF:PASSWORD'
-        '@aws-0-REGION.pooler.supabase.com:6543/postgres"\n```'
+        'supabase_url = "postgresql://postgres:mxH14DLAJwh3NF5H@db.wzcegpbfamdxillflewt.supabase.co:5432/postgres"\n```'
     )
     st.stop()
 
