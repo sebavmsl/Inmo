@@ -260,21 +260,31 @@ def obtener_ultimo_contrato():
 
 
 def cargar_datos_iniciales_contrato(propiedad_id):
-    """Carga los datos del último contrato de una propiedad"""
+    """Carga los datos del último contrato de una propiedad (busca por id de propiedad → alias)"""
     try:
+        _eid = st.session_state.get("empresa_id", 0)
         with conectar_db() as conn:
             cursor = conn.cursor()
+            # Obtener alias de la propiedad
+            cursor.execute(
+                "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
+                (propiedad_id, _eid)
+            )
+            prop_row = cursor.fetchone()
+            if not prop_row:
+                return None
+            alias = prop_row["alias_propiedad"]
             cursor.execute('''
                 SELECT * FROM contratos 
-                WHERE propiedad_id = %s 
+                WHERE alias_propiedad = %s AND empresa_id = %s
                 ORDER BY codigo DESC LIMIT 1
-            ''', (propiedad_id,))
+            ''', (alias, _eid))
             resultado = cursor.fetchone()
             if resultado:
-                columnas = [desc[0] for desc in cursor.description]
-                return dict(zip(columnas, resultado))
+                return dict(resultado)
         return None
-    except Exception:
+    except Exception as e:
+        logging.warning(f"cargar_datos_iniciales_contrato error: {e}")
         return None
 
 
@@ -729,11 +739,20 @@ def verificar_contrato_existente(propiedad_id):
     """Verifica si ya existe un contrato activo para una propiedad dada.
     Retorna (codigo, estado) del contrato más reciente, o None si no existe."""
     try:
+        _eid = st.session_state.get("empresa_id", 0)
         with conectar_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT codigo, estado FROM contratos WHERE propiedad_id = %s ORDER BY codigo DESC LIMIT 1",
-                (propiedad_id,)
+                "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
+                (propiedad_id, _eid)
+            )
+            prop_row = cursor.fetchone()
+            if not prop_row:
+                return None
+            alias = prop_row["alias_propiedad"]
+            cursor.execute(
+                "SELECT codigo, estado FROM contratos WHERE alias_propiedad = %s AND empresa_id = %s ORDER BY codigo DESC LIMIT 1",
+                (alias, _eid)
             )
             return cursor.fetchone()
     except Exception as e:
@@ -906,15 +925,15 @@ if tab_dashboard:
             SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
                 c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
             FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
+            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
         conn = conectar_db()
 
         df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
-        _pagos_q = f"SELECT monto_total FROM pagos_historial ph JOIN contratos c ON ph.contrato_id = c.codigo JOIN propiedades p ON c.propiedad_id = p.id WHERE c.empresa_id = %s AND 1=1 {_where_pf}"
+        _pagos_q = f"SELECT monto_total FROM pagos_historial ph JOIN contratos c ON ph.contrato_id = c.codigo JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id WHERE c.empresa_id = %s AND 1=1 {_where_pf}"
         df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pf)
         conn.close()
         
@@ -1011,8 +1030,8 @@ if tab_planilla:
                     c.servicios_total AS [SERVICIOS_TOTAL],
                     c.total_pagado AS [TOTAL_ESTIMADO]
                 FROM contratos c
-                JOIN propiedades p ON c.propiedad_id = p.id
-                JOIN inquilinos i ON c.inquilino_id = i.id
+                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+                JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                 WHERE c.empresa_id = %s AND 1=1 {_where_plan}
                 ORDER BY c.codigo DESC
             '''
@@ -1087,8 +1106,8 @@ if tab_pagos:
                 c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
                 c.servicios, c.inicio_contrato, c.monto_inicial
             FROM contratos c
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i ON c.inquilino_id = i.id
+            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE c.estado = 'Activo'
             ORDER BY c.codigo DESC
         '''
@@ -1930,8 +1949,8 @@ if tab_historial_pagos:
                 COALESCE(ph.retencion_agencia_usd, 0)         AS [RETENCIÓN AGENCIA (USD)]
             FROM pagos_historial ph
             JOIN contratos c  ON ph.contrato_id = c.codigo
-            JOIN propiedades p ON c.propiedad_id = p.id
-            JOIN inquilinos i  ON c.inquilino_id = i.id
+            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE ph.empresa_id = %s AND 1=1 {_where_hist}
             ORDER BY ph.id DESC
         '''
@@ -2227,6 +2246,8 @@ if tab_carga:
     
             # ✅ AHORA SÍ PODEMOS USAR propiedad_id
             propiedad_id = dict_propiedades[propiedad_seleccionada]
+            # Resolver alias de propiedad para usar en contratos (schema Supabase)
+            _alias_prop_sel = propiedad_seleccionada.split(" (")[0].strip()
     
             # Inicializar estado de sesión de forma segura
             if "propiedad_activa" not in st.session_state:
@@ -2364,6 +2385,8 @@ if tab_carga:
     
             # Obtener ID del inquilino seleccionado
             inquilino_id = dict_inquilinos[inquilino_seleccionada]
+            # Resolver DNI del inquilino para usar en contratos (schema Supabase)
+            _dni_inq_sel = inquilino_seleccionada  # se resuelve abajo con query
     
             state_contrato = c3.selectbox(
                 "Estado del Contrato:", 
@@ -2875,10 +2898,27 @@ if tab_carga:
                 conn = conectar_db()
                 cursor = conn.cursor()
                 try:
+                    _eid_cont = st.session_state.get("empresa_id", 0)
+
+                    # Resolver alias_propiedad y dni_inquilino para el schema de Supabase
+                    cursor.execute(
+                        "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
+                        (propiedad_id, _eid_cont)
+                    )
+                    _prop_row = cursor.fetchone()
+                    _alias_prop_db = _prop_row["alias_propiedad"] if _prop_row else _alias_prop_sel
+
+                    cursor.execute(
+                        "SELECT dni FROM inquilinos WHERE id = %s AND empresa_id = %s",
+                        (inquilino_id, _eid_cont)
+                    )
+                    _inq_row = cursor.fetchone()
+                    _dni_inq_db = _inq_row["dni"] if _inq_row else ""
+
                     if contrato_previo and "Actualizar" in modo_guardado:
                         cursor.execute('''
                             UPDATE contratos 
-                            SET propiedad_id=%s, inquilino_id=%s, estado=%s, inicio_contrato=%s, fin_contrato=%s,
+                            SET alias_propiedad=%s, dni_inquilino=%s, estado=%s, inicio_contrato=%s, fin_contrato=%s,
                                 calc_duracion=%s, act_contrato=%s, indice=%s, monto_inicial=%s, alquiler=%s, prox_actualizacion=%s,
                                 mes_contrato=%s, mes_actualizacion_contrato=%s, servicios=%s, honorarios=%s, monto_honorarios=%s,
                                 cuota_honorarios=%s, honorarios_pagados=%s, cuotas_honorarios_pagadas=%s,
@@ -2886,16 +2926,17 @@ if tab_carga:
                                 cuotas_deposito=%s, cuotas_deposito_pagadas=%s,
                                 imp_inmobiliario=%s, expensas=%s, edesal=%s, gas=%s, municipalidad=%s, ooss=%s, servicios_total=%s,
                                 cochera=%s, alquiler_cobrado=%s, total_pagado=%s
-                            WHERE codigo = %s
+                            WHERE codigo = %s AND empresa_id = %s
                         ''', (
-                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            _alias_prop_db, _dni_inq_db, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
                             tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
                             cuotas_deposito, cuotas_deposito_pagadas,
                             imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
-                            cochera, alquiler_cobrado, total_pagado_calculado, id_contrato_a_modificar
+                            cochera, alquiler_cobrado, total_pagado_calculado,
+                            id_contrato_a_modificar, _eid_cont
                         ))
                         st.success(f"✔️ ¡Contrato N° {id_contrato_a_modificar} actualizado correctamente!")
     
@@ -2904,12 +2945,12 @@ if tab_carga:
                             cursor.execute('''
                                 UPDATE contratos 
                                 SET estado = 'Finalizado' 
-                                WHERE propiedad_id = %s AND estado = 'Activo'
-                            ''', (propiedad_id,))
+                                WHERE alias_propiedad = %s AND empresa_id = %s AND estado = 'Activo'
+                            ''', (_alias_prop_db, _eid_cont))
                             
                         cursor.execute('''
                             INSERT INTO contratos (
-                                propiedad_id, inquilino_id, estado, inicio_contrato, fin_contrato,
+                                empresa_id, alias_propiedad, dni_inquilino, estado, inicio_contrato, fin_contrato,
                                 calc_duracion, act_contrato, indice, monto_inicial, alquiler, prox_actualizacion,
                                 mes_contrato, mes_actualizacion_contrato, servicios, honorarios, monto_honorarios,
                                 cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -2917,9 +2958,9 @@ if tab_carga:
                                 cuotas_deposito, cuotas_deposito_pagadas,
                                 imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total,
                                 cochera, alquiler_cobrado, total_pagado
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ''', (
-                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
+                            _eid_cont, _alias_prop_db, _dni_inq_db, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -3349,8 +3390,8 @@ if tab_superadmin:
                     
                 # MAPEO ACTUALIZADO: Sin 'SERVICIOS PACTADOS'
                 MAPEO_CONTRATOS = {
-                    "ALIAS PROPIEDAD": "propiedad_id",
-                    "DNI INQUILINO": "inquilino_id",
+                    "ALIAS PROPIEDAD": "alias_propiedad",
+                    "DNI INQUILINO": "dni_inquilino",
                     "ESTADO": "estado",
                     "INICIO CONTRATO": "inicio_contrato",
                     "FIN CONTRATO": "fin_contrato",
@@ -3438,8 +3479,8 @@ if tab_superadmin:
                                         c.ooss AS "AGUA BASE",
                                         c.cochera AS "COCHERA BASE"
                                     FROM contratos c
-                                    JOIN propiedades p ON c.propiedad_id = p.id
-                                    JOIN inquilinos i ON c.inquilino_id = i.id
+                                    JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+                                    JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                                     WHERE c.empresa_id = %(eid)s
                                     ORDER BY c.codigo DESC
                                 '''
@@ -3535,33 +3576,31 @@ if tab_superadmin:
                                                         errores_relacion.append(f"Fila {index+2}: El campo 'DNI INQUILINO' está vacío.")
                                                         continue
         
+                                                    # Verificar que existan en Supabase
                                                     cursor.execute(
-                                                        "SELECT id FROM propiedades WHERE TRIM(alias_propiedad) = %s AND empresa_id = %s",
+                                                        "SELECT 1 FROM propiedades WHERE TRIM(alias_propiedad) = %s AND empresa_id = %s",
                                                         (alias_prop_limpio, _empresa_id_csv)
                                                     )
-                                                    res_prop = cursor.fetchone()
+                                                    if not cursor.fetchone():
+                                                        errores_relacion.append(f"Fila {index+2}: La propiedad '{alias_prop_limpio}' no existe.")
+                                                        continue
                                                     
                                                     dni_limpio = str(fila['DNI INQUILINO']).split('.')[0].strip()
                                                     cursor.execute(
-                                                        "SELECT id FROM inquilinos WHERE dni = %s AND empresa_id = %s",
+                                                        "SELECT 1 FROM inquilinos WHERE dni = %s AND empresa_id = %s",
                                                         (dni_limpio, _empresa_id_csv)
                                                     )
-                                                    res_inq = cursor.fetchone()
-                                                    
-                                                    if not res_prop:
-                                                        errores_relacion.append(f"Fila {index+2}: La propiedad '{alias_prop_limpio}' no existe.")
-                                                        continue
-                                                    if not res_inq:
+                                                    if not cursor.fetchone():
                                                         errores_relacion.append(f"Fila {index+2}: El inquilino con DNI '{dni_limpio}' no existe.")
                                                         continue
                                                     
                                                     registro_fila = {}
-                                                    registro_fila['propiedad_id'] = res_prop["id"]
-                                                    registro_fila['inquilino_id'] = res_inq["id"]
+                                                    registro_fila['alias_propiedad'] = alias_prop_limpio
+                                                    registro_fila['dni_inquilino'] = dni_limpio
                                                     registro_fila['empresa_id'] = _empresa_id_csv
                                                     
                                                     for alias_sql, col_db in MAPEO_CONTRATOS.items():
-                                                        if col_db not in ['propiedad_id', 'inquilino_id']:
+                                                        if col_db not in ['alias_propiedad', 'dni_inquilino']:
                                                             valor_celda = fila[alias_sql] if alias_sql in df.columns else None
                                                             if col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
                                                                 if valor_celda is not None and str(valor_celda).strip() != "":
@@ -3598,7 +3637,7 @@ if tab_superadmin:
                                                 st.write(f"...y otros {len(errores_relacion)-12} errores.")
                                         else:
                                             try:
-                                                cols_cont = ["empresa_id", "propiedad_id", "inquilino_id"] + list(MAPEO_CONTRATOS.values())
+                                                cols_cont = ["empresa_id", "alias_propiedad", "dni_inquilino"] + [v for v in MAPEO_CONTRATOS.values() if v not in ("alias_propiedad", "dni_inquilino")]
                                                 placeholders_cont = ", ".join(["%s"] * len(cols_cont))
                                                 query_cont = f"INSERT INTO contratos ({', '.join(cols_cont)}) VALUES ({placeholders_cont})"
                                                 datos_cont = [tuple(r.get(c) for c in cols_cont) for r in contratos_listos_para_db]
@@ -3955,7 +3994,7 @@ if tab_gastos:
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id
+                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
                 WHERE 1=1 {_where_g}
                 ORDER BY gp.fecha DESC, gp.id DESC
             """, conn, params=_params_g)
@@ -4035,7 +4074,7 @@ if tab_gastos:
                     COALESCE(ph.monto_imp_inmobiliario_usd, 0)                     AS imp_inmobiliario_usd
                 FROM pagos_historial ph
                 JOIN contratos c  ON ph.contrato_id = c.codigo
-                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
                 WHERE 1=1 {_where_m}
                 ORDER BY ph.periodo
             """, conn, params=_params_m)
@@ -4080,7 +4119,7 @@ if tab_gastos:
                     SUM(gp.monto)                             AS total_gasto,
                     SUM(COALESCE(gp.monto_usd, 0))           AS total_gasto_usd
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id
+                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
                 WHERE 1=1 {_where_m}
                 GROUP BY p.alias_propiedad, p.propietario, strftime('%Y-%m', gp.fecha)
                 ORDER BY periodo
