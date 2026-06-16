@@ -1,4 +1,4 @@
-#ULTIMO 12-jun con pdf
+#ULTIMO 12-jun
 import streamlit as st
 import pandas as pd
 import os
@@ -19,16 +19,46 @@ from contextlib import contextmanager
 # ── CONEXIÓN POSTGRESQL (Supabase) ──────────────────────────────────────────
 @st.cache_resource
 def _get_pg_dsn():
-    try:
-        return st.secrets["database"]["supabase_url"]
-    except Exception:
-        raise RuntimeError("Falta 'database.supabase_url' en secrets.toml")
+    """Lee la connection string desde secrets. Acepta varias claves posibles."""
+    db = st.secrets.get("database", {})
+    dsn = (
+        db.get("supabase_url")
+        or db.get("url")
+        or db.get("connection_string")
+        or st.secrets.get("SUPABASE_URL")
+        or st.secrets.get("DATABASE_URL")
+    )
+    if not dsn:
+        raise RuntimeError(
+            "No se encontró la URL de PostgreSQL en secrets.toml. "
+            "Agregá [database] supabase_url = '...'"
+        )
+    # Forzar puerto 6543 (transaction pooler) si viene con 5432
+    if ":5432/" in dsn:
+        dsn = dsn.replace(":5432/", ":6543/")
+        logging.warning("Puerto cambiado de 5432 a 6543 (transaction pooler).")
+    return dsn
 
 @contextmanager
 def _pg_conn():
     """Context manager: abre conexión Postgres, commit/rollback y cierra."""
     dsn = _get_pg_dsn()
-    conn = psycopg2.connect(dsn, cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        conn = psycopg2.connect(
+            dsn,
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=10,
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5,
+        )
+    except psycopg2.OperationalError as e:
+        raise RuntimeError(
+            f"No se pudo conectar a PostgreSQL: {e}\n"
+            "Verificá que la URL en secrets.toml sea la del Transaction Pooler "
+            "(puerto 6543) y que la contraseña sea correcta."
+        )
     try:
         yield conn
         conn.commit()
@@ -40,11 +70,19 @@ def _pg_conn():
 
 def _get_empresa_id(archivo_db: str):
     """Devuelve el empresa_id de Postgres dado el archivo_db del usuario."""
-    with _pg_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM empresas WHERE archivo_db = %s", (archivo_db,))
-            row = cur.fetchone()
-            return row["id"] if row else None
+    if not archivo_db or archivo_db == "central.db":
+        return None  # superadmin no tiene empresa_id
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM empresas WHERE archivo_db = %s", (archivo_db,))
+                row = cur.fetchone()
+                return row["id"] if row else None
+    except RuntimeError:
+        raise  # propagar el error de conexión tal cual
+    except Exception as e:
+        logging.error(f"_get_empresa_id error: {e}")
+        return None
 
 
 
@@ -373,7 +411,7 @@ st.session_state.usuario_rol = st.session_state.rol
 if not st.session_state.autenticado:
     st.markdown("<br><br>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.subheader("🔑 Acceso - Multi-Empresa")
+        st.subheader("🔑 Control de Acceso - Multi-Empresa")
         
         user_input = st.text_input("Usuario:")
         pass_input = st.text_input("Contraseña:", type="password")
@@ -393,8 +431,13 @@ if not st.session_state.autenticado:
                     st.session_state.empresa_db = datos_sesion["archivo_db"]
                     
                     # Obtener empresa_id desde Postgres
-                    _eid = _get_empresa_id(datos_sesion["archivo_db"])
-                    st.session_state.empresa_id = _eid if _eid else 0
+                    try:
+                        _eid = _get_empresa_id(datos_sesion["archivo_db"])
+                        st.session_state.empresa_id = _eid if _eid else 0
+                    except RuntimeError as _conn_err:
+                        st.error(f"⚠️ Error de conexión a la base de datos:\n\n`{_conn_err}`")
+                        st.info("Verificá la URL en Streamlit Cloud → Settings → Secrets.")
+                        st.stop()
                     
                     # Sincronización de variables de UI
                     st.session_state.usuario_actual = user_input.strip()
