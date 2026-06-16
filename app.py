@@ -996,10 +996,15 @@ if tab_dashboard:
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
-        st.write(f"Conectando a la base de datos: {st.session_state.empresa_db}")
         conn = conectar_db()
-
-        df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
+        try:
+            df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
+        except Exception as _qe:
+            st.error(f"❌ Error en query dashboard: `{_qe}`")
+            st.code(query_dash)
+            st.write("Params:", _params_pf)
+            conn.close()
+            st.stop()
         _pagos_q = f"SELECT ph.monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
         _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
         df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
