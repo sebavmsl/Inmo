@@ -139,20 +139,28 @@ def limpiar_nombre_archivo(nombre_comercial):
 
 def conectar_db_central():
     """Devuelve una conexión Postgres (RealDictCursor). Cerrar manualmente o usar with."""
-    return psycopg2.connect(
-        _get_pg_dsn(),
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
+    try:
+        return psycopg2.connect(
+            _get_pg_dsn(),
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=10,
+        )
+    except psycopg2.OperationalError as e:
+        raise RuntimeError(f"Error de conexión a PostgreSQL: {e}")
 
 def conectar_db():
     """
-    Devuelve una conexión Postgres filtrada por empresa_id del usuario actual.
+    Devuelve una conexión Postgres.
     Compatible con pd.read_sql_query y context-manager 'with'.
     """
-    return psycopg2.connect(
-        _get_pg_dsn(),
-        cursor_factory=psycopg2.extras.RealDictCursor,
-    )
+    try:
+        return psycopg2.connect(
+            _get_pg_dsn(),
+            cursor_factory=psycopg2.extras.RealDictCursor,
+            connect_timeout=10,
+        )
+    except psycopg2.OperationalError as e:
+        raise RuntimeError(f"Error de conexión a PostgreSQL: {e}")
 
 def inicializar_nueva_empresa(ruta_db):
     """En PostgreSQL no hay archivos físicos. Las tablas ya existen en Supabase."""
@@ -715,6 +723,21 @@ def verificar_contrato_existente(propiedad_id):
 
 
 # Barra superior con información del operador, Empresa activa automática y botón de Salida
+
+# ── Test de conexión temprano: si falla, mostramos el error antes de cualquier query ──
+try:
+    _test_conn = conectar_db()
+    _test_conn.close()
+except RuntimeError as _e:
+    st.error(f"❌ No se pudo conectar a la base de datos:\n\n`{_e}`")
+    st.info(
+        "**Verificá en Streamlit Cloud → Settings → Secrets:**\n\n"
+        "```toml\n[database]\nsupabase_url = \"postgresql://postgres.XXXX:PASSWORD"
+        "@aws-0-sa-east-1.pooler.supabase.com:6543/postgres\"\n```\n\n"
+        "Usá el **Transaction Pooler** (puerto 6543), no la conexión directa."
+    )
+    st.stop()
+
 top_col1, top_col2 = st.columns([7, 3])
 with top_col1:
     st.title("🏢 Sistema Avanzado de Gestión de Alquileres")
@@ -860,7 +883,6 @@ if tab_dashboard:
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
-        st.write(f"Conectando a la base de datos: {st.session_state.empresa_db}")
         conn = conectar_db()
 
         df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
