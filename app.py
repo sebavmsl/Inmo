@@ -732,7 +732,7 @@ except RuntimeError as _e:
     st.error(f"❌ No se pudo conectar a la base de datos:\n\n`{_e}`")
     st.info(
         "**Verificá en Streamlit Cloud → Settings → Secrets:**\n\n"
-        "```toml\n[database]\nsupabase_url = \"postgresql://postgres:mxH14DLAJwh3NF5H@db.wzcegpbfamdxillflewt.supabase.co:5432/postgres\"\n```\n\n"
+        "```toml\n[database]\nsupabase_url = \"postgresql://postgres:mxH14DLAJwh3NF5H@db.wzcegpbfamdxillflewt.supabase.co:6543/postgres\"\n```\n\n"
         "Usá el **Transaction Pooler** (puerto 6543), no la conexión directa."
     )
     st.stop()
