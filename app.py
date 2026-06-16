@@ -1,4 +1,4 @@
-#ULTIMO 12-jun
+#ULTIMO 12-jun con pdf
 import streamlit as st
 import pandas as pd
 import os
@@ -373,7 +373,7 @@ st.session_state.usuario_rol = st.session_state.rol
 if not st.session_state.autenticado:
     st.markdown("<br><br>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.subheader("🔑 Control de Acceso - Multi-Empresa")
+        st.subheader("🔑 Acceso - Multi-Empresa")
         
         user_input = st.text_input("Usuario:")
         pass_input = st.text_input("Contraseña:", type="password")
