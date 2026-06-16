@@ -19,7 +19,7 @@ from contextlib import contextmanager
 # ── CONEXIÓN POSTGRESQL (Supabase) ──────────────────────────────────────────
 @st.cache_resource
 def _get_pg_dsn():
-    """Lee la connection string desde secrets. Acepta varias claves posibles."""
+    """Lee la connection string desde secrets y la convierte al pooler si es necesario."""
     db = st.secrets.get("database", {})
     dsn = (
         db.get("supabase_url")
@@ -33,10 +33,30 @@ def _get_pg_dsn():
             "No se encontró la URL de PostgreSQL en secrets.toml. "
             "Agregá [database] supabase_url = '...'"
         )
-    # Forzar puerto 6543 (transaction pooler) si viene con 5432
+
+    # ── Auto-convertir URL directa de Supabase al Transaction Pooler ──
+    # URL directa:  postgresql://postgres:PASS@db.PROJECT.supabase.co:5432/postgres
+    # Pooler:       postgresql://postgres.PROJECT:PASS@aws-0-sa-east-1.pooler.supabase.com:6543/postgres
+    import re, urllib.parse
+
+    # Parsear la URL
+    m = re.match(
+        r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)',
+        dsn
+    )
+    if m:
+        user, password, project_ref, dbname = m.group(1), m.group(2), m.group(3), m.group(4)
+        # Si el usuario es solo "postgres" (sin el ref), lo completamos
+        if '.' not in user:
+            user = f"postgres.{project_ref}"
+        dsn = f"postgresql://{user}:{password}@aws-0-sa-east-1.pooler.supabase.com:6543/{dbname}"
+        logging.info(f"URL convertida al Transaction Pooler para proyecto {project_ref}.")
+
+    # Fallback: si sigue siendo puerto 5432, cambiar a 6543
     if ":5432/" in dsn:
         dsn = dsn.replace(":5432/", ":6543/")
         logging.warning("Puerto cambiado de 5432 a 6543 (transaction pooler).")
+
     return dsn
 
 @contextmanager
@@ -730,10 +750,20 @@ try:
     _test_conn.close()
 except RuntimeError as _e:
     st.error(f"❌ No se pudo conectar a la base de datos:\n\n`{_e}`")
+    try:
+        _dsn_debug = _get_pg_dsn()
+        _dsn_safe = _dsn_debug.split("@")[-1]  # solo host:puerto/db, sin password
+        st.caption(f"🔌 Intentando conectar a: `...@{_dsn_safe}`")
+    except Exception:
+        pass
     st.info(
-        "**Verificá en Streamlit Cloud → Settings → Secrets:**\n\n"
-        "```toml\n[database]\nsupabase_url = \"postgresql://postgres:mxH14DLAJwh3NF5H@db.wzcegpbfamdxillflewt.supabase.co:6543/postgres\"\n```\n\n"
-        "Usá el **Transaction Pooler** (puerto 6543), no la conexión directa."
+        "**La URL en secrets.toml debe ser la del Transaction Pooler de Supabase:**\n\n"
+        "1. Andá a **Supabase → Project Settings → Database**\n"
+        "2. Sección **Connection string** → elegí **Transaction pooler**\n"
+        "3. Copiá la URL (contiene `pooler.supabase.com:6543`)\n\n"
+        "```toml\n[database]\n"
+        'supabase_url = "postgresql://postgres.PROJECT_REF:PASSWORD'
+        '@aws-0-REGION.pooler.supabase.com:6543/postgres"\n```'
     )
     st.stop()
 
