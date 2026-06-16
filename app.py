@@ -1,4 +1,4 @@
-#ULTIMO 12-jun
+#ULTIMO 14-jun con pdf
 import streamlit as st
 import pandas as pd
 import os
@@ -16,69 +16,30 @@ import requests
 from io import BytesIO
 from contextlib import contextmanager
 
-# ── CONEXIÓN POSTGRESQL (Supabase) ──────────────────────────────────────────
+# ── PostgreSQL / Supabase ────────────────────────────────────────────────────
 @st.cache_resource
 def _get_pg_dsn():
-    """Lee la connection string desde secrets y la convierte al pooler si es necesario."""
     db = st.secrets.get("database", {})
-    dsn = (
-        db.get("supabase_url")
-        or db.get("url")
-        or db.get("connection_string")
-        or st.secrets.get("SUPABASE_URL")
-        or st.secrets.get("DATABASE_URL")
-    )
+    dsn = (db.get("supabase_url") or db.get("url") or db.get("connection_string")
+           or st.secrets.get("DATABASE_URL"))
     if not dsn:
-        raise RuntimeError(
-            "No se encontró la URL de PostgreSQL en secrets.toml. "
-            "Agregá [database] supabase_url = '...'"
-        )
-
-    # ── Auto-convertir URL directa de Supabase al Transaction Pooler ──
-    # URL directa:  postgresql://postgres:PASS@db.PROJECT.supabase.co:5432/postgres
-    # Pooler:       postgresql://postgres.PROJECT:PASS@aws-0-sa-east-1.pooler.supabase.com:6543/postgres
-    import re, urllib.parse
-
-    # Parsear la URL
-    m = re.match(
-        r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)',
-        dsn
-    )
+        raise RuntimeError("Falta [database] supabase_url en secrets.toml")
+    # Auto-convertir URL directa de Supabase → Transaction Pooler
+    m = re.match(r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)', dsn)
     if m:
-        user, password, project_ref, dbname = m.group(1), m.group(2), m.group(3), m.group(4)
-        # Si el usuario es solo "postgres" (sin el ref), lo completamos
+        user, password, ref, db_ = m.groups()
         if '.' not in user:
-            user = f"postgres.{project_ref}"
-        dsn = f"postgresql://{user}:{password}@aws-1-sa-east-1.pooler.supabase.com:6543/{dbname}"
-        logging.info(f"URL convertida al Transaction Pooler para proyecto {project_ref}.")
-
-    # Fallback: si sigue siendo puerto 5432, cambiar a 6543
-    if ":5432/" in dsn:
-        dsn = dsn.replace(":5432/", ":6543/")
-        logging.warning("Puerto cambiado de 5432 a 6543 (transaction pooler).")
-
+            user = f'postgres.{ref}'
+        dsn = f'postgresql://{user}:{password}@aws-1-sa-east-1.pooler.supabase.com:6543/{db_}'
+    elif ':5432/' in dsn:
+        dsn = dsn.replace(':5432/', ':6543/')
     return dsn
 
 @contextmanager
 def _pg_conn():
-    """Context manager: abre conexión Postgres, commit/rollback y cierra."""
-    dsn = _get_pg_dsn()
-    try:
-        conn = psycopg2.connect(
-            dsn,
-            cursor_factory=psycopg2.extras.RealDictCursor,
-            connect_timeout=10,
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5,
-        )
-    except psycopg2.OperationalError as e:
-        raise RuntimeError(
-            f"No se pudo conectar a PostgreSQL: {e}\n"
-            "Verificá que la URL en secrets.toml sea la del Transaction Pooler "
-            "(puerto 6543) y que la contraseña sea correcta."
-        )
+    conn = psycopg2.connect(_get_pg_dsn(),
+                            cursor_factory=psycopg2.extras.RealDictCursor,
+                            connect_timeout=10)
     try:
         yield conn
         conn.commit()
@@ -89,20 +50,180 @@ def _pg_conn():
         conn.close()
 
 def _get_empresa_id(archivo_db: str):
-    """Devuelve el empresa_id de Postgres dado el archivo_db del usuario."""
-    if not archivo_db or archivo_db == "central.db":
-        return None  # superadmin no tiene empresa_id
+    if not archivo_db or archivo_db == 'central.db':
+        return None
     try:
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT id FROM empresas WHERE archivo_db = %s", (archivo_db,))
                 row = cur.fetchone()
                 return row["id"] if row else None
-    except RuntimeError:
-        raise  # propagar el error de conexión tal cual
     except Exception as e:
-        logging.error(f"_get_empresa_id error: {e}")
+        logging.error(f"_get_empresa_id: {e}")
         return None
+
+
+# ── ReportLab: generación real de PDF ──
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_RIGHT, TA_CENTER, TA_LEFT
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, HRFlowable
+
+
+def _rl_seccion_titulo(texto, color_texto, color_fondo, ancho):
+    """Título de sección con fondo de color para el PDF."""
+    data = [[Paragraph(texto, ParagraphStyle(
+        "sec", fontSize=10, fontName="Helvetica-Bold",
+        textColor=color_texto, leading=14,
+    ))]]
+    tbl = Table(data, colWidths=[ancho])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND",    (0, 0), (-1, -1), color_fondo),
+        ("TOPPADDING",    (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING",   (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 10),
+    ]))
+    return tbl
+
+
+def generar_pdf_recibo(
+    comprobante_nro, fecha_emision, periodo,
+    locatario, propiedad,
+    alquiler_desc, alquiler_monto,
+    filas_servicios,   # lista de {"Concepto": str, "Monto": float}
+    total, metodo_pago, nombre_empresa,
+    observaciones="",
+    es_reimpresion=False, fecha_original="", id_registro="",
+):
+    """Genera el PDF del recibo y devuelve bytes listos para st.download_button."""
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        rightMargin=18*mm, leftMargin=18*mm,
+        topMargin=18*mm, bottomMargin=18*mm,
+    )
+
+    AZUL_OSC  = colors.HexColor("#1a365d")
+    AZUL_MED  = colors.HexColor("#2c5282")
+    AZUL_CLAR = colors.HexColor("#edf2f7")
+    GRIS_BG   = colors.HexColor("#f0f4f8")
+    GRIS_TEXT = colors.HexColor("#4a5568")
+    AMARILLO  = colors.HexColor("#fff3cd")
+    AMARILLO_B= colors.HexColor("#ffc107")
+    BLANCO    = colors.white
+
+    styles = getSampleStyleSheet()
+    normal = styles["Normal"]
+
+    def _p(text, size=10, bold=False, color=colors.black, align=TA_LEFT):
+        return Paragraph(text, ParagraphStyle(
+            "c", parent=normal, fontSize=size, leading=size * 1.45,
+            textColor=color, alignment=align,
+            fontName="Helvetica-Bold" if bold else "Helvetica",
+        ))
+
+    story = []
+
+    # Badge reimpresión
+    if es_reimpresion:
+        bd = [[_p(f"🖨  REIMPRESIÓN — Documento original registrado el {fecha_original}",
+                   size=9, color=colors.HexColor("#856404"))]]
+        bt = Table(bd, colWidths=[doc.width])
+        bt.setStyle(TableStyle([
+            ("BACKGROUND", (0,0),(-1,-1), AMARILLO),
+            ("BOX",        (0,0),(-1,-1), 0.5, AMARILLO_B),
+            ("TOPPADDING", (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",(0,0),(-1,-1), 8),
+        ]))
+        story += [bt, Spacer(1, 6)]
+
+    # Encabezado
+    meta = [
+        f"<b>Comprobante N°:</b> {comprobante_nro}",
+        f"<b>Fecha Emisión:</b> {fecha_emision}",
+        f"<b>Período:</b> {periodo}",
+    ]
+    if es_reimpresion and id_registro:
+        meta.append(f"<b>ID Registro:</b> #{id_registro}")
+    hd = [[
+        _p("RECIBO DE ALQUILER", size=20, bold=True, color=AZUL_OSC),
+        _p("<br/>".join(meta), size=9.5, color=colors.HexColor("#555555"), align=TA_RIGHT),
+    ]]
+    ht = Table(hd, colWidths=[doc.width*0.5, doc.width*0.5])
+    ht.setStyle(TableStyle([
+        ("VALIGN",        (0,0),(-1,-1),"BOTTOM"),
+        ("LINEBELOW",     (0,0),(-1,-1), 2, AZUL_OSC),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 10),
+    ]))
+    story += [ht, Spacer(1, 14)]
+
+    # Datos del contrato
+    story.append(_rl_seccion_titulo("Datos del Contrato", AZUL_MED, GRIS_BG, doc.width))
+    story.append(Spacer(1, 6))
+    dt = Table([[
+        _p("<b>Locatario:</b>"), _p(locatario),
+        _p("<b>Propiedad:</b>"), _p(propiedad),
+    ]], colWidths=[doc.width*0.15, doc.width*0.35, doc.width*0.15, doc.width*0.35])
+    dt.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3),
+    ]))
+    story += [dt, Spacer(1, 14)]
+
+    # Desglose de conceptos
+    story.append(_rl_seccion_titulo("Desglose de Conceptos Liquidados", AZUL_MED, GRIS_BG, doc.width))
+    story.append(Spacer(1, 6))
+    rows = [
+        [_p("Descripción del Concepto", bold=True, color=BLANCO),
+         _p("Subtotal", bold=True, color=BLANCO, align=TA_RIGHT)],
+        [_p(alquiler_desc), _p(f"$ {alquiler_monto:,.2f}", align=TA_RIGHT)],
+    ]
+    for f in filas_servicios:
+        if float(f.get("Monto", 0)) > 0:
+            rows.append([_p(f["Concepto"]), _p(f"$ {float(f['Monto']):,.2f}", align=TA_RIGHT)])
+    rows.append([
+        _p("TOTAL CONSOLIDADO PERCIBIDO", bold=True, color=AZUL_OSC),
+        _p(f"$ {total:,.2f}", bold=True, color=AZUL_OSC, align=TA_RIGHT),
+    ])
+    n = len(rows)
+    it = Table(rows, colWidths=[doc.width*0.72, doc.width*0.28])
+    it.setStyle(TableStyle([
+        ("BACKGROUND",    (0,0),(-1,0), AZUL_MED),
+        ("BACKGROUND",    (0,n-1),(-1,n-1), AZUL_CLAR),
+        ("LINEBELOW",     (0,1),(-1,n-2), 0.5, colors.HexColor("#e2e8f0")),
+        ("TOPPADDING",    (0,0),(-1,-1), 8), ("BOTTOMPADDING",(0,0),(-1,-1),8),
+        ("LEFTPADDING",   (0,0),(-1,-1), 8), ("RIGHTPADDING", (0,0),(-1,-1),8),
+        ("VALIGN",        (0,0),(-1,-1),"MIDDLE"),
+    ]))
+    story += [it, Spacer(1, 14)]
+
+    # Método de pago
+    story.append(_p(f"<b>Forma de Cancelación:</b> {metodo_pago}"))
+    if observaciones and str(observaciones).strip():
+        story += [Spacer(1,4), _p(f"<b>Observaciones:</b> {observaciones}")]
+
+    # Firma
+    story.append(Spacer(1, 30))
+    ft = Table([["", _p(f"_________________________<br/><b>{nombre_empresa}</b>",
+                         size=11, color=GRIS_TEXT, align=TA_CENTER)]],
+               colWidths=[doc.width*0.55, doc.width*0.45])
+    story.append(ft)
+
+    # Pie
+    story += [Spacer(1,20),
+              HRFlowable(width=doc.width, thickness=0.5, color=colors.HexColor("#e2e8f0")),
+              Spacer(1,6)]
+    pie = ("Comprobante emitido de manera electrónica. Reimpresión autorizada — "
+           f"Datos extraídos del registro original N° {id_registro}."
+           if es_reimpresion and id_registro
+           else "Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.")
+    story.append(_p(pie, size=9, color=colors.HexColor("#718096"), align=TA_CENTER))
+
+    doc.build(story)
+    return buffer.getvalue()
 
 
 
@@ -138,8 +259,8 @@ ESQUEMAS_VALIDOS = {
 }
 
 def crear_db_central():
-    """En PostgreSQL las tablas ya existen. Esta función es un no-op."""
-    logging.info("PostgreSQL: tablas centrales ya gestionadas por Supabase.")
+    """En PostgreSQL las tablas ya existen en Supabase. No-op."""
+    logging.info("PostgreSQL: tablas centrales gestionadas por Supabase.")
 
 def limpiar_nombre_archivo(nombre_comercial):
     """Convierte 'Inmobiliaria Alvear S.A.' en 'Inmobiliaria_Alvear_SA.db'"""
@@ -158,68 +279,59 @@ def limpiar_nombre_archivo(nombre_comercial):
 # =====================================================================
 
 def conectar_db_central():
-    """Devuelve una conexión Postgres (RealDictCursor). Cerrar manualmente o usar with."""
+    """Conexión PostgreSQL con RealDictCursor."""
     try:
-        return psycopg2.connect(
-            _get_pg_dsn(),
-            cursor_factory=psycopg2.extras.RealDictCursor,
-            connect_timeout=10,
-        )
+        return psycopg2.connect(_get_pg_dsn(),
+                                cursor_factory=psycopg2.extras.RealDictCursor,
+                                connect_timeout=10)
     except psycopg2.OperationalError as e:
-        raise RuntimeError(f"Error de conexión a PostgreSQL: {e}")
+        raise RuntimeError(f"Error conectando a PostgreSQL: {e}")
 
 def conectar_db():
-    """
-    Devuelve una conexión Postgres.
-    Compatible con pd.read_sql_query y context-manager 'with'.
-    """
+    """Conexión PostgreSQL. Compatible con pd.read_sql_query y context manager."""
     try:
-        return psycopg2.connect(
-            _get_pg_dsn(),
-            cursor_factory=psycopg2.extras.RealDictCursor,
-            connect_timeout=10,
-        )
+        return psycopg2.connect(_get_pg_dsn(),
+                                cursor_factory=psycopg2.extras.RealDictCursor,
+                                connect_timeout=10)
     except psycopg2.OperationalError as e:
-        raise RuntimeError(f"Error de conexión a PostgreSQL: {e}")
+        raise RuntimeError(f"Error conectando a PostgreSQL: {e}")
 
 def inicializar_nueva_empresa(ruta_db):
-    """En PostgreSQL no hay archivos físicos. Las tablas ya existen en Supabase."""
-    logging.info(f"PostgreSQL: inicialización de empresa omitida (ruta_db={ruta_db}).")
+    """En PostgreSQL no hay archivos físicos. No-op."""
+    logging.info(f"PostgreSQL: empresa {ruta_db} — sin inicialización local.")
 
 def crear_tablas_empresa(conn):
-    """En PostgreSQL las tablas ya fueron creadas por el script SQL en Supabase."""
-    logging.info("PostgreSQL: crear_tablas_empresa omitida — tablas ya existen.")
+    """En PostgreSQL las tablas ya existen en Supabase. No-op."""
+    logging.info("PostgreSQL: crear_tablas_empresa omitida.")
 
 
 def obtener_todas_las_empresas():
-    """Devuelve todas las empresas registradas en el sistema (Exclusivo para el Superadmin)."""
     try:
         with conectar_db_central() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT nombre_empresa, archivo_db FROM usuarios_central")
-            return cursor.fetchall()
+            with conn.cursor() as cur:
+                cur.execute("SELECT nombre_empresa, archivo_db FROM usuarios_central")
+                return cur.fetchall()
     except Exception:
         return []
 
 def obtener_permisos_desde_db(username, ruta_db):
-    """Obtiene permisos del usuario desde PostgreSQL (ruta_db se usa para localizar empresa_id)."""
     try:
-        empresa_id = _get_empresa_id(ruta_db)
-        if not empresa_id:
+        eid = _get_empresa_id(ruta_db)
+        if not eid:
             return []
         with _pg_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT pestana FROM permisos_usuario WHERE username = %s AND empresa_id = %s",
-                    (username, empresa_id)
+                    (username, eid)
                 )
-                return [row["pestana"] for row in cur.fetchall()]
+                return [r["pestana"] for r in cur.fetchall()]
     except Exception:
         return []
 
 def inicializar_tablas():
-    """En PostgreSQL las tablas ya existen en Supabase. No se requiere migración."""
-    logging.info("PostgreSQL: inicializar_tablas omitida — esquema gestionado por Supabase.")
+    """En PostgreSQL las migraciones las gestiona Supabase. No-op."""
+    logging.info("PostgreSQL: inicializar_tablas omitida.")
 
 # 🏢 EJECUTAR INICIALIZACIÓN AUTOMÁTICA (Creará central.db de manera segura sin romper)
 inicializar_tablas()
@@ -238,7 +350,7 @@ def obtener_nombre_por_id(inquilino_id):
             cursor.execute("SELECT apellidos, nombres FROM inquilinos WHERE id = %s", (inquilino_id,))
             resultado = cursor.fetchone()
         if resultado:
-            return f"{resultado[0]}, {resultado[1]}"
+            return f"{resultado['apellidos']}, {resultado['nombres']}"
         return None
     except Exception:
         return None
@@ -252,39 +364,27 @@ def obtener_ultimo_contrato():
             cursor.execute("SELECT * FROM contratos ORDER BY codigo DESC LIMIT 1")
             resultado = cursor.fetchone()
             if resultado:
-                columnas = [desc[0] for desc in cursor.description]
-                return dict(zip(columnas, resultado))
+                return dict(resultado)
         return None
     except Exception:
         return None
 
 
 def cargar_datos_iniciales_contrato(propiedad_id):
-    """Carga los datos del último contrato de una propiedad (busca por id de propiedad → alias)"""
+    """Carga los datos del último contrato de una propiedad"""
     try:
-        _eid = st.session_state.get("empresa_id", 0)
         with conectar_db() as conn:
             cursor = conn.cursor()
-            # Obtener alias de la propiedad
-            cursor.execute(
-                "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
-                (propiedad_id, _eid)
-            )
-            prop_row = cursor.fetchone()
-            if not prop_row:
-                return None
-            alias = prop_row["alias_propiedad"]
             cursor.execute('''
                 SELECT * FROM contratos 
-                WHERE alias_propiedad = %s AND empresa_id = %s
+                WHERE propiedad_id = %s 
                 ORDER BY codigo DESC LIMIT 1
-            ''', (alias, _eid))
+            ''', (propiedad_id,))
             resultado = cursor.fetchone()
             if resultado:
                 return dict(resultado)
         return None
-    except Exception as e:
-        logging.warning(f"cargar_datos_iniciales_contrato error: {e}")
+    except Exception:
         return None
 
 
@@ -369,50 +469,36 @@ def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
 # =====================================================================
 
 def verificar_usuario(username, password):
-    """
-    Verifica las credenciales de un usuario usando Bcrypt.
-    Primero busca en secrets.toml (Superadmin maestro) y luego en PostgreSQL.
-    Devuelve un diccionario con los datos del usuario si es correcto, o None si falla.
-    """
     username_clean = username.strip()
-    
-    # -----------------------------------------------------------------
-    # CONTROL 1: Validar contra el Superadmin en secrets.toml
-    # -----------------------------------------------------------------
+    # Control 1: Superadmin en secrets.toml
     try:
         if username_clean == st.secrets["superadmin"]["username"]:
-            stored_hash = st.secrets["superadmin"]["password_hash"].encode('utf-8')
-            if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
-                return {
-                    "nombre_empresa": "Panel de Control Global", 
-                    "archivo_db": "central.db", 
-                    "rol": "superadmin"
-                }
+            stored_hash = st.secrets["superadmin"]["password_hash"].encode("utf-8")
+            if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
+                return {"nombre_empresa": "Panel de Control Global",
+                        "archivo_db": "central.db", "rol": "superadmin"}
             return None
     except Exception:
         pass
-
-    # -----------------------------------------------------------------
-    # CONTROL 2: Validar contra los usuarios comunes en PostgreSQL
-    # -----------------------------------------------------------------
-    with _pg_conn() as conn:
-        with conn.cursor() as cursor:
-            cursor.execute('''
-                SELECT password_hash, nombre_empresa, archivo_db, rol, propietario_filtro
-                FROM usuarios_central 
-                WHERE username = %s
-            ''', (username_clean,))
-            row = cursor.fetchone()
-    
-    if row:
-        if bcrypt.checkpw(password.encode('utf-8'), row["password_hash"].encode('utf-8')):
+    # Control 2: usuarios en PostgreSQL
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT password_hash, nombre_empresa, archivo_db, rol, propietario_filtro "
+                    "FROM usuarios_central WHERE username = %s",
+                    (username_clean,)
+                )
+                row = cur.fetchone()
+        if row and bcrypt.checkpw(password.encode("utf-8"), row["password_hash"].encode("utf-8")):
             return {
-                "nombre_empresa": row["nombre_empresa"],
-                "archivo_db": row["archivo_db"],
-                "rol": row["rol"],
+                "nombre_empresa":    row["nombre_empresa"],
+                "archivo_db":        row["archivo_db"],
+                "rol":               row["rol"],
                 "propietario_filtro": row["propietario_filtro"] or ""
             }
-            
+    except Exception as e:
+        logging.error(f"verificar_usuario: {e}")
     return None
 
 # =====================================================================
@@ -449,7 +535,7 @@ st.session_state.usuario_rol = st.session_state.rol
 if not st.session_state.autenticado:
     st.markdown("<br><br>", unsafe_allow_html=True)
     with st.container(border=True):
-        st.subheader("🔑 Control de Acceso - Multi-Empresa")
+        st.subheader("🔑 Control de Acceso - Demostración")
         
         user_input = st.text_input("Usuario:")
         pass_input = st.text_input("Contraseña:", type="password")
@@ -467,14 +553,13 @@ if not st.session_state.autenticado:
                     st.session_state.rol = datos_sesion["rol"]
                     st.session_state.nombre_empresa = datos_sesion["nombre_empresa"]
                     st.session_state.empresa_db = datos_sesion["archivo_db"]
-                    
-                    # Obtener empresa_id desde Postgres
+
+                    # Obtener empresa_id desde PostgreSQL
                     try:
                         _eid = _get_empresa_id(datos_sesion["archivo_db"])
                         st.session_state.empresa_id = _eid if _eid else 0
-                    except RuntimeError as _conn_err:
-                        st.error(f"⚠️ Error de conexión a la base de datos:\n\n`{_conn_err}`")
-                        st.info("Verificá la URL en Streamlit Cloud → Settings → Secrets.")
+                    except RuntimeError as _e:
+                        st.error(f"❌ Error de conexión a la BD: {_e}")
                         st.stop()
                     
                     # Sincronización de variables de UI
@@ -507,14 +592,13 @@ def obtener_datos_desplegables():
     try:
         _eid = st.session_state.get("empresa_id", 0)
         with conectar_db() as conn:
-            propiedades = pd.read_sql_query('''
-                SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo
-                FROM propiedades WHERE empresa_id = %(eid)s
-            ''', conn, params={"eid": _eid})
+            propiedades = pd.read_sql_query(
+                "SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo "
+                "FROM propiedades WHERE empresa_id = %(eid)s",
+                conn, params={"eid": _eid})
             inquilinos = pd.read_sql_query(
                 "SELECT id, apellidos, nombres FROM inquilinos WHERE empresa_id = %(eid)s",
-                conn, params={"eid": _eid}
-            )
+                conn, params={"eid": _eid})
     except Exception as e:
         logging.error(f"Error al obtener datos desplegables: {e}")
         return {}, {}
@@ -739,20 +823,11 @@ def verificar_contrato_existente(propiedad_id):
     """Verifica si ya existe un contrato activo para una propiedad dada.
     Retorna (codigo, estado) del contrato más reciente, o None si no existe."""
     try:
-        _eid = st.session_state.get("empresa_id", 0)
         with conectar_db() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
-                (propiedad_id, _eid)
-            )
-            prop_row = cursor.fetchone()
-            if not prop_row:
-                return None
-            alias = prop_row["alias_propiedad"]
-            cursor.execute(
-                "SELECT codigo, estado FROM contratos WHERE alias_propiedad = %s AND empresa_id = %s ORDER BY codigo DESC LIMIT 1",
-                (alias, _eid)
+                "SELECT codigo, estado FROM contratos WHERE propiedad_id = %s ORDER BY codigo DESC LIMIT 1",
+                (propiedad_id,)
             )
             return cursor.fetchone()
     except Exception as e:
@@ -761,30 +836,21 @@ def verificar_contrato_existente(propiedad_id):
 
 
 
-# Barra superior con información del operador, Empresa activa automática y botón de Salida
 
-# ── Test de conexión temprano: si falla, mostramos el error antes de cualquier query ──
+# ── Test de conexión temprano ──────────────────────────────────────────────
 try:
-    _test_conn = conectar_db()
-    _test_conn.close()
-except RuntimeError as _e:
-    st.error(f"❌ No se pudo conectar a la base de datos:\n\n`{_e}`")
-    try:
-        _dsn_debug = _get_pg_dsn()
-        _dsn_safe = _dsn_debug.split("@")[-1]  # solo host:puerto/db, sin password
-        st.caption(f"🔌 Intentando conectar a: `...@{_dsn_safe}`")
-    except Exception:
-        pass
+    _tc = conectar_db()
+    _tc.close()
+except RuntimeError as _ce:
+    st.error(f"❌ No se pudo conectar a PostgreSQL:\n\n`{_ce}`")
     st.info(
-        "**La URL en secrets.toml debe ser la del Transaction Pooler de Supabase:**\n\n"
-        "1. Andá a **Supabase → Project Settings → Database**\n"
-        "2. Sección **Connection string** → elegí **Transaction pooler**\n"
-        "3. Copiá la URL (contiene `pooler.supabase.com:6543`)\n\n"
-        "```toml\n[database]\n"
-        'supabase_url = "postgresql://postgres:mxH14DLAJwh3NF5H@aws-1-sa-east-1.pooler.supabase.com:6543/postgres"\n```'
+        "Verificá en **Streamlit Cloud → Settings → Secrets**:\n\n"
+        "```toml\n[database]\nsupabase_url = \"postgresql://postgres.PROJECT:PASS"
+        "@aws-1-sa-east-1.pooler.supabase.com:6543/postgres\"\n```"
     )
     st.stop()
 
+# Barra superior con información del operador, Empresa activa automática y botón de Salida
 top_col1, top_col2 = st.columns([7, 3])
 with top_col1:
     st.title("🏢 Sistema Avanzado de Gestión de Alquileres")
@@ -925,16 +991,18 @@ if tab_dashboard:
             SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
                 c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
             FROM contratos c
-            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
-            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
+            JOIN propiedades p ON c.propiedad_id = p.id
+            JOIN inquilinos i ON c.inquilino_id = i.id
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
+        st.write(f"Conectando a la base de datos: {st.session_state.empresa_db}")
         conn = conectar_db()
 
         df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
-        _pagos_q = f"SELECT monto_total FROM pagos_historial ph JOIN contratos c ON ph.contrato_id = c.codigo JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id WHERE c.empresa_id = %s AND 1=1 {_where_pf}"
-        df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pf)
+        _pagos_q = f"SELECT ph.monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
+        _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
+        df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
         conn.close()
         
         total_activos = len(df_dash)
@@ -1017,21 +1085,21 @@ if tab_planilla:
         try:
             query = f'''
                 SELECT 
-                    c.codigo AS [CÓDIGO],
-                    p.alias_propiedad AS [ALIAS PROPIEDAD],
-                    (i.apellidos || ', ' || i.nombres) AS [INQUILINO],
-                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS [PROPIEDAD],
-                    c.estado AS [ESTADO],
-                    c.inicio_contrato AS [INICIO_CONTRATO],
-                    c.fin_contrato AS [FIN_CONTRATO],
-                    c.calc_duracion AS [CALC_DURACION],
-                    c.monto_inicial AS [MONTO INICIAL],
-                    c.alquiler AS [ALQUILER],
-                    c.servicios_total AS [SERVICIOS_TOTAL],
-                    c.total_pagado AS [TOTAL_ESTIMADO]
+                    c.codigo AS "CÓDIGO",
+                    p.alias_propiedad AS "ALIAS PROPIEDAD",
+                    (i.apellidos || ', ' || i.nombres) AS "INQUILINO",
+                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS "PROPIEDAD",
+                    c.estado AS "ESTADO",
+                    c.inicio_contrato AS "INICIO_CONTRATO",
+                    c.fin_contrato AS "FIN_CONTRATO",
+                    c.calc_duracion AS "CALC_DURACION",
+                    c.monto_inicial AS "MONTO INICIAL",
+                    c.alquiler AS "ALQUILER",
+                    c.servicios_total AS "SERVICIOS_TOTAL",
+                    c.total_pagado AS "TOTAL_ESTIMADO"
                 FROM contratos c
-                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
-                JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
+                JOIN propiedades p ON c.propiedad_id = p.id
+                JOIN inquilinos i ON c.inquilino_id = i.id
                 WHERE c.empresa_id = %s AND 1=1 {_where_plan}
                 ORDER BY c.codigo DESC
             '''
@@ -1106,9 +1174,9 @@ if tab_pagos:
                 c.imp_inmobiliario, c.expensas, c.edesal, c.gas, c.municipalidad, c.ooss, c.cochera, c.servicios_total,
                 c.servicios, c.inicio_contrato, c.monto_inicial
             FROM contratos c
-            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
-            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
-            WHERE c.estado = 'Activo'
+            JOIN propiedades p ON c.propiedad_id = p.id
+            JOIN inquilinos i ON c.inquilino_id = i.id
+            WHERE c.empresa_id = %(eid)s AND c.estado = 'Activo'
             ORDER BY c.codigo DESC
         '''
         
@@ -1647,8 +1715,9 @@ if tab_pagos:
                     _ret_usd    = round(_ret_agencia / _tc_insert, 2)      if _tc_insert > 0 else 0.0
                     cursor.execute('''
                         INSERT INTO pagos_historial (
+                            empresa_id, codigo_contrato, propiedad, inquilino,
                             contrato_id, periodo, monto_alquiler, monto_servicios, monto_total,
-                            fecha_pago, metodo_pago, comentarios,
+                            fecha, metodo_pago, comentario,
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                             monto_cochera, monto_ooss, monto_imp_inmobiliario,
                             monto_honorarios, monto_garantia,
@@ -1656,8 +1725,10 @@ if tab_pagos:
                             cotizacion_usd,
                             monto_alquiler_usd, monto_cochera_usd,
                             monto_imp_inmobiliario_usd, retencion_agencia_usd
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
+                        st.session_state.get("empresa_id", 0),
+                        c_datos['codigo'], c_datos.get('propiedad_dir', ''), c_datos.get('inquilino_nombre', ''),
                         c_datos['codigo'], mes_periodo_texto, monto_alq_pago, monto_serv_pago, _total_a_cubrir,
                         datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                         monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
@@ -1798,99 +1869,27 @@ if tab_pagos:
                         st.info("📵 Sin teléfono configurado en tu perfil.")
 
                 with btn_c3:
-                    # Construir filas de servicios desde _desglose_editado (lista editable)
-                    _filas_pdf_editado = "".join(
-                        f"<tr><td>{d['Concepto']}</td><td style='text-align:right;'>$ {d['Monto']:,.2f}</td></tr>"
-                        for d in _desglose_editado if d['Monto'] > 0
-                    )
                     _total_pdf_editado = monto_alq_pago + sum(d['Monto'] for d in _desglose_editado)
 
-                    # --- EXPORTACIÓN AUTOMATIZADA A PDF PROFESIONAL DE ALTA FIDELIDAD ---
-                    html_pdf_profesional = f"""
-                    <html>
-                    <head>
-                    <meta charset="utf-8">
-                    <style>
-                        body {{ font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 30px; color: #333; background-color: #fafafa; }}
-                        .invoice-card {{ background: #fff; padding: 40px; max-width: 750px; margin: auto; border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }}
-                        .header-table {{ width: 100%; border-bottom: 3px solid #1a365d; padding-bottom: 15px; margin-bottom: 25px; }}
-                        .title-main {{ color: #1a365d; font-size: 24px; font-weight: bold; margin: 0; }}
-                        .meta-text {{ font-size: 13px; color: #555; text-align: right; }}
-                        .section-title {{ background: #f0f4f8; padding: 8px 12px; font-weight: bold; color: #2c5282; margin-top: 20px; border-radius: 4px; }}
-                        .info-grid {{ width: 100%; margin: 15px 0; font-size: 14px; line-height: 1.6; }}
-                        .items-table {{ width: 100%; border-collapse: collapse; margin-top: 20px; font-size: 14px; }}
-                        .items-table th {{ background: #2c5282; color: white; padding: 10px; text-align: left; }}
-                        .items-table td {{ padding: 12px 10px; border-bottom: 1px solid #e2e8f0; }}
-                        .total-row {{ font-size: 16px; font-weight: bold; color: #1a365d; background: #edf2f7; }}
-                        .footer-stamp {{ margin-top: 60px; text-align: center; font-size: 12px; color: #718096; border-top: 1px solid #e2e8f0; padding-top: 15px; }}
-                        .signature-line {{ border-top: 1px solid #4a5568; width: 200px; margin: 40px auto 10px auto; }}
-                    </style>
-                    </head>
-                    <body>
-                        <div class="invoice-card">
-                            <table class="header-table">
-                                <tr>
-                                    <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
-                                    <td class="meta-text">
-                                        <strong>Comprobante N°:</strong> RC-00{c_datos['codigo']}<br>
-                                        <strong>Fecha Emisión:</strong> {datetime.now().strftime('%d/%m/%Y')}<br>
-                                        <strong>Período:</strong> {mes_periodo_texto}<br>
-                                    </td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Datos del Contrato</div>
-                            <table class="info-grid">
-                                <tr>
-                                    <td width="15%"><strong>Locatario:</strong></td><td>{c_datos['apellidos']}, {c_datos['nombres']}</td>
-                                    <td width="15%"><strong>Propiedad:</strong></td><td>{c_datos['propiedad_dir']}</td>
-                                </tr>
-                            </table>
-
-                            <div class="section-title">Desglose de Conceptos Liquidados</div>
-                            <table class="items-table">
-                                <thead>
-                                    <tr>
-                                        <th>Descripción del Concepto Asociado</th>
-                                        <th style="text-align: right;">Subtotal</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td>{_alq_desc_edit}</td>
-                                        <td style="text-align: right;">{txt_alquiler_fmt}</td>
-                                    </tr>
-                                    {_filas_pdf_editado}
-                                    <tr class="total-row">
-                                        <td>TOTAL CONSOLIDADO PERCIBIDO</td>
-                                        <td style="text-align: right;">$ {_total_pdf_editado:,.2f}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-
-                            <table class="info-grid" style="margin-top:20px;">
-                                <tr><td><strong>Forma de Cancelación:</strong> {metodo_pago}</td></tr>
-                            </table>
-
-                            <div style="text-align: right; margin-top: 40px;">
-                                <div class="signature-line"></div>
-                                <span style="font-size:13px; font-weight:bold; color:#4a5568;">{st.session_state.get('nombre_empresa', 'Mi Empresa')}</span>
-                            </div>
-
-                            <div class="footer-stamp">
-                                Comprobante emitido de manera electrónica. Documento de respaldo archivado de manera conforme.
-                            </div>
-                        </div>
-                        <script>window.print();</script>
-                    </body>
-                    </html>
-                    """
+                    _pdf_bytes = generar_pdf_recibo(
+                        comprobante_nro=f"RC-00{c_datos['codigo']}",
+                        fecha_emision=datetime.now().strftime('%d/%m/%Y'),
+                        periodo=mes_periodo_texto,
+                        locatario=f"{c_datos['apellidos']}, {c_datos['nombres']}",
+                        propiedad=c_datos['propiedad_dir'],
+                        alquiler_desc=_alq_desc_edit,
+                        alquiler_monto=monto_alq_pago,
+                        filas_servicios=_desglose_editado,
+                        total=_total_pdf_editado,
+                        metodo_pago=metodo_pago,
+                        nombre_empresa=st.session_state.get('nombre_empresa', 'Mi Empresa'),
+                    )
                     st.download_button(
-                        label="🖨️ Descargar Comprobante PDF Corporativo",
-                        data=html_pdf_profesional,
-                        file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.html",
-                        mime="text/html",
-                        help="Genera un archivo optimizado de alta fidelidad. Al abrirlo, el sistema abrirá nativamente la ventana para guardar como PDF comercial."
+                        label="📄 Descargar Comprobante PDF",
+                        data=_pdf_bytes,
+                        file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.pdf",
+                        mime="application/pdf",
+                        help="Descarga el comprobante como PDF listo para archivar o enviar.",
                     )
 
 
@@ -1904,56 +1903,50 @@ if tab_historial_pagos:
         _pf_hist = st.session_state.get("propietario_filtro", "")
         _pf_hist_activo = rol_actual == "propietario" and bool(_pf_hist)
         _eid_hist = st.session_state.get("empresa_id", 0)
-        _where_hist = "AND p.propietario = %s" if _pf_hist_activo else ""
-        _params_hist = (_eid_hist, _pf_hist) if _pf_hist_activo else (_eid_hist,)
+        _where_hist = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if _pf_hist_activo else ""
+        _params_hist = (_eid_hist, _pf_hist, _eid_hist) if _pf_hist_activo else (_eid_hist,)
 
         conn = conectar_db()
         # Query ampliada: trae todos los montos detallados para poder reimprimir el recibo
-        query_historial = f'''
+        query_historial = f"""
             SELECT
-                ph.id                                          AS [ID PAGO],
-                c.codigo                                       AS [COD CONTRATO],
-                p.alias_propiedad                              AS [PROPIEDAD],
-                (p.calle || ' ' || p.numero
-                    || CASE WHEN p.departamento IS NOT NULL AND p.departamento != ''
-                            THEN (', Dpto: ' || p.departamento) ELSE '' END)
-                                                               AS [DIR PROPIEDAD],
-                (i.apellidos || ', ' || i.nombres)             AS [INQUILINO],
-                i.apellidos                                    AS [_apellidos],
-                i.nombres                                      AS [_nombres],
-                i.telefono                                     AS [_telefono],
-                ph.periodo                                     AS [PERIODO],
-                ph.monto_alquiler                              AS [ALQUILER ($)],
-                ph.monto_servicios                             AS [SERVICIOS ($)],
-                ph.monto_total                                 AS [TOTAL ($)],
-                ph.fecha_pago                                  AS [FECHA IMPACTO],
-                ph.metodo_pago                                 AS [METODO],
-                COALESCE(ph.monto_expensas, 0)                AS [_expensas],
-                COALESCE(ph.monto_edesal, 0)                  AS [_edesal],
-                COALESCE(ph.monto_gas, 0)                     AS [_gas],
-                COALESCE(ph.monto_municipalidad, 0)           AS [_municipalidad],
-                COALESCE(ph.monto_cochera, 0)                 AS [_cochera],
-                COALESCE(ph.monto_ooss, 0)                    AS [_ooss],
-                COALESCE(ph.monto_imp_inmobiliario, 0)        AS [_imp_inmobiliario],
-                COALESCE(ph.monto_honorarios, 0)              AS [_honorarios],
-                COALESCE(ph.monto_garantia, 0)                AS [_garantia],
-                COALESCE(ph.monto_abonado, 0)                 AS [_abonado],
-                COALESCE(ph.saldo_pendiente, 0)               AS [_saldo_pendiente],
-                ph.comentarios                                 AS [_comentarios],
-                c.inicio_contrato                              AS [_inicio_contrato],
-                COALESCE(c.honorarios, 0)                     AS [_pct_admin],
-                COALESCE(ph.cotizacion_usd, 0)                AS [COTIZACIÓN USD],
-                COALESCE(ph.monto_alquiler_usd, 0)            AS [ALQUILER (USD)],
-                COALESCE(ph.monto_cochera_usd, 0)             AS [COCHERA (USD)],
-                COALESCE(ph.monto_imp_inmobiliario_usd, 0)    AS [IMP. INMOBILIARIO (USD)],
-                COALESCE(ph.retencion_agencia_usd, 0)         AS [RETENCIÓN AGENCIA (USD)]
+                ph.id                                       AS "ID PAGO",
+                ph.codigo_contrato                          AS "COD CONTRATO",
+                ph.propiedad                                AS "PROPIEDAD",
+                ph.propiedad                                AS "DIR PROPIEDAD",
+                ph.inquilino                                AS "INQUILINO",
+                ph.inquilino                                AS "_apellidos",
+                ''                                          AS "_nombres",
+                ''                                          AS "_telefono",
+                ph.periodo                                  AS "PERIODO",
+                COALESCE(ph.monto_alquiler,0)               AS "ALQUILER ($)",
+                COALESCE(ph.monto_servicios,0)              AS "SERVICIOS ($)",
+                COALESCE(ph.monto_total,0)                  AS "TOTAL ($)",
+                ph.fecha                                    AS "FECHA IMPACTO",
+                COALESCE(ph.metodo_pago,'')                 AS "METODO",
+                COALESCE(ph.monto_expensas,0)               AS "_expensas",
+                COALESCE(ph.monto_edesal,0)                 AS "_edesal",
+                COALESCE(ph.monto_gas,0)                    AS "_gas",
+                COALESCE(ph.monto_municipalidad,0)          AS "_municipalidad",
+                COALESCE(ph.monto_cochera,0)                AS "_cochera",
+                COALESCE(ph.monto_ooss,0)                   AS "_ooss",
+                COALESCE(ph.monto_imp_inmobiliario,0)       AS "_imp_inmobiliario",
+                COALESCE(ph.monto_honorarios,0)             AS "_honorarios",
+                COALESCE(ph.monto_garantia,0)               AS "_garantia",
+                COALESCE(ph.monto_abonado,0)                AS "_abonado",
+                COALESCE(ph.saldo_pendiente,0)              AS "_saldo_pendiente",
+                COALESCE(ph.comentario,'')                  AS "_comentarios",
+                NULL                                        AS "_inicio_contrato",
+                0                                           AS "_pct_admin",
+                COALESCE(ph.cotizacion_usd,0)               AS "COTIZACIÓN USD",
+                COALESCE(ph.monto_alquiler_usd,0)           AS "ALQUILER (USD)",
+                COALESCE(ph.monto_cochera_usd,0)            AS "COCHERA (USD)",
+                COALESCE(ph.monto_imp_inmobiliario_usd,0)   AS "IMP. INMOBILIARIO (USD)",
+                COALESCE(ph.retencion_agencia_usd,0)        AS "RETENCIÓN AGENCIA (USD)"
             FROM pagos_historial ph
-            JOIN contratos c  ON ph.contrato_id = c.codigo
-            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
-            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
-            WHERE ph.empresa_id = %s AND 1=1 {_where_hist}
+            WHERE ph.empresa_id = %s {_where_hist}
             ORDER BY ph.id DESC
-        '''
+        """
         df_historial = pd.read_sql_query(query_historial, conn, params=_params_hist)
         conn.close()
 
@@ -2246,8 +2239,6 @@ if tab_carga:
     
             # ✅ AHORA SÍ PODEMOS USAR propiedad_id
             propiedad_id = dict_propiedades[propiedad_seleccionada]
-            # Resolver alias de propiedad para usar en contratos (schema Supabase)
-            _alias_prop_sel = propiedad_seleccionada.split(" (")[0].strip()
     
             # Inicializar estado de sesión de forma segura
             if "propiedad_activa" not in st.session_state:
@@ -2385,8 +2376,6 @@ if tab_carga:
     
             # Obtener ID del inquilino seleccionado
             inquilino_id = dict_inquilinos[inquilino_seleccionada]
-            # Resolver DNI del inquilino para usar en contratos (schema Supabase)
-            _dni_inq_sel = inquilino_seleccionada  # se resuelve abajo con query
     
             state_contrato = c3.selectbox(
                 "Estado del Contrato:", 
@@ -2898,27 +2887,10 @@ if tab_carga:
                 conn = conectar_db()
                 cursor = conn.cursor()
                 try:
-                    _eid_cont = st.session_state.get("empresa_id", 0)
-
-                    # Resolver alias_propiedad y dni_inquilino para el schema de Supabase
-                    cursor.execute(
-                        "SELECT alias_propiedad FROM propiedades WHERE id = %s AND empresa_id = %s",
-                        (propiedad_id, _eid_cont)
-                    )
-                    _prop_row = cursor.fetchone()
-                    _alias_prop_db = _prop_row["alias_propiedad"] if _prop_row else _alias_prop_sel
-
-                    cursor.execute(
-                        "SELECT dni FROM inquilinos WHERE id = %s AND empresa_id = %s",
-                        (inquilino_id, _eid_cont)
-                    )
-                    _inq_row = cursor.fetchone()
-                    _dni_inq_db = _inq_row["dni"] if _inq_row else ""
-
                     if contrato_previo and "Actualizar" in modo_guardado:
                         cursor.execute('''
                             UPDATE contratos 
-                            SET alias_propiedad=%s, dni_inquilino=%s, estado=%s, inicio_contrato=%s, fin_contrato=%s,
+                            SET propiedad_id=%s, inquilino_id=%s, estado=%s, inicio_contrato=%s, fin_contrato=%s,
                                 calc_duracion=%s, act_contrato=%s, indice=%s, monto_inicial=%s, alquiler=%s, prox_actualizacion=%s,
                                 mes_contrato=%s, mes_actualizacion_contrato=%s, servicios=%s, honorarios=%s, monto_honorarios=%s,
                                 cuota_honorarios=%s, honorarios_pagados=%s, cuotas_honorarios_pagadas=%s,
@@ -2926,17 +2898,16 @@ if tab_carga:
                                 cuotas_deposito=%s, cuotas_deposito_pagadas=%s,
                                 imp_inmobiliario=%s, expensas=%s, edesal=%s, gas=%s, municipalidad=%s, ooss=%s, servicios_total=%s,
                                 cochera=%s, alquiler_cobrado=%s, total_pagado=%s
-                            WHERE codigo = %s AND empresa_id = %s
+                            WHERE codigo = %s
                         ''', (
-                            _alias_prop_db, _dni_inq_db, state_contrato, inicio_str, fin_str,
+                            propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
                             tipo_de_garantie, monto_deposito_total, detalle_garantia_unificado, deposito_pagados,
                             cuotas_deposito, cuotas_deposito_pagadas,
                             imp_inmobiliario, expensas, edesal, gas, municipalidad, ooss, servicios_total_calculado,
-                            cochera, alquiler_cobrado, total_pagado_calculado,
-                            id_contrato_a_modificar, _eid_cont
+                            cochera, alquiler_cobrado, total_pagado_calculado, id_contrato_a_modificar
                         ))
                         st.success(f"✔️ ¡Contrato N° {id_contrato_a_modificar} actualizado correctamente!")
     
@@ -2945,12 +2916,13 @@ if tab_carga:
                             cursor.execute('''
                                 UPDATE contratos 
                                 SET estado = 'Finalizado' 
-                                WHERE alias_propiedad = %s AND empresa_id = %s AND estado = 'Activo'
-                            ''', (_alias_prop_db, _eid_cont))
+                                WHERE propiedad_id = %s AND estado = 'Activo'
+                            ''', (propiedad_id,))
                             
+                        _eid_c = st.session_state.get("empresa_id", 0)
                         cursor.execute('''
                             INSERT INTO contratos (
-                                empresa_id, alias_propiedad, dni_inquilino, estado, inicio_contrato, fin_contrato,
+                                empresa_id, propiedad_id, inquilino_id, estado, inicio_contrato, fin_contrato,
                                 calc_duracion, act_contrato, indice, monto_inicial, alquiler, prox_actualizacion,
                                 mes_contrato, mes_actualizacion_contrato, servicios, honorarios, monto_honorarios,
                                 cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -2960,7 +2932,7 @@ if tab_carga:
                                 cochera, alquiler_cobrado, total_pagado
                             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ''', (
-                            _eid_cont, _alias_prop_db, _dni_inq_db, state_contrato, inicio_str, fin_str,
+                            _eid_c, propiedad_id, inquilino_id, state_contrato, inicio_str, fin_str,
                             duracion_meses_calculada, act_contrato_seleccionado, indice_final, monto_inicial, alquiler, prox_act_str,
                             mes_actual_contrato_vivo, meses_atras_calculado, registro_distribucion, honorarios_pct, retencion_mensual_estimated,
                             cuota_honorarios, honorarios_pagados, cuotas_honorarios_pagadas,
@@ -3008,7 +2980,7 @@ if tab_auxiliares:
                             try:
                                 cursor = conn.cursor()
                                 cursor.execute('''
-                                    INSERT INTO inquilinos (apellidos, nombres, dni, telefono, email)
+                                    INSERT INTO inquilinos (empresa_id, apellidos, nombres, dni, telefono, email)
                                     VALUES (%s, %s, %s, %s, %s)
                                 ''', (apellidos.strip(), nombres.strip(), dni.strip() or None, tel.strip() or None, email.strip() or None))
                                 conn.commit()
@@ -3052,7 +3024,7 @@ if tab_auxiliares:
                             try:
                                 cursor = conn.cursor()
                                 cursor.execute('''
-                                    INSERT INTO propiedades (alias_propiedad, calle, numero, departamento, propietario, 
+                                    INSERT INTO propiedades (empresa_id, alias_propiedad, calle, numero, departamento, propietario, 
                                                             ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron) 
                                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                 ''', (alias, calle, numero, depto, propietario, ciudad, provincia, tipo, 
@@ -3165,44 +3137,64 @@ if tab_superadmin:
                     if new_username and new_password and new_empresa and new_apellidos and new_nombres:
                             
                         try:
-                            # Determinar el archivo_db (identificador de empresa en Postgres)
+                            conn = conectar_db_central()
+                            cursor = conn.cursor()
+                                
+                            # Determinar el directorio y el archivo de base de datos de destino
                             if rol_sesion == "admin":
+                                # Si es un admin de empresa, heredamos de forma estricta su base de datos actual
                                 ruta_db_completa = st.session_state.get("empresa_db")
+                                nombre_directorio = os.path.dirname(ruta_db_completa)
                             else:
-                                # Superadmin: generar token único como archivo_db
+                                # Si es superadmin y crea una empresa nueva:
                                 token_carpeta = secrets.token_hex(8)
-                                ruta_db_completa = f"{token_carpeta}/data.db"
+                                nombre_directorio = token_carpeta  
+                                nombre_archivo_final = "data.db"
+                                ruta_db_completa = os.path.join(nombre_directorio, nombre_archivo_final)
+    
+                            # Asegurar la existencia física del directorio
+                            if nombre_directorio and not os.path.exists(nombre_directorio):
+                                os.makedirs(nombre_directorio, exist_ok=True)
+                                st.info(f"📁 Directorio seguro creado de forma física en el servidor.")
                                 
                             # Cifrado seguro utilizando Bcrypt
                             rondas_seguridad = st.secrets["seguridad"]["bcrypt_rounds"]
                             salt = bcrypt.gensalt(rounds=rondas_seguridad)
                             hashed_pw = bcrypt.hashpw(new_password.encode('utf-8'), salt).decode('utf-8')
                                 
-                            with _pg_conn() as conn_new:
-                                with conn_new.cursor() as cur_new:
-                                    # Registrar empresa si es nueva (superadmin)
-                                    if rol_sesion != "admin":
-                                        cur_new.execute("""
-                                            INSERT INTO empresas (nombre_comercial, archivo_db)
-                                            VALUES (%s, %s) ON CONFLICT DO NOTHING
-                                        """, (new_empresa, ruta_db_completa))
-
-                                    # Insertar usuario
-                                    cur_new.execute("""
-                                        INSERT INTO usuarios_central (username, password_hash, nombre_empresa, archivo_db, rol, apellidos, nombres)
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s)
-                                    """, (
-                                        new_username, hashed_pw, new_empresa, ruta_db_completa,
-                                        new_rol, new_apellidos.strip().upper(), new_nombres.strip().title()
-                                    ))
-
+                            # Insertar el registro en la base centralizada de enrutamiento
+                            cursor.execute('''
+                                INSERT INTO usuarios_central (username, password_hash, nombre_empresa, archivo_db, rol, apellidos, nombres)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (username) DO NOTHING
+                            ''', (
+                                new_username, 
+                                hashed_pw, 
+                                new_empresa, 
+                                ruta_db_completa, 
+                                new_rol, 
+                                new_apellidos.strip().upper(), 
+                                new_nombres.strip().title()
+                            ))
+                            conn.commit()
+                                
+                            # Inicializar el archivo físico SQLite si no existía
+                            if not os.path.exists(ruta_db_completa):
+                                conn_nueva_empresa = conectar_db()
+                                crear_tablas_empresa(conn_nueva_empresa)
+                                conn_nueva_empresa.close()
+                                st.info(f"📁 Base de datos inicializada con tablas para: {new_empresa}")
+    
                             st.success(f"¡Usuario '{new_username}' registrado con éxito!")
-                            st.balloons()
+                            st.balloons()                            
                                 
                         except psycopg2.errors.UniqueViolation:
                             st.error("Error: El nombre de usuario ya se encuentra registrado.")
                         except Exception as e:
-                            st.error(f"Error al registrar el usuario: {e}")
+                            st.error(f"Error al organizar el entorno de base de datos: {e}")
+                        finally:
+                            if 'conn' in locals():
+                                conn.close()
                     else:
                         st.error("Por favor completa todos los campos del formulario.")
     
@@ -3232,7 +3224,7 @@ if tab_superadmin:
             usuarios_lista = cursor_central.fetchall()
             conn_central.close()
     
-            dict_usuarios = {f"{u['username']} ({u['nombre_empresa']} - Rol: {u['rol']})": (u['username'], u['archivo_db']) for u in usuarios_lista}
+            dict_usuarios = {f"{u[0]} ({u[1]} - Rol: {u[2]})": (u[0], u[3]) for u in usuarios_lista}
     
             if dict_usuarios:
                 usuario_form_label = st.selectbox("Seleccione el usuario que desea editar:", list(dict_usuarios.keys()))
@@ -3244,12 +3236,12 @@ if tab_superadmin:
                 datos_user_actual = cursor_central.fetchone()
                 conn_central.close()
     
-                rol_actual_user    = datos_user_actual["rol"]          if datos_user_actual else "user"
-                empresa_user       = datos_user_actual["nombre_empresa"] if datos_user_actual else ""
-                apellidos_actual   = datos_user_actual["apellidos"]    or "" if datos_user_actual else ""
-                nombres_actual     = datos_user_actual["nombres"]      or "" if datos_user_actual else ""
-                telefono_actual    = datos_user_actual["telefono"]     or "" if datos_user_actual else ""
-                prop_filtro_actual = datos_user_actual["propietario_filtro"] or "" if datos_user_actual else ""
+                rol_actual_user        = datos_user_actual[0] if datos_user_actual else "user"
+                empresa_user           = datos_user_actual[1] if datos_user_actual else ""
+                apellidos_actual       = datos_user_actual[2] if datos_user_actual and datos_user_actual[2] else ""
+                nombres_actual         = datos_user_actual[3] if datos_user_actual and datos_user_actual[3] else ""
+                telefono_actual        = datos_user_actual[4] if datos_user_actual and datos_user_actual[4] else ""
+                prop_filtro_actual     = datos_user_actual[5] if datos_user_actual and datos_user_actual[5] else ""
     
                 with st.form(f"form_editar_{user_seleccionado}"):
                     st.markdown(f"🔹 **Modificando a:** `{user_seleccionado}` — Empresa: *{empresa_user}*")
@@ -3271,17 +3263,15 @@ if tab_superadmin:
 
                     if nuevo_rol == "propietario":
                         st.markdown("#### 🏠 Vinculación con Propiedades")
+                        # Cargar propietarios únicos desde la BD de la empresa del usuario
                         _prop_opciones = []
                         try:
-                            empresa_id_user = _get_empresa_id(ruta_db_user)
-                            if empresa_id_user:
-                                with _pg_conn() as _conn_props:
-                                    with _conn_props.cursor() as _cur_props:
-                                        _cur_props.execute(
-                                            "SELECT DISTINCT propietario FROM propiedades WHERE empresa_id = %s AND propietario IS NOT NULL AND propietario != '' ORDER BY propietario",
-                                            (empresa_id_user,)
-                                        )
-                                        _prop_opciones = [r["propietario"] for r in _cur_props.fetchall()]
+                            if ruta_db_user and os.path.exists(ruta_db_user):
+                                with conectar_db() as _conn_props:
+                                    _rows_props = _conn_props.execute(
+                                        "SELECT DISTINCT propietario FROM propiedades WHERE propietario IS NOT NULL AND propietario != '' ORDER BY propietario"
+                                    ).fetchall()
+                                    _prop_opciones = [r[0] for r in _rows_props]
                         except Exception:
                             pass
 
@@ -3311,18 +3301,16 @@ if tab_superadmin:
                         st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
 
                         permisos_actuales = []
-                        try:
-                            empresa_id_perm = _get_empresa_id(ruta_db_user)
-                            if empresa_id_perm:
-                                with _pg_conn() as _conn_perm:
-                                    with _conn_perm.cursor() as _cur_perm:
-                                        _cur_perm.execute(
-                                            "SELECT pestana FROM permisos_usuario WHERE username = %s AND empresa_id = %s",
-                                            (user_seleccionado, empresa_id_perm)
-                                        )
-                                        permisos_actuales = [r["pestana"] for r in _cur_perm.fetchall()]
-                        except Exception as e:
-                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
+                        if ruta_db_user and os.path.exists(ruta_db_user):
+                            try:
+                                conn_emp = conectar_db()
+                                cursor_emp = conn_emp.cursor()
+                                if cursor_emp.fetchone():
+                                    cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = %s", (user_seleccionado,))
+                                    permisos_actuales = [row[0] for row in cursor_emp.fetchall()]
+                                conn_emp.close()
+                            except Exception as e:
+                                st.warning(f"Aviso al recuperar permisos existentes: {e}")
 
                         p_dash  = st.checkbox("📈 Tablero de Control",              value=("dashboard"       in permisos_actuales))
                         p_plan  = st.checkbox("📊 Planilla de Contratos",            value=("planilla"        in permisos_actuales))
@@ -3335,48 +3323,56 @@ if tab_superadmin:
                     btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
     
                     if btn_guardar_cambios:
+                        conn_central = conectar_db_central()
+                        cursor_central = conn_central.cursor()
                         try:
-                            with _pg_conn() as conn_save:
-                                with conn_save.cursor() as cur_save:
-                                    # 1. Actualizar datos en usuarios_central
-                                    if nueva_pass.strip():
-                                        rondas = st.secrets["seguridad"]["bcrypt_rounds"]
-                                        hashed = bcrypt.hashpw(nueva_pass.encode('utf-8'), bcrypt.gensalt(rounds=rondas)).decode('utf-8')
-                                        cur_save.execute(
-                                            "UPDATE usuarios_central SET password_hash = %s, rol = %s, apellidos = %s, nombres = %s, telefono = %s, propietario_filtro = %s WHERE username = %s",
-                                            (hashed, nuevo_rol, nuevo_apellido.strip(), nuevo_nombre.strip(), nuevo_telefono.strip(), nuevo_prop_filtro.strip(), user_seleccionado)
-                                        )
-                                    else:
-                                        cur_save.execute(
-                                            "UPDATE usuarios_central SET rol = %s, apellidos = %s, nombres = %s, telefono = %s, propietario_filtro = %s WHERE username = %s",
-                                            (nuevo_rol, nuevo_apellido.strip(), nuevo_nombre.strip(), nuevo_telefono.strip(), nuevo_prop_filtro.strip(), user_seleccionado)
-                                        )
+                            # 1. Actualizar datos en BD Central
+                            if nueva_pass.strip():
+                                rondas = st.secrets["seguridad"]["bcrypt_rounds"]
+                                hashed = bcrypt.hashpw(nueva_pass.encode('utf-8'), bcrypt.gensalt(rounds=rondas)).decode('utf-8')
+                                cursor_central.execute(
+                                    "UPDATE usuarios_central SET password_hash = %s, rol = %s, apellidos = %s, nombres = %s, telefono = %s, propietario_filtro = %s WHERE username = %s",
+                                    (hashed, nuevo_rol, nuevo_apellido.strip(), nuevo_nombre.strip(), nuevo_telefono.strip(), nuevo_prop_filtro.strip(), user_seleccionado)
+                                )
+                            else:
+                                cursor_central.execute(
+                                    "UPDATE usuarios_central SET rol = %s, apellidos = %s, nombres = %s, telefono = %s, propietario_filtro = %s WHERE username = %s",
+                                    (nuevo_rol, nuevo_apellido.strip(), nuevo_nombre.strip(), nuevo_telefono.strip(), nuevo_prop_filtro.strip(), user_seleccionado)
+                                )
+                            conn_central.commit()
+                                
+                            # 2. Sincronización en BD Empresa
+                            if ruta_db_user and os.path.exists(ruta_db_user):
+                                conn_emp = conectar_db()
+                                cursor_emp = conn_emp.cursor()
                                     
-                                    # 2. Sincronizar permisos en Postgres
-                                    empresa_id_save = _get_empresa_id(ruta_db_user)
-                                    if empresa_id_save:
-                                        cur_save.execute(
-                                            "DELETE FROM permisos_usuario WHERE username = %s AND empresa_id = %s",
-                                            (user_seleccionado, empresa_id_save)
-                                        )
-                                        nuevas_pestanas = []
-                                        if p_dash:  nuevas_pestanas.append("dashboard")
-                                        if p_plan:  nuevas_pestanas.append("planilla")
-                                        if p_pagos: nuevas_pestanas.append("pagos")
-                                        if p_hist:  nuevas_pestanas.append("historial_pagos")
-                                        if p_carga: nuevas_pestanas.append("carga")
-                                        if p_aux:   nuevas_pestanas.append("auxiliares")
-                                        if p_gastos:nuevas_pestanas.append("gastos")
-                                        for p in nuevas_pestanas:
-                                            cur_save.execute(
-                                                "INSERT INTO permisos_usuario (username, empresa_id, pestana) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
-                                                (user_seleccionado, empresa_id_save, p)
-                                            )
-                            st.success(f"Permisos de '{user_seleccionado}' actualizados.")
+                                # Asegurar existencia de la tabla
+                                cursor_emp.execute('''CREATE TABLE IF NOT EXISTS permisos_usuario 
+                                                    (username TEXT, pestana TEXT, PRIMARY KEY(username, pestana))''')
+                                    
+                                cursor_emp.execute("DELETE FROM permisos_usuario WHERE username = %s", (user_seleccionado,))
+                                    
+                                nuevas_pestanas = []
+                                if p_dash: nuevas_pestanas.append("dashboard")
+                                if p_plan: nuevas_pestanas.append("planilla")
+                                if p_pagos: nuevas_pestanas.append("pagos")
+                                if p_hist: nuevas_pestanas.append("historial_pagos")
+                                if p_carga: nuevas_pestanas.append("carga")
+                                if p_aux: nuevas_pestanas.append("auxiliares")
+                                if p_gastos: nuevas_pestanas.append("gastos")
+                                    
+                                for p in nuevas_pestanas:
+                                    cursor_emp.execute("INSERT INTO permisos_usuario (username, empresa_id, pestana) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING", (user_seleccionado, st.session_state.get("empresa_id", 0), p))
+                                    
+                                conn_emp.commit()
+                                conn_emp.close()
+                                st.success(f"Permisos de '{user_seleccionado}' actualizados. Se ha forzado la creación de la tabla de permisos.")
+                                
                         except Exception as e:
                             st.error(f"Error al sincronizar: {e}")
                         finally:
-                            st.rerun()
+                            conn_central.close()
+                            st.rerun() # FORZAMOS EL REFRESH PARA VER LOS CAMBIOS
             else:
                 st.info("No se encontraron usuarios activos en este entorno empresarial.")
     
@@ -3390,8 +3386,8 @@ if tab_superadmin:
                     
                 # MAPEO ACTUALIZADO: Sin 'SERVICIOS PACTADOS'
                 MAPEO_CONTRATOS = {
-                    "ALIAS PROPIEDAD": "alias_propiedad",
-                    "DNI INQUILINO": "dni_inquilino",
+                    "ALIAS PROPIEDAD": "propiedad_id",
+                    "DNI INQUILINO": "inquilino_id",
                     "ESTADO": "estado",
                     "INICIO CONTRATO": "inicio_contrato",
                     "FIN CONTRATO": "fin_contrato",
@@ -3421,20 +3417,27 @@ if tab_superadmin:
                 }
     
                 conn_central = conectar_db_central()
-                df_empresas = pd.read_sql_query("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
+                df_empresas = pd.read_sql_query("SELECT nombre_empresa, archivo_db FROM usuarios_central", conn_central)
                 conn_central.close()
                     
-                dict_bases = {}
+                nombre_db_central = st.secrets["database"]["archivo_central"]
+                dict_bases = {"Sistema Central (Usuarios y Enrutamiento)": nombre_db_central}
+                    
                 for _, r in df_empresas.iterrows():
                     if r['archivo_db']: 
                         dict_bases[f"Empresa: {r['nombre_empresa']} ({r['archivo_db']})"] = r['archivo_db']
                         
-                base_seleccionada = st.selectbox("1️⃣ Seleccione la Empresa a operar:", options=list(dict_bases.keys()))
+                base_seleccionada = st.selectbox("1️⃣ Seleccione la Base de Datos a operar:", options=list(dict_bases.keys()))
                 db_file_target = dict_bases[base_seleccionada]
-                _empresa_id_csv = _get_empresa_id(db_file_target)
                     
-                TABLAS_DISPONIBLES_PG = ["propiedades", "inquilinos", "contratos", "pagos_historial", "gastos_propiedades", "permisos_usuario"]
-                tablas_disponibles = TABLAS_DISPONIBLES_PG
+                try:
+                    conn_target = conectar_db()
+                    cursor_target = conn_target.cursor()
+                    tablas_disponibles = [row[0] for row in cursor_target.fetchall()]
+                    conn_target.close()
+                except Exception as e:
+                    tablas_disponibles = []
+                    st.error(f"Error de acceso en el archivo seleccionado: {e}")
                         
                 if tablas_disponibles:
                     tabla_seleccionada = st.selectbox("2️⃣ Seleccione la Tabla destino:", options=tablas_disponibles)
@@ -3479,17 +3482,14 @@ if tab_superadmin:
                                         c.ooss AS "AGUA BASE",
                                         c.cochera AS "COCHERA BASE"
                                     FROM contratos c
-                                    JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
-                                    JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
-                                    WHERE c.empresa_id = %(eid)s
+                                    JOIN propiedades p ON c.propiedad_id = p.id
+                                    JOIN inquilinos i ON c.inquilino_id = i.id
                                     ORDER BY c.codigo DESC
                                 '''
-                                df_export = pd.read_sql_query(query, conn_target, params={"eid": _empresa_id_csv})
                             else:
-                                df_export = pd.read_sql_query(
-                                    f"SELECT * FROM {tabla_seleccionada} WHERE empresa_id = %(eid)s",
-                                    conn_target, params={"eid": _empresa_id_csv}
-                                )
+                                query = f"SELECT * FROM [{tabla_seleccionada}]"
+    
+                            df_export = pd.read_sql_query(query, conn_target)
                             conn_target.close()
                                 
                             if tabla_seleccionada != "contratos":
@@ -3560,75 +3560,95 @@ if tab_superadmin:
                                         st.error("❌ El CSV debe incluir obligatoriamente las columnas 'ALIAS PROPIEDAD' y 'DNI INQUILINO'.")
                                         st.info(f"Columnas detectadas en tu archivo: {columnas_csv}")
                                     else:
+                                        conn = conectar_db()
+                                        cursor = conn.cursor()
+                                            
                                         contratos_listos_para_db = []
                                         errores_relacion = []
                                             
                                         st.info("🔄 Procesando archivo inverso de contratos...")
-
-                                        with _pg_conn() as conn_cont:
-                                            with conn_cont.cursor() as cursor:
-                                                for index, fila in df.iterrows():
-                                                    alias_prop_limpio = str(fila['ALIAS PROPIEDAD']).strip() if fila['ALIAS PROPIEDAD'] is not None else ""
-                                                    if alias_prop_limpio == "":
-                                                        errores_relacion.append(f"Fila {index+2}: El campo 'ALIAS PROPIEDAD' está vacío.")
-                                                        continue
-                                                    if fila['DNI INQUILINO'] is None or str(fila['DNI INQUILINO']).strip() == "":
-                                                        errores_relacion.append(f"Fila {index+2}: El campo 'DNI INQUILINO' está vacío.")
-                                                        continue
-        
-                                                    # Verificar que existan en Supabase
-                                                    cursor.execute(
-                                                        "SELECT 1 FROM propiedades WHERE TRIM(alias_propiedad) = %s AND empresa_id = %s",
-                                                        (alias_prop_limpio, _empresa_id_csv)
-                                                    )
-                                                    if not cursor.fetchone():
-                                                        errores_relacion.append(f"Fila {index+2}: La propiedad '{alias_prop_limpio}' no existe.")
-                                                        continue
-                                                    
-                                                    dni_limpio = str(fila['DNI INQUILINO']).split('.')[0].strip()
-                                                    cursor.execute(
-                                                        "SELECT 1 FROM inquilinos WHERE dni = %s AND empresa_id = %s",
-                                                        (dni_limpio, _empresa_id_csv)
-                                                    )
-                                                    if not cursor.fetchone():
-                                                        errores_relacion.append(f"Fila {index+2}: El inquilino con DNI '{dni_limpio}' no existe.")
-                                                        continue
-                                                    
-                                                    registro_fila = {}
-                                                    registro_fila['alias_propiedad'] = alias_prop_limpio
-                                                    registro_fila['dni_inquilino'] = dni_limpio
-                                                    registro_fila['empresa_id'] = _empresa_id_csv
-                                                    
-                                                    for alias_sql, col_db in MAPEO_CONTRATOS.items():
-                                                        if col_db not in ['alias_propiedad', 'dni_inquilino']:
-                                                            valor_celda = fila[alias_sql] if alias_sql in df.columns else None
-                                                            if col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
-                                                                if valor_celda is not None and str(valor_celda).strip() != "":
-                                                                    try:
-                                                                        valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
-                                                                    except Exception:
-                                                                        valor_celda = str(valor_celda).strip()
-                                                                else:
-                                                                    valor_celda = None
-                                                            elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
-                                                                try:
-                                                                    valor_celda = int(float(str(valor_celda).split('.')[0]))
-                                                                except Exception:
-                                                                    valor_celda = 0
-                                                            elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
-                                                                try:
-                                                                    valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
-                                                                except Exception:
-                                                                    valor_celda = 0.0
-                                                            elif valor_celda is not None:
+                                            
+                                        for index, fila in df.iterrows():
+                                            # 🌟 LIMPIEZA CLAVE: Sanitizamos el alias de la propiedad al inicio del bucle
+                                            alias_prop_limpio = str(fila['ALIAS PROPIEDAD']).strip() if fila['ALIAS PROPIEDAD'] is not None else ""
+                                                
+                                            if alias_prop_limpio == "":
+                                                errores_relacion.append(f"Fila {index+2}: El campo 'ALIAS PROPIEDAD' está vacío.")
+                                                continue
+                                            if fila['DNI INQUILINO'] is None or str(fila['DNI INQUILINO']).strip() == "":
+                                                errores_relacion.append(f"Fila {index+2}: El campo 'DNI INQUILINO' está vacío.")
+                                                continue
+    
+                                            # Usamos la variable limpia aquí
+                                            cursor.execute("SELECT id FROM propiedades WHERE TRIM(alias_propiedad) = %s", (alias_prop_limpio,))
+                                            res_prop = cursor.fetchone()
+                                                
+                                            # REGLA 1 INVERSA: Sanitizar DNI para buscar coincidencias exactas en la tabla de inquilinos
+                                            dni_limpio = str(fila['DNI INQUILINO']).split('.')[0].strip()
+                                            cursor.execute("SELECT id FROM inquilinos WHERE dni = %s", (dni_limpio,))
+                                            res_inq = cursor.fetchone()
+                                                
+                                            if not res_prop:
+                                                errores_relacion.append(f"Fila {index+2}: La propiedad con alias '{alias_prop_limpio}' no existe.")
+                                                continue
+                                            if not res_inq:
+                                                errores_relacion.append(f"Fila {index+2}: El inquilino con DNI '{dni_limpio}' no existe.")
+                                                continue
+                                                
+                                            registro_fila = {}
+                                            registro_fila['propiedad_id'] = res_prop[0]
+                                            registro_fila['inquilino_id'] = res_inq[0]
+                                                
+                                            # Extraemos y sanitizamos todos los campos del mapeo
+                                            for alias_sql, col_db in MAPEO_CONTRATOS.items():
+                                                if col_db not in ['propiedad_id', 'inquilino_id']:
+                                                    valor_celda = fila[alias_sql] if alias_sql in df.columns else None
+                                                        
+                                                    # Tratar campos especiales (Fechas)
+                                                    if col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
+                                                        if valor_celda is not None and str(valor_celda).strip() != "":
+                                                            try:
+                                                                # Convierte DD/MM/AAAA a YYYY-MM-DD para SQLite
+                                                                valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
+                                                            except Exception:
                                                                 valor_celda = str(valor_celda).strip()
-                                                            registro_fila[col_db] = valor_celda
+                                                        else:
+                                                            valor_celda = None
+                                                                
+                                                    # Tratar campos numéricos enteros
+                                                    elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
+                                                        try:
+                                                            valor_celda = int(float(str(valor_celda).split('.')[0]))
+                                                        except Exception:
+                                                            valor_celda = 0
+                                                                
+                                                    # Tratar campos flotantes / monetarios
+                                                    elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
+                                                        try:
+                                                            valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
+                                                        except Exception:
+                                                            valor_celda = 0.0
+                                                        
+                                                    # Textos estándar
+                                                    elif valor_celda is not None:
+                                                        valor_celda = str(valor_celda).strip()
+    
+                                                    registro_fila[col_db] = valor_celda
+                                                
+                                            # Validamos estrictamente que la fecha de inicio obligatoria no haya quedado nula
+                                            if registro_fila.get('inicio_contrato') is None:
+                                                errores_relacion.append(f"Fila {index+2}: Error de formato o ausencia en la fecha 'INICIO CONTRATO'.")
+                                                continue
                                                     
-                                                    if registro_fila.get('inicio_contrato') is None:
-                                                        errores_relacion.append(f"Fila {index+2}: Error de formato o ausencia en la fecha 'INICIO CONTRATO'.")
-                                                        continue
-                                                    contratos_listos_para_db.append(registro_fila)
-
+                                            contratos_listos_para_db.append(tuple(registro_fila[c] for c in MAPEO_CONTRATOS.values()))
+                                            
+                                        # --- REEMPLÁZALO POR ESTO ---
+                                        # Cerramos CUALQUIER cursor o conexión residual del análisis previo para liberar el archivo
+                                        try:
+                                            conn.close()
+                                        except:
+                                            pass
+    
                                         if errores_relacion:
                                             st.error("❌ Inconsistencias de datos detectadas:")
                                             for err in errores_relacion[:12]:
@@ -3636,61 +3656,80 @@ if tab_superadmin:
                                             if len(errores_relacion) > 12:
                                                 st.write(f"...y otros {len(errores_relacion)-12} errores.")
                                         else:
+                                            columnas_db = list(MAPEO_CONTRATOS.values())
+                                            signos_pregunta = ", ".join(["%s"] * len(columnas_db))
+                                            query = f"INSERT INTO contratos ({', '.join(columnas_db)}) VALUES ({signos_pregunta})"
+                                                
+                                            # Abrimos un bloque 'with' exclusivo para la escritura, asegurando el cierre inmediato
                                             try:
-                                                cols_cont = ["empresa_id", "alias_propiedad", "dni_inquilino"] + [v for v in MAPEO_CONTRATOS.values() if v not in ("alias_propiedad", "dni_inquilino")]
-                                                placeholders_cont = ", ".join(["%s"] * len(cols_cont))
-                                                query_cont = f"INSERT INTO contratos ({', '.join(cols_cont)}) VALUES ({placeholders_cont})"
-                                                datos_cont = [tuple(r.get(c) for c in cols_cont) for r in contratos_listos_para_db]
-                                                with _pg_conn() as conn_esc:
-                                                    with conn_esc.cursor() as cur_esc:
-                                                        cur_esc.executemany(query_cont, datos_cont)
-                                                st.success(f"¡Éxito! Se inyectaron {len(contratos_listos_para_db)} contratos.")
+                                                with conectar_db() as conn_escritura:
+                                                    cursor_escritura = conn_escritura.cursor()
+                                                    cursor_escritura.executemany(query, contratos_listos_para_db)
+                                                    conn_escritura.commit()
+                                                    
+                                                # Una vez fuera del 'with', la base de datos está 100% liberada y cerrada. Ya podemos usar rerun.
+                                                st.success(f"¡Éxito! El proceso inverso inyectó {len(contratos_listos_para_db)} contratos formateados correctamente.")
                                                 st.balloons()
                                                 st.rerun()
-                                            except Exception as op_err:
-                                                st.error(f"❌ Error al insertar contratos en Postgres: {op_err}")
+                                                    
+                                            except psycopg2.Error as op_err:
+                                                if "locked" in str(op_err).lower():
+                                                    st.error("⚠️ La base de datos sigue ocupada por otra operación de lectura en segundo plano. Por favor, intenta presionar el botón de nuevo en unos segundos.")
+                                                else:
+                                                    st.error(f"❌ Error operativo en SQLite: {op_err}")
                                                 
                                 # --- LÓGICA ESTÁNDAR PARA OTRAS TABLAS ---
                                 else:
                                     esquema_esperado = ESQUEMAS_VALIDOS.get(tabla_seleccionada, [])
                                     if columnas_csv == esquema_esperado:
                                             
+                                        # 🛠️ AGREGA ESTO AQUÍ: Limpieza para la tabla de propiedades
                                         if tabla_seleccionada == "propiedades" and "alias_propiedad" in df.columns:
                                             df["alias_propiedad"] = df["alias_propiedad"].astype(str).str.strip()
     
+                                        # 🛠️ TRATAMIENTO ESPECÍFICO PARA COLUMNA "TELEFONO" EN INQUILINOS (Ya existente en tu código)
                                         if tabla_seleccionada == "inquilinos" and "telefono" in df.columns:
                                             df["telefono"] = df["telefono"].astype(str).str.split('.').str[0]
                                             df["telefono"] = df["telefono"].replace({"nan": None, "None": None, "": None})
     
-                                        with _pg_conn() as conn_imp:
-                                            with conn_imp.cursor() as cur_imp:
-                                                columna_clave = 'alias_propiedad' if tabla_seleccionada == 'propiedades' else 'dni'
-                                                cur_imp.execute(
-                                                    f"SELECT {columna_clave} FROM {tabla_seleccionada} WHERE empresa_id = %s",
-                                                    (_empresa_id_csv,)
-                                                )
-                                                existentes = {str(r[columna_clave]) for r in cur_imp.fetchall()}
-                                                df_nuevos = df[~df[columna_clave].astype(str).isin(existentes)]
-                                                duplicados_omitidos = len(df) - len(df_nuevos)
-
-                                                if not df_nuevos.empty:
-                                                    cols_pg = ", ".join(["empresa_id"] + list(esquema_esperado))
-                                                    placeholders = ", ".join(["%s"] * (1 + len(esquema_esperado)))
-                                                    query_imp = f"INSERT INTO {tabla_seleccionada} ({cols_pg}) VALUES ({placeholders}) ON CONFLICT DO NOTHING"
-                                                    datos_a_inyectar = [
-                                                        tuple([_empresa_id_csv] + [reg.get(c) for c in esquema_esperado])
-                                                        for reg in df_nuevos.to_dict(orient='records')
-                                                    ]
-                                                    cur_imp.executemany(query_imp, datos_a_inyectar)
-
+                                        conn = conectar_db()
+                                        cursor = conn.cursor()
+                                            
+                                        cursor.execute(f"SELECT * FROM [{tabla_seleccionada}]")
+                                        columnas_db_actuales = [description[0] for description in cursor.description]
+                                        df_existente = pd.DataFrame(cursor.fetchall(), columns=columnas_db_actuales)
+                                            
+                                        columna_clave = 'alias_propiedad' if tabla_seleccionada == 'propiedades' else 'dni'
+                                            
+                                        if not df_existente.empty:
+                                            # Aseguramos que la comparación de claves ignore diferencias por tipos de datos
+                                            existentes = set(df_existente[columna_clave].astype(str).unique())
+                                            df_nuevos = df[~df[columna_clave].astype(str).isin(existentes)]
+                                            duplicados_omitidos = len(df) - len(df_nuevos)
+                                        else:
+                                            df_nuevos = df
+                                            duplicados_omitidos = 0
+                                            
                                         if not df_nuevos.empty:
+                                            columnas_sql = ", ".join([f"[{c}]" for c in esquema_esperado])
+                                            signos_pregunta = ", ".join(["%s"] * len(esquema_esperado))
+                                            query = f"INSERT INTO [{tabla_seleccionada}] ({columnas_sql}) VALUES ({signos_pregunta})"
+                                                
+                                            # Convertimos el DataFrame a un diccionario de registros para asegurar que los valores 'None' se respeten de forma nativa
+                                            datos_a_inyectar = [tuple(reg[c] for c in esquema_esperado) for reg in df_nuevos.to_dict(orient='records')]
+                                                
+                                            cursor.executemany(query, datos_a_inyectar)
+                                            conn.commit()
+                                                
                                             st.success(f"¡Se han importado {len(df_nuevos)} registros en '{tabla_seleccionada}'!")
                                             if duplicados_omitidos > 0:
                                                 st.warning(f"⚠️ Se omitieron {duplicados_omitidos} registros duplicados por `{columna_clave}`.")
                                             st.balloons()
+                                            conn.close()
                                             st.rerun()
                                         else:
                                             st.warning(f"⚠️ Todos los registros del CSV ya existen en la tabla '{tabla_seleccionada}'.")
+                                            conn.close()
                                     else:
                                         st.error("❌ El esquema de columnas del CSV no coincide con los campos requeridos.")
                                         st.info(f"Campos requeridos por el sistema:\n{esquema_esperado}")
@@ -3734,17 +3773,35 @@ if tab_superadmin:
                             ruta_db_a_borrar = dict_empresas_del[empresa_a_eliminar]
                                 
                             try:
-                                with _pg_conn() as conn_del_emp:
-                                    with conn_del_emp.cursor() as cur_del_emp:
-                                        eid_borrar = _get_empresa_id(ruta_db_a_borrar)
-                                        if eid_borrar:
-                                            for tbl in ["pagos_historial", "gastos_propiedades", "permisos_usuario",
-                                                        "contratos", "inquilinos", "propiedades"]:
-                                                cur_del_emp.execute(f"DELETE FROM {tbl} WHERE empresa_id = %s", (eid_borrar,))
-                                        cur_del_emp.execute("DELETE FROM usuarios_central WHERE nombre_empresa = %s", (empresa_a_eliminar,))
-                                        cur_del_emp.execute("DELETE FROM empresas WHERE archivo_db = %s", (ruta_db_a_borrar,))
+                                # A. ELIMINACIÓN FÍSICA DEL ARCHIVO Y SU CARPETA OFUSCADA
+                                if ruta_db_a_borrar:
+                                    carpeta_ofuscada = os.path.dirname(ruta_db_a_borrar)
+                                        
+                                    if os.path.exists(ruta_db_a_borrar):
+                                        os.remove(ruta_db_a_borrar)
+                                        st.info("🗑️ Archivo de base de datos `.db` removido del almacenamiento.")
+                                        
+                                    if carpeta_ofuscada and os.path.exists(carpeta_ofuscada):
+                                        if not os.listdir(carpeta_ofuscada):
+                                            os.rmdir(carpeta_ofuscada)
+                                            st.info("📁 Carpeta ofuscada eliminada de forma física.")
+                                        else:
+                                            import shutil
+                                            shutil.rmtree(carpeta_ofuscada)
+                                            st.info("📁 Directorio y contenidos residuales eliminados por completo.")
                                     
-                                st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todos sus datos han sido eliminados de Supabase.")
+                                # B. ELIMINACIÓN LÓGICA EN LA BASE CENTRAL
+                                conn_central = conectar_db_central()
+                                cursor_central = conn_central.cursor()
+                                    
+                                cursor_central.execute(
+                                    "DELETE FROM usuarios_central WHERE nombre_empresa = %s", 
+                                    (empresa_a_eliminar,)
+                                )
+                                conn_central.commit()
+                                conn_central.close()
+                                    
+                                st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todo su entorno han sido destruidos con éxito.")
                                 st.balloons()
                                 st.rerun()
                                     
@@ -3790,18 +3847,15 @@ if tab_superadmin:
                         key="sb_tabla_operativa_del_multi"
                     )
                         
-                    # --- CONEXIÓN DINÁMICA A LA EMPRESA SELECCIONADA EN POSTGRES ---
+                    # --- CONEXIÓN DINÁMICA A LA BASE DE DATOS DE LA EMPRESA SELECCIONADA ---
                     TABLAS_PERMITIDAS = {"contratos", "inquilinos", "propiedades", "pagos_historial"}
                     if tabla_seleccionada not in TABLAS_PERMITIDAS:
                         st.error(f"❌ Tabla '{tabla_seleccionada}' no permitida.")
                     else:
                         try:
-                            _eid_del = _get_empresa_id(ruta_db_objetivo)
+                            # Lectura de datos en conexión propia (separada del borrado)
                             conn_lect = conectar_db()
-                            df_completo = pd.read_sql_query(
-                                f"SELECT * FROM {tabla_seleccionada} WHERE empresa_id = %(eid)s",
-                                conn_lect, params={"eid": _eid_del}
-                            )
+                            df_completo = pd.read_sql_query(f"SELECT * FROM {tabla_seleccionada}", conn_lect)
                             conn_lect.close()
 
                             if df_completo.empty:
@@ -3818,6 +3872,7 @@ if tab_superadmin:
                                 if id_col_name:
                                     st.info("💡 **Tip:** Hacé clic en la casilla del encabezado para seleccionar todo.")
 
+                                    # Tabla interactiva con checkboxes
                                     tabla_interactiva = st.dataframe(
                                         df_completo,
                                         use_container_width=True,
@@ -3852,13 +3907,15 @@ if tab_superadmin:
                                         if btn_eliminar_bloque:
                                             if confirmacion_palabra == frase_esperada:
                                                 try:
-                                                    placeholders_del = ",".join(["%s"] * cant_filas)
-                                                    with _pg_conn() as conn_del:
-                                                        with conn_del.cursor() as cursor_del:
-                                                            cursor_del.execute(
-                                                                f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholders_del})",
-                                                                tuple(ids_a_borrar)
-                                                            )
+                                                    conn_del = conectar_db()
+                                                    cursor_del = conn_del.cursor()
+                                                    placeholder = ",".join(["%s"] * cant_filas)
+                                                    cursor_del.execute(
+                                                        f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder})",
+                                                        tuple(ids_a_borrar)
+                                                    )
+                                                    conn_del.commit()
+                                                    conn_del.close()
                                                     st.success(f"✅ {cant_filas} registros eliminados de '{tabla_seleccionada.upper()}' — '{empresa_datos_seleccionada}'.")
                                                     st.balloons()
                                                     st.rerun()
@@ -3967,7 +4024,7 @@ if tab_gastos:
                                     """INSERT INTO gastos_propiedades
                                        (propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones, cotizacion_usd, monto_usd)
                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                                    (_prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
+                                    (st.session_state.get('empresa_id',0), _prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
                                      _descripcion.strip(), _monto, _proveedor.strip(),
                                      _comprobante.strip(), _pagado_por, _observaciones.strip(),
                                      _tc_g, _monto_usd_g)
@@ -3982,8 +4039,9 @@ if tab_gastos:
         # ── SUBPESTAÑA 2: HISTORIAL ─────────────────────────────────────
         with subtab_historial:
             conn = conectar_db()
+            _eid_g = st.session_state.get("empresa_id", 0)
             _where_g = "AND p.propietario = %s" if _pf_g_activo else ""
-            _params_g = (_pf_g,) if _pf_g_activo else ()
+            _params_g = (_eid_g, _pf_g) if _pf_g_activo else (_eid_g,)
             _df_gastos = pd.read_sql_query(f"""
                 SELECT gp.id as [ID], p.alias_propiedad as [PROPIEDAD], p.propietario as [PROPIETARIO],
                        gp.fecha as [FECHA], gp.categoria as [CATEGORÍA], gp.descripcion as [DESCRIPCIÓN],
@@ -3994,7 +4052,7 @@ if tab_gastos:
                        gp.comprobante as [COMPROBANTE], gp.pagado_por as [PAGADO POR],
                        gp.observaciones as [OBSERVACIONES]
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
+                JOIN propiedades p ON gp.propiedad_id = p.id
                 WHERE 1=1 {_where_g}
                 ORDER BY gp.fecha DESC, gp.id DESC
             """, conn, params=_params_g)
@@ -4052,8 +4110,9 @@ if tab_gastos:
             conn = conectar_db()
 
             # ── Cargar ingresos desde pagos_historial ──
+            _eid_m = st.session_state.get("empresa_id", 0)
             _where_m = "AND p.propietario = %s" if _pf_g_activo else ""
-            _params_m = (_pf_g,) if _pf_g_activo else ()
+            _params_m = (_eid_m, _pf_g) if _pf_g_activo else (_eid_m,)
 
             _df_ingresos_raw = pd.read_sql_query(f"""
                 SELECT
@@ -4074,7 +4133,7 @@ if tab_gastos:
                     COALESCE(ph.monto_imp_inmobiliario_usd, 0)                     AS imp_inmobiliario_usd
                 FROM pagos_historial ph
                 JOIN contratos c  ON ph.contrato_id = c.codigo
-                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+                JOIN propiedades p ON c.propiedad_id = p.id
                 WHERE 1=1 {_where_m}
                 ORDER BY ph.periodo
             """, conn, params=_params_m)
@@ -4119,7 +4178,7 @@ if tab_gastos:
                     SUM(gp.monto)                             AS total_gasto,
                     SUM(COALESCE(gp.monto_usd, 0))           AS total_gasto_usd
                 FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
+                JOIN propiedades p ON gp.propiedad_id = p.id
                 WHERE 1=1 {_where_m}
                 GROUP BY p.alias_propiedad, p.propietario, strftime('%Y-%m', gp.fecha)
                 ORDER BY periodo
