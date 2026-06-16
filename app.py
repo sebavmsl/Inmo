@@ -49,7 +49,7 @@ def _get_pg_dsn():
         # Si el usuario es solo "postgres" (sin el ref), lo completamos
         if '.' not in user:
             user = f"postgres.{project_ref}"
-        dsn = f"postgresql://{user}:{password}@aws-0-sa-east-1.pooler.supabase.com:6543/{dbname}"
+        dsn = f"postgresql://{user}:{password}@aws-1-sa-east-1.pooler.supabase.com:6543/{dbname}"
         logging.info(f"URL convertida al Transaction Pooler para proyecto {project_ref}.")
 
     # Fallback: si sigue siendo puerto 5432, cambiar a 6543
