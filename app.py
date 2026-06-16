@@ -1011,7 +1011,18 @@ if tab_dashboard:
         df_dash = pd.read_sql_query(query_dash, conn, params=_params_pf)
         _pagos_q = f"SELECT ph.monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
         _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
-        df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
+        try:
+            df_pagos_totales = pd.read_sql_query(_pagos_q, conn, params=_params_pagos)
+        except Exception as _qe2:
+            st.error(f"❌ Error en _pagos_q: `{_qe2}`")
+            st.code(_pagos_q)
+            try:
+                _cols_ph = pd.read_sql_query("SELECT * FROM pagos_historial LIMIT 1", conn)
+                st.write("Columnas de pagos_historial:", list(_cols_ph.columns))
+            except Exception as _ce:
+                st.write(f"No se pudo leer pagos_historial: {_ce}")
+            conn.close()
+            st.stop()
         conn.close()
         
         total_activos = len(df_dash)
