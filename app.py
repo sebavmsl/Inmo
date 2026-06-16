@@ -864,7 +864,7 @@ except RuntimeError as _ce:
 # Barra superior con información del operador, Empresa activa automática y botón de Salida
 top_col1, top_col2 = st.columns([7, 3])
 with top_col1:
-    st.title("🏢 Gestión de Alquileres")
+    st.title("🏢 Sistema Avanzado de Gestión de Alquileres")
 with top_col2:
     st.markdown(
         f"<p style='text-align: right; margin-bottom: 5px;'>"
