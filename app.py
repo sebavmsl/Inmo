@@ -348,6 +348,7 @@ st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 ESQUEMAS_VALIDOS = {
     "propiedades": ['alias_propiedad', 'calle', 'numero', 'departamento', 'propietario', 'ciudad', 'provincia', 'tipo', 'nis', 'cuenta_gas', 'finca', 'cuenta_ooss', 'nro_padron'],
     "inquilinos": ['apellidos', 'nombres', 'dni', 'telefono', 'email'],
+    "gastos_propiedades": ['propiedad_id', 'fecha', 'categoria', 'descripcion', 'monto', 'proveedor', 'comprobante', 'pagado_por', 'observaciones', 'tipo_gasto', 'cobrado', 'periodo_cobrado'],
     "contratos": [
         'alias_propiedad', 'dni_inquilino', 'estado', 'inicio_contrato', 'fin_contrato',
         'calc_duracion', 'act_contrato', 'indice', 'monto_inicial', 'alquiler',
@@ -542,6 +543,24 @@ def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
         edit_calle = st.text_input("Calle / Av:", value=datos_prop["calle"] or "")
         edit_numero = st.text_input("Número:", value=datos_prop["numero"] or "")
         edit_depto = st.text_input("Departamento / Piso / Bloque (Opcional):", value=datos_prop["departamento"] or "")
+        # Cargar grupos existentes para el selectbox
+        _eid_edit_grp = st.session_state.get("empresa_id", 0)
+        try:
+            with _pg_conn() as _conn_eg:
+                with _conn_eg.cursor() as _cur_eg:
+                    _cur_eg.execute(
+                        "SELECT DISTINCT grupo FROM propiedades WHERE empresa_id = %s AND grupo IS NOT NULL AND grupo != \'\' ORDER BY grupo",
+                        (_eid_edit_grp,)
+                    )
+                    _grupos_edit = [r["grupo"] for r in _cur_eg.fetchall()]
+        except Exception:
+            _grupos_edit = []
+        
+        _grupo_actual = datos_prop.get("grupo", "") or ""
+        _opciones_grupo = ["— Sin grupo —"] + _grupos_edit
+        _idx_grupo = _opciones_grupo.index(_grupo_actual) if _grupo_actual in _opciones_grupo else 0
+        edit_grupo_sel = st.selectbox("🏢 Grupo / Edificio:", options=_opciones_grupo, index=_idx_grupo)
+        edit_grupo = "" if edit_grupo_sel == "— Sin grupo —" else edit_grupo_sel
         
         if st.form_submit_button("💾 Guardar Cambios Propiedad", type="primary"):
             if not edit_alias or not edit_calle or not edit_numero:
@@ -552,9 +571,9 @@ def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
                 try:
                     cursor.execute('''
                         UPDATE propiedades 
-                        SET alias_propiedad = %s, calle = %s, numero = %s, departamento = %s
+                        SET alias_propiedad = %s, calle = %s, numero = %s, departamento = %s, grupo = %s
                         WHERE id = %s
-                    ''', (edit_alias, edit_calle, edit_numero, edit_depto, id_prop_edit))
+                    ''', (edit_alias, edit_calle, edit_numero, edit_depto, edit_grupo.strip() or None, id_prop_edit))
                     
                     conn.commit()
                     st.success(f"✅ Propiedad actualizada correctamente!")
@@ -1207,12 +1226,39 @@ if tab_dashboard:
             opciones_meses = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
             _act_raw = row['act_contrato']
             frecuencia = _act_raw if isinstance(_act_raw, int) else opciones_meses.get(str(_act_raw), 6)
-            mes_vivo = row['mes_contrato'] or 1
-            if ((mes_vivo - 1) % frecuencia) == 0:
-                actualizan_este_mes += 1
-                _meses_a_txt = {1:'Mensual',2:'Bimensual',3:'Trimestral',4:'Cuatrimestral',6:'Semestral',12:'Anual',24:'Bianual'}
-                _act_lbl = _meses_a_txt.get(row['act_contrato'], str(row['act_contrato']))
-                lista_alertas_actualizacion.append(f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {_act_lbl}.")
+            _meses_a_txt = {1:'Mensual',2:'Bimensual',3:'Trimestral',4:'Cuatrimestral',6:'Semestral',12:'Anual',24:'Bianual'}
+            _act_lbl = _meses_a_txt.get(frecuencia, str(frecuencia))
+
+            # Usar prox_actualizacion para determinar si corresponde este mes o el próximo
+            try:
+                _prox_str = str(row.get('prox_actualizacion', '') or '').strip()
+                if _prox_str:
+                    try: _prox_dt = datetime.strptime(_prox_str, "%Y-%m-%d").date()
+                    except: _prox_dt = datetime.strptime(_prox_str, "%d/%m/%Y").date()
+                    
+                    _mes_actual = fecha_hoy.replace(day=1)
+                    _mes_proximo = (_mes_actual + dateutil.relativedelta.relativedelta(months=1))
+                    _prox_mes = _prox_dt.replace(day=1)
+                    
+                    if _prox_mes == _mes_actual:
+                        actualizan_este_mes += 1
+                        lista_alertas_actualizacion.append(
+                            f"📈 **ESTE MES** — Ajustar alquiler de **{row['inquilino']}** ({row['alias_propiedad']}). Frecuencia: {_act_lbl}. Próx. actualización: {_prox_str}."
+                        )
+                    elif _prox_mes == _mes_proximo:
+                        lista_alertas_actualizacion.append(
+                            f"📅 **MES PRÓXIMO** — Ajustar alquiler de **{row['inquilino']}** ({row['alias_propiedad']}). Frecuencia: {_act_lbl}. Próx. actualización: {_prox_str}."
+                        )
+                else:
+                    # Fallback: usar mes_vivo % frecuencia
+                    mes_vivo = row['mes_contrato'] or 1
+                    if ((mes_vivo - 1) % frecuencia) == 0 and mes_vivo > 1:
+                        actualizan_este_mes += 1
+                        lista_alertas_actualizacion.append(
+                            f"📈 Corresponde ajustar alquiler a **{row['inquilino']}** ({row['alias_propiedad']}). Período: {_act_lbl}."
+                        )
+            except Exception:
+                pass
 
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
         kpi1.metric("Contratos Activos", total_activos)
@@ -1235,9 +1281,12 @@ if tab_dashboard:
             st.markdown("##### 📈 Alertas de Actualización de Valores (Índices)")
             if lista_alertas_actualizacion:
                 for alerta in lista_alertas_actualizacion:
-                    st.info(alerta)
+                    if "ESTE MES" in alerta:
+                        st.warning(alerta)
+                    else:
+                        st.info(alerta)
             else:
-                st.success("✅ Todos los contratos se encuentran en períodos normales de facturación.")
+                st.success("✅ No hay actualizaciones de alquiler este mes ni el próximo.")
 
 
 
@@ -1819,6 +1868,26 @@ if tab_pagos:
                 st.session_state[_periodo_key] = mes_periodo_texto
                 st.session_state.pago_impactado = False
                 st.session_state.contrato_impactado_id = None
+
+            # --- GASTOS ORDINARIOS PENDIENTES DE COBRO ---
+            try:
+                with _pg_conn() as _conn_gord:
+                    with _conn_gord.cursor() as _cur_gord:
+                        _cur_gord.execute("""
+                            SELECT SUM(gp.monto) AS total_pendiente, COUNT(*) AS cantidad
+                            FROM gastos_propiedades gp
+                            JOIN propiedades p ON gp.propiedad_id = p.id
+                            WHERE p.alias_propiedad = %s AND gp.empresa_id = %s
+                            AND COALESCE(gp.tipo_gasto, 'Extraordinario') = 'Ordinario'
+                            AND COALESCE(gp.cobrado, FALSE) = FALSE
+                        """, (c_datos.get('propiedad_dir', ''), st.session_state.get('empresa_id', 0)))
+                        _gord_row = _cur_gord.fetchone()
+                if _gord_row and _gord_row['total_pendiente'] and float(_gord_row['total_pendiente']) > 0:
+                    _total_gord = float(_gord_row['total_pendiente'])
+                    _cant_gord = int(_gord_row['cantidad'])
+                    st.warning(f"🏘️ **Gastos ordinarios pendientes:** {_cant_gord} gasto(s) por **\\$ {_total_gord:,.2f}** sin cobrar a este inquilino.")
+            except Exception:
+                pass
 
             # --- VERIFICAR SI YA EXISTE UN PAGO PARA ESTE PERÍODO ---
             with _pg_conn() as _conn_chk:
@@ -3374,7 +3443,7 @@ if tab_auxiliares:
             if st.session_state.get("rol") == "superadmin":
                 st.caption(f"🏢 Trabajando en: **{st.session_state.get('empresa_actual_nombre', '')}**")
                 
-            sub_tab1, sub_tab2 = st.tabs(["👤 Nuevo Inquilino", "🏠 Nueva Propiedad"])
+            sub_tab1, sub_tab2, sub_tab3 = st.tabs(["👤 Nuevo Inquilino", "🏠 Nueva Propiedad", "🏢 Nuevo Edificio/Grupo"])
                 
             with sub_tab1:
                 st.markdown("#### Registrar Nuevo Inquilino")
@@ -3435,6 +3504,20 @@ if tab_auxiliares:
                     cuenta_ooss = col4.text_input("Cuenta Nro (OO.SS):")
                         
                     nro_padron = st.text_input("Nro Padrón:")
+                    # Grupos existentes para el selectbox
+                    _eid_np = st.session_state.get("empresa_id", 0)
+                    try:
+                        with _pg_conn() as _conn_np_g:
+                            with _conn_np_g.cursor() as _cur_np_g:
+                                _cur_np_g.execute(
+                                    "SELECT DISTINCT grupo FROM propiedades WHERE empresa_id = %s AND grupo IS NOT NULL AND grupo != '' ORDER BY grupo",
+                                    (_eid_np,)
+                                )
+                                _grupos_np = [r["grupo"] for r in _cur_np_g.fetchall()]
+                    except Exception:
+                        _grupos_np = []
+                    _grupo_np_sel = st.selectbox("🏢 Grupo / Edificio:", ["— Sin grupo —"] + _grupos_np)
+                    grupo = "" if _grupo_np_sel == "— Sin grupo —" else _grupo_np_sel
                         
                     btn_prop = st.form_submit_button("Guardar Propiedad")
                         
@@ -3447,13 +3530,13 @@ if tab_auxiliares:
                                 cursor = conn.cursor()
                                 cursor.execute('''
                                     INSERT INTO propiedades (empresa_id, alias_propiedad, calle, numero, departamento, propietario, 
-                                                            ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron) 
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                                            ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron, grupo) 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                     ON CONFLICT DO NOTHING
                                 ''', (
                                     _eid_aux,
                                     alias, calle, numero, depto, propietario, ciudad, provincia, tipo,
-                                    nis, cuenta_gas, finca, cuenta_ooss, nro_padron
+                                    nis, cuenta_gas, finca, cuenta_ooss, nro_padron, grupo.strip() or None
                                 ))
                                 conn.commit()
                                 st.success("Propiedad guardada.")
@@ -3463,9 +3546,63 @@ if tab_auxiliares:
                                 st.error(f"Error: {e}")
                             finally:
                                 conn.close()
-    
-    
-    
+
+            with sub_tab3:
+                st.markdown("📝 Crear / Actualizar Grupo de Propiedades")
+                st.caption("Asignás un nombre de grupo a un conjunto de propiedades para usarlo en gastos compartidos.")
+
+                # Cargar propiedades disponibles
+                _eid_grp = st.session_state.get("empresa_id", 0)
+                with _pg_conn() as _conn_grp:
+                    with _conn_grp.cursor() as _cur_grp:
+                        _cur_grp.execute(
+                            "SELECT id, alias_propiedad, COALESCE(grupo, '') AS grupo FROM propiedades WHERE empresa_id = %s ORDER BY alias_propiedad",
+                            (_eid_grp,)
+                        )
+                        _props_grp = _cur_grp.fetchall()
+
+                if not _props_grp:
+                    st.warning("No hay propiedades registradas.")
+                else:
+                    # Mostrar grupos existentes
+                    _grupos_existentes = sorted(set(r["grupo"] for r in _props_grp if r["grupo"]))
+                    if _grupos_existentes:
+                        st.info(f"Grupos existentes: {', '.join(_grupos_existentes)}")
+
+                    with st.form("form_grupo", clear_on_submit=False):
+                        _nombre_grupo = st.text_input("🏢 Nombre del Grupo / Edificio:", placeholder="Ej: Tucumán 150")
+
+                        _opciones_grp = {f"{r['alias_propiedad']} (grupo actual: {r['grupo'] or 'ninguno'})": r['id'] for r in _props_grp}
+                        _props_sel_grp = st.multiselect(
+                            "🏠 Propiedades que forman el grupo:",
+                            options=list(_opciones_grp.keys()),
+                            help="Seleccioná todas las unidades del edificio"
+                        )
+
+                        _btn_grupo = st.form_submit_button("💾 Guardar Grupo", type="primary")
+
+                        if _btn_grupo:
+                            if not _nombre_grupo.strip():
+                                st.error("❌ Ingresá un nombre para el grupo.")
+                            elif len(_props_sel_grp) < 2:
+                                st.error("❌ Seleccioná al menos 2 propiedades.")
+                            else:
+                                _ids_grp = [_opciones_grp[l] for l in _props_sel_grp]
+                                try:
+                                    with _pg_conn() as _conn_grp_upd:
+                                        with _conn_grp_upd.cursor() as _cur_grp_upd:
+                                            for _pid in _ids_grp:
+                                                _cur_grp_upd.execute(
+                                                    "UPDATE propiedades SET grupo = %s WHERE id = %s AND empresa_id = %s",
+                                                    (_nombre_grupo.strip(), _pid, _eid_grp)
+                                                )
+                                    st.success(f"✅ Grupo '{_nombre_grupo.strip()}' guardado con {len(_ids_grp)} propiedades.")
+                                    st.rerun()
+                                except Exception as _eg:
+                                    st.error(f"Error: {_eg}")
+
+
+
             # =====================================================================
             # MÓDULO DE EDICIÓN / MODIFICACIÓN DE DATOS EXISTENTES
             # =====================================================================
@@ -3505,7 +3642,7 @@ if tab_auxiliares:
                         
                     conn = conectar_db()
                     cursor = conn.cursor()
-                    cursor.execute("SELECT alias_propiedad, calle, numero, departamento FROM propiedades WHERE id = %s", (id_prop_edit,))
+                    cursor.execute("SELECT alias_propiedad, calle, numero, departamento, COALESCE(grupo, '') AS grupo FROM propiedades WHERE id = %s", (id_prop_edit,))
                     datos_prop = cursor.fetchone()
                     conn.close()
                         
@@ -4121,6 +4258,86 @@ if tab_superadmin:
                                                     except psycopg2.Error as op_err:
                                                         st.error(f"❌ Error al importar: {op_err}")
                                                 
+                                # --- PROCESADOR PARA GASTOS_PROPIEDADES ---
+                                if tabla_seleccionada == "gastos_propiedades":
+                                    if "propiedad_id" not in columnas_csv:
+                                        st.error("❌ El CSV debe tener la columna 'propiedad_id' con el alias de la propiedad.")
+                                    else:
+                                        _eid_gimp = _empresa_id_csv or st.session_state.get("empresa_id", 0)
+                                        # Construir mapa alias → id
+                                        with _pg_conn() as _conn_gmap:
+                                            with _conn_gmap.cursor() as _cur_gmap:
+                                                _cur_gmap.execute(
+                                                    "SELECT id, alias_propiedad FROM propiedades WHERE empresa_id = %s",
+                                                    (_eid_gimp,)
+                                                )
+                                                _prop_map = {r["alias_propiedad"]: r["id"] for r in _cur_gmap.fetchall()}
+
+                                        # Procesar filas
+                                        _gastos_ok = []
+                                        _gastos_err = []
+                                        for idx, fila in df.iterrows():
+                                            _alias = str(fila.get("propiedad_id", "")).strip()
+                                            if not _alias or _alias == "nan":
+                                                _gastos_err.append(f"Fila {idx+2}: alias vacío")
+                                                continue
+                                            _pid = _prop_map.get(_alias)
+                                            if not _pid:
+                                                _gastos_err.append(f"Fila {idx+2}: '{_alias}' no encontrada")
+                                                continue
+                                            _fecha_g = None
+                                            try:
+                                                _fecha_g = pd.to_datetime(str(fila.get("fecha","")).strip(), dayfirst=True).strftime("%Y-%m-%d")
+                                            except Exception:
+                                                _gastos_err.append(f"Fila {idx+2}: fecha inválida")
+                                                continue
+                                            _gastos_ok.append({
+                                                "propiedad_id": _pid,
+                                                "fecha": _fecha_g,
+                                                "categoria": str(fila.get("categoria","")).strip() or "📦 Otros Pasivos",
+                                                "descripcion": str(fila.get("descripcion","")).strip(),
+                                                "monto": float(str(fila.get("monto",0)).replace(",",".")),
+                                                "proveedor": str(fila.get("proveedor","")).strip() or None,
+                                                "comprobante": str(fila.get("comprobante","")).strip() or None,
+                                                "pagado_por": str(fila.get("pagado_por","")).strip() or "Inmobiliaria",
+                                                "observaciones": str(fila.get("observaciones","")).strip() or None,
+                                                "tipo_gasto": str(fila.get("tipo_gasto","Extraordinario")).strip() or "Extraordinario",
+                                                "cobrado": str(fila.get("cobrado","")).strip().lower() in ("true","1","si","sí"),
+                                                "periodo_cobrado": str(fila.get("periodo_cobrado","")).strip() or None,
+                                            })
+
+                                        if _gastos_err:
+                                            st.warning(f"⚠️ {len(_gastos_err)} fila(s) con errores:")
+                                            for _e in _gastos_err[:5]: st.caption(_e)
+
+                                        if _gastos_ok:
+                                            df_prev_g = pd.DataFrame(_gastos_ok)
+                                            st.markdown(f"**{len(_gastos_ok)} gasto(s) listos para importar**")
+                                            st.dataframe(df_prev_g[["propiedad_id","fecha","categoria","descripcion","monto","tipo_gasto"]], use_container_width=True, hide_index=True)
+
+                                            col_gb1, col_gb2 = st.columns(2)
+                                            _imp_g_todos = col_gb1.button("✅ Importar TODOS", type="primary", use_container_width=True, key="btn_gimp_todos")
+                                            _gimp_key = f"imported_gastos_{archivo_subido.name}_{len(_gastos_ok)}"
+
+                                            if _imp_g_todos and _gimp_key not in st.session_state:
+                                                with _pg_conn() as _conn_gi2:
+                                                    with _conn_gi2.cursor() as _cur_gi2:
+                                                        for _g in _gastos_ok:
+                                                            _cur_gi2.execute("""
+                                                                INSERT INTO gastos_propiedades
+                                                                (empresa_id, propiedad_id, fecha, categoria, descripcion, monto,
+                                                                 proveedor, comprobante, pagado_por, observaciones, tipo_gasto, cobrado, periodo_cobrado)
+                                                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                                                ON CONFLICT DO NOTHING
+                                                            """, (_eid_gimp, _g["propiedad_id"], _g["fecha"], _g["categoria"],
+                                                                  _g["descripcion"], _g["monto"], _g["proveedor"], _g["comprobante"],
+                                                                  _g["pagado_por"], _g["observaciones"], _g["tipo_gasto"],
+                                                                  _g["cobrado"], _g["periodo_cobrado"]))
+                                                st.session_state[_gimp_key] = True
+                                                st.success(f"✅ {len(_gastos_ok)} gasto(s) importados.")
+                                                st.balloons()
+                                                st.rerun()
+
                                 # --- LÓGICA ESTÁNDAR PARA OTRAS TABLAS ---
                                 else:
                                     esquema_esperado = ESQUEMAS_VALIDOS.get(tabla_seleccionada, [])
@@ -4423,12 +4640,12 @@ if tab_gastos:
         if _pf_g_activo:
             with _pg_conn() as _cpg1:
                 with _cpg1.cursor() as _cupg1:
-                    _cupg1.execute("SELECT id, alias_propiedad, propietario FROM propiedades WHERE empresa_id = %s AND propietario = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0), _pf_g))
+                    _cupg1.execute("SELECT id, alias_propiedad, propietario, calle, numero, grupo FROM propiedades WHERE empresa_id = %s AND propietario = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0), _pf_g))
                     _props_gasto = pd.DataFrame([dict(r) for r in _cupg1.fetchall()])
         else:
             with _pg_conn() as _cpg2:
                 with _cpg2.cursor() as _cupg2:
-                    _cupg2.execute("SELECT id, alias_propiedad, propietario FROM propiedades WHERE empresa_id = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0),))
+                    _cupg2.execute("SELECT id, alias_propiedad, propietario, calle, numero, grupo FROM propiedades WHERE empresa_id = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0),))
                     _props_gasto = pd.DataFrame([dict(r) for r in _cupg2.fetchall()])
         conn.close()
 
@@ -4478,17 +4695,63 @@ if tab_gastos:
                 )
                 st.session_state["cotizacion_usd_hist"] = _cotizacion_usd_g_reg
 
+                # Radio button FUERA del form para que haga rerun al cambiar
+                _tipo_gasto = st.radio(
+                    "Tipo de gasto:",
+                    ["🏠 Individual", "🏢 Compartido (Edificio)"],
+                    horizontal=True,
+                    key="tipo_gasto_radio_ext"
+                )
+                _es_compartido = "Compartido" in _tipo_gasto
+
                 with st.form("form_gasto_propiedad", clear_on_submit=True):
                     st.markdown("#### 📝 Datos del Gasto")
 
-                    _gcol1, _gcol2 = st.columns(2)
-                    _prop_label = _gcol1.selectbox("🏠 Propiedad:", list(_dict_props.keys()))
-                    _prop_id_sel = _dict_props[_prop_label]
-                    _fecha_gasto = _gcol2.date_input("📅 Fecha del Gasto:", value=datetime.now().date())
+                    # ── Tipo de gasto ──
+                    if _es_compartido:
+                        # Selector de grupo
+                        _grupos_disp = []
+                        if not _props_gasto.empty and "grupo" in _props_gasto.columns:
+                            _grupos_disp = sorted(_props_gasto["grupo"].dropna().unique().tolist())
+
+                        if _grupos_disp:
+                            _grupo_sel = st.selectbox(
+                                "🏢 Grupo / Edificio:",
+                                ["— Seleccionar —"] + _grupos_disp,
+                                key="grupo_gasto_sel"
+                            )
+                        else:
+                            _grupo_sel = None
+                            st.info("No hay grupos definidos. Asignale un grupo a las propiedades en Auxiliares.")
+
+                        # Propiedades del grupo seleccionado
+                        _ids_edif = []
+                        if _grupo_sel and _grupo_sel != "— Seleccionar —" and not _props_gasto.empty and "grupo" in _props_gasto.columns:
+                            _props_del_grupo = _props_gasto[_props_gasto["grupo"] == _grupo_sel]
+                            _ids_edif = _props_del_grupo["id"].tolist()
+                            _labels_grupo = _props_del_grupo["alias_propiedad"].tolist()
+                            if _ids_edif:
+                                st.caption(f"📋 Propiedades del grupo: {', '.join(_labels_grupo)}")
+
+                        _prop_label = None
+                        _prop_id_sel = None
+                    else:
+                        _gcol1, _gcol2 = st.columns(2)
+                        _prop_label = _gcol1.selectbox("🏠 Propiedad:", list(_dict_props.keys()))
+                        _prop_id_sel = _dict_props[_prop_label]
+                        _fecha_gasto = _gcol2.date_input("📅 Fecha del Gasto:", value=datetime.now().date())
+
+                    if _es_compartido:
+                        _fecha_gasto = st.date_input("📅 Fecha del Gasto:", value=datetime.now().date())
 
                     _gcol3, _gcol4 = st.columns(2)
                     _categoria = _gcol3.selectbox("📂 Categoría:", _categorias_gasto)
-                    _monto = _gcol4.number_input("💲 Monto ($):", min_value=0.0, step=500.0)
+                    _monto = _gcol4.number_input("💲 Monto Total ($):", min_value=0.0, step=500.0)
+
+                    # Mostrar prorrateo en tiempo real
+                    if _es_compartido and _ids_edif and _monto > 0:
+                        _monto_por_unidad = _monto / len(_ids_edif)
+                        st.info(f"📐 Se distribuirán **\\$ {_monto_por_unidad:,.2f}** a cada una de las **{len(_ids_edif)} unidades**")
 
                     _descripcion = st.text_input("📄 Descripción:", placeholder="Ej: Cambio de cañería cocina")
 
@@ -4496,9 +4759,10 @@ if tab_gastos:
                     _proveedor = _gcol5.text_input("🏢 Proveedor / Empresa:", placeholder="Ej: Plomería González")
                     _comprobante = _gcol6.text_input("🧾 N° Comprobante / Factura:", placeholder="Ej: FA-0001-00012345")
 
-                    _gcol7, _gcol8 = st.columns(2)
+                    _gcol7, _gcol8, _gcol9 = st.columns(3)
                     _pagado_por = _gcol7.selectbox("💳 Pagado por:", ["Inmobiliaria", "Propietario", "Inquilino", "Otro"])
-                    _observaciones = _gcol8.text_input("🗒️ Observaciones:", placeholder="Opcional")
+                    _tipo_gasto_ord = _gcol8.selectbox("📌 Tipo:", ["Extraordinario", "Ordinario"])
+                    _observaciones = _gcol9.text_input("🗒️ Observaciones:", placeholder="Opcional")
 
                     _btn_gasto = st.form_submit_button("💾 Registrar Gasto", type="primary")
 
@@ -4507,23 +4771,41 @@ if tab_gastos:
                             st.error("❌ El monto debe ser mayor a cero.")
                         elif not _descripcion.strip():
                             st.error("❌ La descripción es obligatoria.")
+                        elif _es_compartido and len(_ids_edif) < 2:
+                            st.error("❌ Seleccioná un grupo con al menos 2 propiedades.")
                         else:
                             try:
-                                conn = conectar_db()
-                                _tc_g = float(st.session_state.get("cotizacion_usd_hist", 0.0))
-                                _monto_usd_g = round(_monto / _tc_g, 2) if _tc_g > 0 else 0.0
-                                conn.execute(
-                                    """INSERT INTO gastos_propiedades
-                                       (empresa_id, propiedad_id, fecha, categoria, descripcion, monto, proveedor, comprobante, pagado_por, observaciones)
-                                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                                    (st.session_state.get('empresa_id',0), _prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"), _categoria,
-                                     _descripcion.strip(), _monto, _proveedor.strip(),
-                                     _comprobante.strip(), _pagado_por, _observaciones.strip(),
-)
-                                )
-                                conn.commit()
-                                conn.close()
-                                st.success(f"✅ Gasto de $ {_monto:,.2f} registrado correctamente en {_prop_label}.")
+                                _eid_form = st.session_state.get('empresa_id', 0)
+                                _sql_gasto = """INSERT INTO gastos_propiedades
+                                    (empresa_id, propiedad_id, fecha, categoria, descripcion, monto,
+                                     proveedor, comprobante, pagado_por, observaciones, tipo_gasto, cotizacion_usd)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"""
+
+                                if _es_compartido:
+                                    _monto_unit = round(_monto / len(_ids_edif), 2)
+                                    _desc_compartida = f"{_descripcion.strip()} | EDIFICIO-PROPORCIONAL"
+                                    with _pg_conn() as _conn_gi:
+                                        with _conn_gi.cursor() as _cur_gi:
+                                            _tc_gi = float(st.session_state.get("cotizacion_usd_hist", 0.0))
+                                            for _pid in _ids_edif:
+                                                _cur_gi.execute(_sql_gasto, (
+                                                    _eid_form, _pid, _fecha_gasto.strftime("%Y-%m-%d"),
+                                                    _categoria, _desc_compartida, _monto_unit,
+                                                    _proveedor.strip(), _comprobante.strip(),
+                                                    _pagado_por, _observaciones.strip(), _tipo_gasto_ord, _tc_gi
+                                                ))
+                                    st.success(f"✅ Gasto de \\$ {_monto:,.2f} distribuido en {len(_ids_edif)} unidades (\\$ {_monto_unit:,.2f} c/u).")
+                                else:
+                                    with _pg_conn() as _conn_gi:
+                                        with _conn_gi.cursor() as _cur_gi:
+                                            _tc_gi = float(st.session_state.get("cotizacion_usd_hist", 0.0))
+                                            _cur_gi.execute(_sql_gasto, (
+                                                _eid_form, _prop_id_sel, _fecha_gasto.strftime("%Y-%m-%d"),
+                                                _categoria, _descripcion.strip(), _monto,
+                                                _proveedor.strip(), _comprobante.strip(),
+                                                _pagado_por, _observaciones.strip(), _tipo_gasto_ord, _tc_gi
+                                            ))
+                                    st.success(f"✅ Gasto de \\$ {_monto:,.2f} registrado en {_prop_label}.")
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -4542,8 +4824,11 @@ if tab_gastos:
                 SELECT gp.id AS "ID", p.alias_propiedad AS "PROPIEDAD", p.propietario AS "PROPIETARIO",
                        gp.fecha AS "FECHA", gp.categoria AS "CATEGORÍA", gp.descripcion AS "DESCRIPCIÓN",
                        gp.monto AS "MONTO ($)",
-                       0 AS "COTIZACIÓN USD",
-                       0 AS "MONTO (USD)",
+                       COALESCE(gp.cotizacion_usd, 0) AS "COTIZACIÓN USD",
+                       CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
+                            THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
+                            ELSE 0 END AS "MONTO (USD)",
+                       COALESCE(gp.tipo_gasto, 'Ordinario') AS "TIPO",
                        gp.proveedor AS "PROVEEDOR",
                        gp.comprobante AS "COMPROBANTE", gp.pagado_por AS "PAGADO POR",
                        gp.observaciones AS "OBSERVACIONES"
@@ -4608,7 +4893,16 @@ if tab_gastos:
 
             conn = conectar_db()
 
-            # ── Cargar ingresos desde pagos_historial ──
+            # ── Selector de vista: Individual o Grupo ──
+            _vista_metrica = st.radio(
+                "Ver métricas por:",
+                ["🏠 Propiedad individual", "🏢 Grupo / Edificio"],
+                horizontal=True,
+                key="radio_vista_metrica"
+            )
+            _ver_por_grupo = "Grupo" in _vista_metrica
+
+            # ── Cargar ingresos desde pagos_historial (incluyendo expensas) ──
             _eid_m = st.session_state.get("empresa_id", 0)
             _where_m = "AND p.propietario = %s" if _pf_g_activo else ""
             _params_m = (_eid_m, _pf_g) if _pf_g_activo else (_eid_m,)
@@ -4620,12 +4914,15 @@ if tab_gastos:
                 SELECT
                     ph.propiedad                                                        AS propiedad,
                     COALESCE(p.propietario, '')                                        AS propietario,
+                    COALESCE(p.grupo, '')                                              AS grupo,
                     ph.periodo                                                          AS periodo,
                     COALESCE(c.inicio_contrato, '')                                   AS inicio_contrato,
                     0                                                                   AS calc_duracion,
                     COALESCE(ph.monto_alquiler, 0)                                    AS alquiler,
                     COALESCE(ph.monto_cochera, 0)                                     AS cochera,
-                    COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)   AS total_ingreso,
+                    COALESCE(ph.monto_expensas, 0)                                    AS expensas,
+                    COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
+                        + COALESCE(ph.monto_expensas, 0)                              AS total_ingreso,
                     0                                                                   AS gasto_admin,
                     COALESCE(ph.monto_imp_inmobiliario, 0)                            AS imp_inmobiliario,
                     CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
@@ -4635,7 +4932,8 @@ if tab_gastos:
                          THEN ROUND((COALESCE(ph.monto_cochera, 0) / ph.cotizacion_usd)::NUMERIC, 2)
                          ELSE 0 END                                                    AS cochera_usd,
                     CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
-                         THEN ROUND(((COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)) / ph.cotizacion_usd)::NUMERIC, 2)
+                         THEN ROUND(((COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
+                              + COALESCE(ph.monto_expensas, 0)) / ph.cotizacion_usd)::NUMERIC, 2)
                          ELSE 0 END                                                    AS total_ingreso_usd,
                     0                                                                   AS gasto_admin_usd,
                     CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
@@ -4652,7 +4950,7 @@ if tab_gastos:
             _df_ingresos_raw = pd.DataFrame([dict(r) for r in _rows_ir], columns=_cols_ir) if _rows_ir else pd.DataFrame(columns=_cols_ir)
             # Convertir columnas NUMERIC (Decimal) a float para evitar TypeError
             if not _df_ingresos_raw.empty:
-                for _col in ['alquiler','cochera','total_ingreso','imp_inmobiliario','alquiler_usd','cochera_usd','total_ingreso_usd','gasto_admin_usd','imp_inmobiliario_usd']:
+                for _col in ['alquiler','cochera','expensas','total_ingreso','imp_inmobiliario','alquiler_usd','cochera_usd','total_ingreso_usd','gasto_admin_usd','imp_inmobiliario_usd']:
                     if _col in _df_ingresos_raw.columns:
                         _df_ingresos_raw[_col] = pd.to_numeric(_df_ingresos_raw[_col], errors='coerce').fillna(0.0)
 
@@ -4706,7 +5004,9 @@ if tab_gastos:
                     COALESCE(p.propietario, '')                   AS propietario,
                     TO_CHAR(gp.fecha::date, 'YYYY-MM')           AS periodo,
                     SUM(gp.monto)                                 AS total_gasto,
-                    0                                             AS total_gasto_usd
+                    SUM(CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
+                             THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
+                             ELSE 0 END)                           AS total_gasto_usd
                 FROM gastos_propiedades gp
                 JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
                 WHERE gp.empresa_id = %s {"AND p.propietario = %s" if _pf_g_activo else ""}
@@ -4804,7 +5104,16 @@ if tab_gastos:
                 if not _dfi.empty:
                     if _f_propietario_m != "Todos":
                         _dfi = _dfi[_dfi["propietario"] == _f_propietario_m]
-                    if _f_prop_m != "Todas":
+                    if _ver_por_grupo:
+                        # Filtrar por grupo
+                        _grupos_m = sorted(_dfi["grupo"].dropna().unique().tolist())
+                        _f_grupo_m = st.selectbox("🏢 Grupo:", ["Todos"] + _grupos_m, key="met_grupo_sel")
+                        if _f_grupo_m != "Todos":
+                            _dfi = _dfi[_dfi["grupo"] == _f_grupo_m]
+                        # Reemplazar propiedad por grupo para el agrupamiento
+                        _dfi = _dfi.copy()
+                        _dfi["propiedad"] = _dfi["grupo"].fillna("Sin grupo")
+                    elif _f_prop_m != "Todas":
                         _dfi = _dfi[_dfi["propiedad"] == _f_prop_m]
                     # Filtro por período del contrato ("Mes N de M")
                     if _f_periodo_contrato != "Todos":
@@ -4877,6 +5186,9 @@ if tab_gastos:
                     _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera en USD al tipo de cambio de cada cobro")
                     _ku2.metric("🏠 Alquiler",        f"U$S {_total_alq_usd:,.2f}")
                     _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
+                    _ku4, _ku5 = st.columns(2)
+                    _total_exp = float(_dfi["expensas"].sum()) if not _dfi.empty else 0.0
+                    _ku4.metric("🏘️ Expensas cobradas", f"\$ {_total_exp:,.2f}")
 
                     st.markdown("**📤 Pasivos — U$S**")
                     _kpu1, _kpu2, _kpu3 = st.columns(3)
@@ -4901,6 +5213,7 @@ if tab_gastos:
                         periodo_contrato=("periodo", "first"),
                         alquiler=("alquiler", "sum"),
                         cochera=("cochera", "sum"),
+                        expensas=("expensas", "sum"),
                         total_ingreso=("total_ingreso", "sum"),
                         gasto_admin=("gasto_admin", "sum"),
                         imp_inmobiliario=("imp_inmobiliario", "sum"),
@@ -4912,7 +5225,7 @@ if tab_gastos:
                     )
                     if not _dfi.empty
                     else pd.DataFrame(columns=["propiedad", "mes_calendario", "periodo_contrato",
-                                               "alquiler", "cochera", "total_ingreso",
+                                               "alquiler", "cochera", "expensas", "total_ingreso",
                                                "gasto_admin", "imp_inmobiliario", "alquiler_usd", "cochera_usd",
                                                "total_ingreso_usd", "gasto_admin_usd", "imp_inmobiliario_usd"])
                 )
