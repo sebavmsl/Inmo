@@ -3136,18 +3136,11 @@ if tab_auxiliares:
         with tab_auxiliares:
             st.subheader("⚙️ Panel de Configuración de Entidades")
 
-            # ── Selector de empresa para superadmin ──
-            _rol_aux = st.session_state.get("rol", "user")
-            if _rol_aux == "superadmin":
-                with _pg_conn() as _conn_aux_emp:
-                    with _conn_aux_emp.cursor() as _cur_aux_emp:
-                        _cur_aux_emp.execute("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central")
-                        _rows_aux_emp = _cur_aux_emp.fetchall()
-                _dict_aux_emp = {r["nombre_empresa"]: r["archivo_db"] for r in _rows_aux_emp if r["nombre_empresa"]}
-                _emp_aux_sel = st.selectbox("🏢 Empresa:", options=list(_dict_aux_emp.keys()), key="sb_aux_empresa")
-                _eid_aux = _get_empresa_id(_dict_aux_emp[_emp_aux_sel])
-            else:
-                _eid_aux = st.session_state.get("empresa_id", 0)
+            # empresa_id ya viene del selector de la barra superior (superadmin)
+            # o del login (usuarios normales) — no necesita selector adicional
+            _eid_aux = st.session_state.get("empresa_id", 0)
+            if st.session_state.get("rol") == "superadmin":
+                st.caption(f"🏢 Trabajando en: **{st.session_state.get('empresa_actual_nombre', '')}**")
                 
             sub_tab1, sub_tab2 = st.tabs(["👤 Nuevo Inquilino", "🏠 Nueva Propiedad"])
                 
