@@ -616,18 +616,22 @@ if not st.session_state.autenticado:
 
                     # Obtener empresa_id desde PostgreSQL
                     try:
-                        _eid = _get_empresa_id(datos_sesion["archivo_db"])
-                        if not _eid and datos_sesion["rol"] != "superadmin":
-                            # Buscar por nombre de empresa como fallback
-                            with _pg_conn() as _fc:
-                                with _fc.cursor() as _cur:
-                                    _cur.execute(
-                                        "SELECT id FROM empresas WHERE nombre_comercial = %s",
-                                        (datos_sesion["nombre_empresa"],)
-                                    )
-                                    _row = _cur.fetchone()
-                                    _eid = _row["id"] if _row else None
-                        st.session_state.empresa_id = _eid if _eid else 0
+                        if datos_sesion["rol"] == "superadmin":
+                            st.session_state.empresa_id = 2  # Empresa SuperAdmin en Supabase
+                        else:
+                            _eid = _get_empresa_id(datos_sesion["archivo_db"])
+                            if not _eid:
+                                with _pg_conn() as _fc:
+                                    with _fc.cursor() as _cur:
+                                        _cur.execute(
+                                            "SELECT id FROM empresas WHERE nombre_comercial = %s",
+                                            (datos_sesion["nombre_empresa"],)
+                                        )
+                                        _row = _cur.fetchone()
+                                        _eid = _row["id"] if _row else None
+                            st.session_state.empresa_id = _eid if _eid else 0
+                            if st.session_state.empresa_id == 0:
+                                st.warning(f"⚠️ No se encontró empresa_id para '{datos_sesion['nombre_empresa']}'.")
                     except RuntimeError as _e:
                         st.error(f"❌ Error de conexión a la BD: {_e}")
                         st.stop()
@@ -936,6 +940,40 @@ with top_col2:
         f"</p>", 
         unsafe_allow_html=True
     )
+
+    # ── Selector de empresa para superadmin ──────────────────────────
+    if st.session_state.get("rol") == "superadmin":
+        try:
+            with _pg_conn() as _conn_top:
+                with _conn_top.cursor() as _cur_top:
+                    _cur_top.execute("SELECT id, nombre_comercial FROM empresas ORDER BY id")
+                    _empresas_top = _cur_top.fetchall()
+            _dict_top = {r["nombre_comercial"]: r["id"] for r in _empresas_top}
+            _nombres_top = list(_dict_top.keys())
+            # Default: empresa SuperAdmin (id=2)
+            _empresa_actual_nombre = next(
+                (n for n, i in _dict_top.items() if i == st.session_state.get("empresa_id", 2)),
+                _nombres_top[0] if _nombres_top else "SuperAdmin"
+            )
+            _idx_default = _nombres_top.index(_empresa_actual_nombre) if _empresa_actual_nombre in _nombres_top else 0
+            _emp_sel_top = st.selectbox(
+                "🏢 Trabajando en:",
+                options=_nombres_top,
+                index=_idx_default,
+                key="sb_superadmin_empresa_top",
+                label_visibility="collapsed"
+            )
+            # Actualizar empresa_id si cambió
+            _nuevo_eid = _dict_top[_emp_sel_top]
+            if _nuevo_eid != st.session_state.get("empresa_id"):
+                st.session_state.empresa_id = _nuevo_eid
+                st.session_state.empresa_actual_nombre = _emp_sel_top
+                st.cache_data.clear()
+                st.rerun()
+        except Exception:
+            pass
+    # ─────────────────────────────────────────────────────────────────
+
     if st.button("🔒 Cerrar Sesión", use_container_width=True):
         st.session_state.autenticado = False
         st.session_state.usuario_actual = ""
@@ -3097,6 +3135,19 @@ if tab_carga:
 if tab_auxiliares:
         with tab_auxiliares:
             st.subheader("⚙️ Panel de Configuración de Entidades")
+
+            # ── Selector de empresa para superadmin ──
+            _rol_aux = st.session_state.get("rol", "user")
+            if _rol_aux == "superadmin":
+                with _pg_conn() as _conn_aux_emp:
+                    with _conn_aux_emp.cursor() as _cur_aux_emp:
+                        _cur_aux_emp.execute("SELECT DISTINCT nombre_empresa, archivo_db FROM usuarios_central")
+                        _rows_aux_emp = _cur_aux_emp.fetchall()
+                _dict_aux_emp = {r["nombre_empresa"]: r["archivo_db"] for r in _rows_aux_emp if r["nombre_empresa"]}
+                _emp_aux_sel = st.selectbox("🏢 Empresa:", options=list(_dict_aux_emp.keys()), key="sb_aux_empresa")
+                _eid_aux = _get_empresa_id(_dict_aux_emp[_emp_aux_sel])
+            else:
+                _eid_aux = st.session_state.get("empresa_id", 0)
                 
             sub_tab1, sub_tab2 = st.tabs(["👤 Nuevo Inquilino", "🏠 Nueva Propiedad"])
                 
@@ -3122,7 +3173,11 @@ if tab_auxiliares:
                                     INSERT INTO inquilinos (empresa_id, apellidos, nombres, dni, telefono, email)
                                     VALUES (%s, %s, %s, %s, %s, %s)
                                     ON CONFLICT DO NOTHING
-                                ''', (st.session_state.get("empresa_id", 0), apellidos.strip(), nombres.strip(), dni.strip() or None, tel.strip() or None, email.strip() or None))
+                                ''', (
+                                    _eid_aux,
+                                    apellidos.strip(), nombres.strip(), 
+                                    dni.strip() or None, tel.strip() or None, email.strip() or None
+                                ))
                                 conn.commit()
                                 st.success(f"✅ Inquilino '{apellidos}, {nombres}' guardado correctamente.")
                             except psycopg2.errors.UniqueViolation:
@@ -3168,8 +3223,11 @@ if tab_auxiliares:
                                                             ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron) 
                                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                     ON CONFLICT DO NOTHING
-                                ''', (st.session_state.get("empresa_id", 0), alias, calle, numero, depto, propietario, ciudad, provincia, tipo, 
-                                      nis, cuenta_gas, finca, cuenta_ooss, nro_padron))
+                                ''', (
+                                    _eid_aux,
+                                    alias, calle, numero, depto, propietario, ciudad, provincia, tipo,
+                                    nis, cuenta_gas, finca, cuenta_ooss, nro_padron
+                                ))
                                 conn.commit()
                                 st.success("Propiedad guardada.")
                             except Exception as e:
