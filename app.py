@@ -4435,6 +4435,7 @@ if tab_gastos:
         _categorias_gasto = [
             "🔨 Reparación / Arreglo",
             "👷 Mano de obra",
+            "🧱 Materiales",
             "💡 Servicios (Luz / Gas / Agua)",
             "🏛️ Impuestos y Tasas",
             "🛡️ Seguro de Propiedad",
