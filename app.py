@@ -950,7 +950,6 @@ with top_col2:
                     _empresas_top = _cur_top.fetchall()
             _dict_top = {r["nombre_comercial"]: r["id"] for r in _empresas_top}
             _nombres_top = list(_dict_top.keys())
-            # Default: empresa SuperAdmin (id=2)
             _empresa_actual_nombre = next(
                 (n for n, i in _dict_top.items() if i == st.session_state.get("empresa_id", 2)),
                 _nombres_top[0] if _nombres_top else "SuperAdmin"
@@ -963,12 +962,12 @@ with top_col2:
                 key="sb_superadmin_empresa_top",
                 label_visibility="collapsed"
             )
-            # Actualizar empresa_id si cambió
+            # Actualizar empresa_id si cambió — sin rerun, se aplica en el próximo ciclo
             _nuevo_eid = _dict_top[_emp_sel_top]
             if _nuevo_eid != st.session_state.get("empresa_id"):
                 st.session_state.empresa_id = _nuevo_eid
                 st.session_state.empresa_actual_nombre = _emp_sel_top
-                st.cache_data.clear()
+                obtener_datos_desplegables.clear()
                 st.rerun()
         except Exception:
             pass
