@@ -24,7 +24,6 @@ def _get_pg_dsn():
            or st.secrets.get("DATABASE_URL"))
     if not dsn:
         raise RuntimeError("Falta [database] supabase_url en secrets.toml")
-    # Auto-convertir URL directa de Supabase → Transaction Pooler
     m = re.match(r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)', dsn)
     if m:
         user, password, ref, db_ = m.groups()
@@ -35,21 +34,59 @@ def _get_pg_dsn():
         dsn = dsn.replace(':5432/', ':6543/')
     return dsn
 
+@st.cache_resource
+def _get_pool():
+    """Pool de conexiones persistente — se crea una sola vez por instancia."""
+    from psycopg2 import pool as pg_pool
+    return pg_pool.ThreadedConnectionPool(
+        minconn=1,
+        maxconn=5,
+        dsn=_get_pg_dsn(),
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=10,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
+
 @contextmanager
 def _pg_conn():
-    conn = psycopg2.connect(_get_pg_dsn(),
-                            cursor_factory=psycopg2.extras.RealDictCursor,
-                            connect_timeout=10)
+    """Obtiene una conexión del pool, hace commit/rollback y la devuelve."""
+    pool = _get_pool()
+    conn = pool.getconn()
     try:
+        conn.autocommit = False
         yield conn
         conn.commit()
     except Exception:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.putconn(conn)
 
-def _get_empresa_id(archivo_db: str):
+def conectar_db():
+    """Obtiene conexión del pool. Llamar conn.close() la devuelve al pool."""
+    pool = _get_pool()
+    conn = pool.getconn()
+    conn.autocommit = False
+    # Monkey-patch close() para devolver al pool en vez de cerrar
+    _orig_close = conn.close
+    def _pooled_close():
+        try:
+            pool.putconn(conn)
+        except Exception:
+            _orig_close()
+    conn.close = _pooled_close
+    return conn
+
+def conectar_db_central():
+    """Igual que conectar_db — en Postgres es la misma BD."""
+    return conectar_db()
+
+@st.cache_data(ttl=300)
+def _get_empresa_id_cached(archivo_db: str):
+    """Cache de empresa_id por 5 min — evita query repetida en cada rerun."""
     if not archivo_db or archivo_db == 'central.db':
         return None
     try:
@@ -61,6 +98,9 @@ def _get_empresa_id(archivo_db: str):
     except Exception as e:
         logging.error(f"_get_empresa_id: {e}")
         return None
+
+def _get_empresa_id(archivo_db: str):
+    return _get_empresa_id_cached(archivo_db)
 
 
 # ── ReportLab: generación real de PDF ──
@@ -618,6 +658,7 @@ if not st.session_state.autenticado:
 # =====================================================================
 # FUNCIONES AUXILIARES DE LÓGICA Y PARSEO
 # =====================================================================
+@st.cache_data(ttl=120)
 def obtener_datos_desplegables():
     try:
         _eid = st.session_state.get("empresa_id", 0)
@@ -2439,8 +2480,29 @@ if tab_carga:
     
     
             # 🔧 PASO 2: DETERMINAR ÍNDICE DEL INQUILINO PARA PRESELECCIONAR
-            if u and 'dni_inquilino' in u:
-                idx_inq = buscar_inquilino_por_id(u['dni_inquilino'], lista_inquilinos, dict_inquilinos)
+            if u and u.get('dni_inquilino'):
+                _dni_buscar = str(u['dni_inquilino']).strip()
+                _eid_busq = st.session_state.get("empresa_id", 0)
+                try:
+                    with _pg_conn() as _conn_bi:
+                        with _conn_bi.cursor() as _cur_bi:
+                            _cur_bi.execute(
+                                "SELECT apellidos, nombres FROM inquilinos WHERE dni = %s AND empresa_id = %s",
+                                (_dni_buscar, _eid_busq)
+                            )
+                            _inq_row = _cur_bi.fetchone()
+                    if _inq_row:
+                        _inq_nombre_buscar = f"{_inq_row['apellidos']}, {_inq_row['nombres']}"
+                        # Actualizar session_state para que el selectbox lo tome
+                        if st.session_state.get("inq_sel_main") != _inq_nombre_buscar:
+                            st.session_state["inq_sel_main"] = _inq_nombre_buscar
+                        idx_inq = next((i for i, n in enumerate(lista_inquilinos) if n == _inq_nombre_buscar), 0)
+                    else:
+                        idx_inq = 0
+                except Exception:
+                    idx_inq = 0
+            elif u and u.get('inquilino_id'):
+                idx_inq = buscar_inquilino_por_id(u['inquilino_id'], lista_inquilinos, dict_inquilinos)
             else:
                 idx_inq = 0
     
@@ -2705,7 +2767,7 @@ if tab_carga:
                     key="hon_inq_total_live"
                 )
                     
-                val_cuotas_hon = int(u['cuota_honorarios']) if u and u.get('cuota_honorarios') is not None else 1
+                val_cuotas_hon = max(1, _safe_int(u.get('cuota_honorarios'), 1)) if u else 1
                 cuota_honorarios = ch_inq2.number_input(
                     "Cuotas pactadas para el pago:", 
                     min_value=1, 
@@ -2715,27 +2777,15 @@ if tab_carga:
                     key="cuota_hon_live"
                 )
     
-                # Valor calculado por cuota
                 valor_por_cuota = honorarios_inquilino_total / cuota_honorarios if cuota_honorarios > 0 else 0.0
                 valor_por_cuota_fmt = f"$ {valor_por_cuota:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                ch_inq3.number_input(
-                    "Valor por cuota ($):", 
-                    value=valor_por_cuota, 
-                    disabled=True, 
-                    key="valor_cuota_hon_live"
-                )
+                ch_inq3.metric("Valor por cuota ($):", value=valor_por_cuota_fmt)
     
-                val_hon_pagados = float(u['honorarios_pagados']) if u and u.get('honorarios_pagados') is not None else 0.0
-                honorarios_pagados = st.number_input(
-                    "Monto pagado a la fecha ($):", 
-                    min_value=0.0, 
-                    value=val_hon_pagados, 
-                    step=5000.0, 
-                    disabled=not permitir_edicion, 
-                    key="hon_pagados_live"
-                )
+                # Monto pagado calculado: cuotas_pagadas × valor_por_cuota
+                # (se actualiza después de definir cuotas_honorarios_pagadas)
+                honorarios_pagados = 0.0  # placeholder, se recalcula abajo
     
-                val_cuotas_hon_pagas = int(u['cuotas_honorarios_pagadas']) if u and u.get('cuotas_honorarios_pagadas') is not None else 0
+                val_cuotas_hon_pagas = _safe_int(u.get('cuotas_honorarios_pagadas'), 0) if u else 0
                 cuotas_honorarios_pagadas = st.number_input(
                     "Cuotas de honorarios pagadas:",
                     min_value=0,
@@ -2745,12 +2795,19 @@ if tab_carga:
                     disabled=not permitir_edicion,
                     key="cuotas_hon_pagas_live"
                 )
-                    
-                saldo_inquilino_hon = honorarios_inquilino_total - honorarios_pagados
+
+                # Monto pagado calculado
+                monto_ya_pagado_hon = cuotas_honorarios_pagadas * valor_por_cuota
+                honorarios_pagados = monto_ya_pagado_hon
+                monto_pagado_hon_fmt = f"$ {monto_ya_pagado_hon:,.2f}".replace(",","v").replace(".",",").replace("v",".")
+                st.metric("Monto abonado a la fecha ($):", value=monto_pagado_hon_fmt)
+                saldo_inquilino_hon = max(0.0, honorarios_inquilino_total - monto_ya_pagado_hon)
+                cuotas_pendientes_hon = max(0, int(cuota_honorarios) - cuotas_honorarios_pagadas)
                 if saldo_inquilino_hon > 0:
-                    cuotas_pendientes = saldo_inquilino_hon / valor_por_cuota if valor_por_cuota > 0 else 0
                     saldo_hon_fmt = f"$ {saldo_inquilino_hon:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                    st.warning(f"💵 Saldo pendiente: **{saldo_hon_fmt}** — {cuotas_pendientes:.1f} cuota(s) de {valor_por_cuota_fmt} c/u.")
+                    st.warning(f"💵 Saldo pendiente: **{saldo_hon_fmt}** — {cuotas_pendientes_hon} cuota(s) de {valor_por_cuota_fmt} c/u.")
+                else:
+                    st.success("✅ Honorarios completamente abonados.")
     
             # --- 5. RESPALDO Y GARANTÍAS DEL CONTRATO ---
             st.markdown("### 5. Respaldo y Garantías del Contrato")
@@ -2783,7 +2840,7 @@ if tab_carga:
                     key="deposito_total_live_sec5"
                 )
     
-                val_cuotas_dep = int(u.get('cuotas_deposito', 1)) if u and u.get('cuotas_deposito') not in (None, 0) else 1
+                val_cuotas_dep = max(1, _safe_int(u.get('cuotas_deposito'), 1)) if u else 1
                 cuotas_deposito = ch_dep2.number_input(
                     "Cuotas pactadas para el pago:", 
                     min_value=1, 
@@ -2796,24 +2853,12 @@ if tab_carga:
                 # Valor calculado por cuota
                 valor_por_cuota_dep = monto_deposito_total / cuotas_deposito if cuotas_deposito > 0 else 0.0
                 valor_por_cuota_dep_fmt = f"$ {valor_por_cuota_dep:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                ch_dep3.number_input(
-                    "Valor por cuota ($):", 
-                    value=valor_por_cuota_dep, 
-                    disabled=True, 
-                    key="valor_cuota_dep_live"
-                )
+                ch_dep3.metric("Valor por cuota ($):", value=valor_por_cuota_dep_fmt)
     
-                val_deposito_pagado = float(u['garantia_pagada']) if u and u.get('garantia_pagada') is not None else 0.0
-                deposito_pagados = st.number_input(
-                    "Monto de Depósito Reintegrado / Pagado a la fecha ($):", 
-                    min_value=0.0, 
-                    value=val_deposito_pagado, 
-                    step=5000.0, 
-                    disabled=not permitir_edicion, 
-                    key="dep_pagados_live_sec5"
-                )
+                # Monto pagado calculado: cuotas_pagadas × valor_por_cuota_dep
+                deposito_pagados = 0.0  # placeholder, se recalcula abajo
     
-                val_cuotas_dep_pagas = int(u['cuotas_deposito_pagadas']) if u and u.get('cuotas_deposito_pagadas') is not None else 0
+                val_cuotas_dep_pagas = _safe_int(u.get('cuotas_deposito_pagadas'), 0) if u else 0
                 cuotas_deposito_pagadas = st.number_input(
                     "Cuotas de depósito pagadas:",
                     min_value=0,
@@ -2823,19 +2868,24 @@ if tab_carga:
                     disabled=not permitir_edicion,
                     key="cuotas_dep_pagas_live"
                 )
-                    
-                saldo_inquilino_dep = max(0.0, monto_deposito_total - deposito_pagados)
-                    
-                if saldo_inquilino_dep <= 0 and monto_deposito_total > 0:
+
+                # Monto depositado calculado
+                monto_ya_pagado_dep = cuotas_deposito_pagadas * valor_por_cuota_dep
+                deposito_pagados = monto_ya_pagado_dep
+                monto_pagado_dep_fmt = f"$ {monto_ya_pagado_dep:,.2f}".replace(",","v").replace(".",",").replace("v",".")
+                st.metric("Monto depositado a la fecha ($):", value=monto_pagado_dep_fmt)
+                saldo_inquilino_dep = max(0.0, monto_deposito_total - monto_ya_pagado_dep)
+                cuotas_pendientes_dep = max(0, int(cuotas_deposito) - cuotas_deposito_pagadas)
+
+                if monto_deposito_total == 0:
+                    estado_garantia_calculado = "Sin Depósito"
+                elif saldo_inquilino_dep <= 0:
                     estado_garantia_calculado = "Depositada Completa"
                     st.success("✅ Depósito de respaldo: **abonado en su totalidad.**")
-                elif monto_deposito_total == 0:
-                    estado_garantia_calculado = "Sin Depósito"
                 else:
                     saldo_dep_fmt = f"$ {saldo_inquilino_dep:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
-                    cuotas_pendientes_dep = saldo_inquilino_dep / valor_por_cuota_dep if valor_por_cuota_dep > 0 else 0
                     estado_garantia_calculado = f"Financiando (Saldo: {saldo_dep_fmt})"
-                    st.warning(f"💵 Saldo pendiente: **{saldo_dep_fmt}** — {cuotas_pendientes_dep:.1f} cuota(s) de {valor_por_cuota_dep_fmt} c/u.")
+                    st.warning(f"💵 Saldo pendiente: **{saldo_dep_fmt}** — {cuotas_pendientes_dep} cuota(s) de {valor_por_cuota_dep_fmt} c/u.")
     
             # --- 6. DESGLOSE DE SERVICIOS MENSUALES ($) ---
             st.markdown("### 6. Desglose de Servicios Mensuales ($)")
@@ -3070,8 +3120,9 @@ if tab_auxiliares:
                                 cursor = conn.cursor()
                                 cursor.execute('''
                                     INSERT INTO inquilinos (empresa_id, apellidos, nombres, dni, telefono, email)
-                                    VALUES (%s, %s, %s, %s, %s)
-                                ''', (apellidos.strip(), nombres.strip(), dni.strip() or None, tel.strip() or None, email.strip() or None))
+                                    VALUES (%s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT DO NOTHING
+                                ''', (st.session_state.get("empresa_id", 0), apellidos.strip(), nombres.strip(), dni.strip() or None, tel.strip() or None, email.strip() or None))
                                 conn.commit()
                                 st.success(f"✅ Inquilino '{apellidos}, {nombres}' guardado correctamente.")
                             except psycopg2.errors.UniqueViolation:
@@ -3115,8 +3166,9 @@ if tab_auxiliares:
                                 cursor.execute('''
                                     INSERT INTO propiedades (empresa_id, alias_propiedad, calle, numero, departamento, propietario, 
                                                             ciudad, provincia, tipo, nis, cuenta_gas, finca, cuenta_ooss, nro_padron) 
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                ''', (alias, calle, numero, depto, propietario, ciudad, provincia, tipo, 
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT DO NOTHING
+                                ''', (st.session_state.get("empresa_id", 0), alias, calle, numero, depto, propietario, ciudad, provincia, tipo, 
                                       nis, cuenta_gas, finca, cuenta_ooss, nro_padron))
                                 conn.commit()
                                 st.success("Propiedad guardada.")
