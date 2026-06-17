@@ -3121,6 +3121,10 @@ if tab_carga:
                         st.success("✔️ ¡Nuevo contrato creado e insertado con éxito!")
     
                     conn.commit()
+                    # Limpiar cache para que los nuevos datos aparezcan de inmediato
+                    obtener_datos_desplegables.clear()
+                    st.session_state.datos_contrato = None
+                    st.session_state.propiedad_activa = None
                     # Actualización del session_state post-guardado para mantener consistencia general
                     st.session_state.ultimo_contrato = obtener_ultimo_contrato()
                     st.rerun()
@@ -3173,6 +3177,8 @@ if tab_auxiliares:
                                 ))
                                 conn.commit()
                                 st.success(f"✅ Inquilino '{apellidos}, {nombres}' guardado correctamente.")
+                                obtener_datos_desplegables.clear()
+                                st.rerun()
                             except psycopg2.errors.UniqueViolation:
                                 st.error("⚠️ Ya existe un inquilino con ese DNI o con el mismo apellido y nombre.")
                             except Exception as e:
@@ -3223,6 +3229,8 @@ if tab_auxiliares:
                                 ))
                                 conn.commit()
                                 st.success("Propiedad guardada.")
+                                obtener_datos_desplegables.clear()
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
                             finally:
