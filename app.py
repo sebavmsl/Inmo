@@ -643,14 +643,8 @@ def verificar_usuario(username, password):
     username_clean = username.strip()
     # Control 1: Superadmin en secrets.toml
     try:
-        # DEBUG temporario — borrar después
-        _dbg_user = _get_secret("superadmin", "username", "SUPERADMIN_USERNAME")
-        _dbg_env_keys = {k: v[:4]+"..." for k, v in os.environ.items() if any(x in k.lower() for x in ['super', 'admin', 'user', 'pass', 'hash'])}
-        st.caption(f"DEBUG: secret_user='{_dbg_user}' | env_vars={_dbg_env_keys}")
-
         if username_clean == _get_secret("superadmin", "username", "SUPERADMIN_USERNAME"):
             stored_hash = (_get_secret("superadmin", "password_hash", "SUPERADMIN_PASSWORD_HASH") or "").encode("utf-8")
-            st.caption(f"DEBUG: user_secret='{_get_secret('superadmin','username','SUPERADMIN_USERNAME')}' user_input='{username_clean}' hash_len={len(stored_hash)}")
             if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
                 return {"nombre_empresa": "Panel de Control Global",
                         "archivo_db": "central.db", "rol": "superadmin"}
