@@ -20,14 +20,21 @@ from contextlib import contextmanager
 # En Render no hay secrets.toml — se usan variables de entorno
 def _get_secret(section, key, env_var=None):
     """Lee de st.secrets (Streamlit Cloud) o variables de entorno (Render)."""
+    # Intentar st.secrets primero
     try:
-        return st.secrets[section][key]
+        val = st.secrets[section][key]
+        if val:
+            return val
     except Exception:
-        if env_var:
-            return os.environ.get(env_var)
-        # Intentar nombre compuesto: SECTION__KEY
-        _env = f"{section.upper()}__{key.upper()}"
-        return os.environ.get(_env) or os.environ.get(key.upper())
+        pass
+    # Fallback: variable de entorno explícita
+    if env_var and os.environ.get(env_var):
+        return os.environ.get(env_var)
+    # Fallback: nombre compuesto SECTION__KEY
+    _env = f"{section.upper()}__{key.upper()}"
+    if os.environ.get(_env):
+        return os.environ.get(_env)
+    return None
 
 # ── PostgreSQL / Supabase ────────────────────────────────────────────────────
 @st.cache_resource
