@@ -617,7 +617,6 @@ def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
                     conn.close()
 
 # =====================================================================
-st.write("DEBUG:", _get_secret("superadmin", "username", "SUPERADMIN_USERNAME"))
 # 2. LÓGICA DE AUTENTICACIÓN (BCRYPT UNIFICADO)
 # =====================================================================
 
