@@ -20,28 +20,37 @@ from contextlib import contextmanager
 # En Render no hay secrets.toml — se usan variables de entorno
 def _get_secret(section, key, env_var=None):
     """Lee de st.secrets (Streamlit Cloud) o variables de entorno (Render)."""
-    # Intentar st.secrets primero
+    # 1. Intentar st.secrets
     try:
         val = st.secrets[section][key]
-        if val:
-            return val
+        if val is not None:
+            return str(val)
     except Exception:
         pass
-    # Fallback: probar múltiples nombres de variable de entorno
-    _candidates = []
-    if env_var:
-        _candidates.append(env_var)
-    _candidates += [
-        f"{section.upper()}__{key.upper()}",
-        f"{section.lower()}__{key.lower()}",
-        f"{section}_{key}",
-        key.upper(),
-        key.lower(),
-        key,
+
+    # 2. Variables de entorno — probar todos los formatos posibles
+    _candidates = [
+        f"{section}__{key}",           # superadmin__username
+        f"{section.upper()}__{key.upper()}",  # SUPERADMIN__USERNAME
+        f"{section}_{key}",            # superadmin_username
+        f"{section.upper()}_{key.upper()}",   # SUPERADMIN_USERNAME
     ]
+    if env_var:
+        _candidates.insert(0, env_var)
+        _candidates.insert(1, env_var.lower())
+
     for _c in _candidates:
-        if os.environ.get(_c):
-            return os.environ.get(_c)
+        v = os.environ.get(_c)
+        if v:
+            return v
+
+    # 3. Buscar ignorando mayúsculas
+    _env_lower = {k.lower(): v for k, v in os.environ.items()}
+    for _c in _candidates:
+        v = _env_lower.get(_c.lower())
+        if v:
+            return v
+
     return None
 
 # ── PostgreSQL / Supabase ────────────────────────────────────────────────────
@@ -634,6 +643,11 @@ def verificar_usuario(username, password):
     username_clean = username.strip()
     # Control 1: Superadmin en secrets.toml
     try:
+        # DEBUG temporario — borrar después
+        _dbg_user = _get_secret("superadmin", "username", "SUPERADMIN_USERNAME")
+        _dbg_env_keys = {k: v[:4]+"..." for k, v in os.environ.items() if any(x in k.lower() for x in ['super', 'admin', 'user', 'pass', 'hash'])}
+        st.caption(f"DEBUG: secret_user='{_dbg_user}' | env_vars={_dbg_env_keys}")
+
         if username_clean == _get_secret("superadmin", "username", "SUPERADMIN_USERNAME"):
             stored_hash = (_get_secret("superadmin", "password_hash", "SUPERADMIN_PASSWORD_HASH") or "").encode("utf-8")
             st.caption(f"DEBUG: user_secret='{_get_secret('superadmin','username','SUPERADMIN_USERNAME')}' user_input='{username_clean}' hash_len={len(stored_hash)}")
