@@ -16,15 +16,39 @@ import requests
 from io import BytesIO
 from contextlib import contextmanager
 
+# ── Compatibilidad Streamlit Cloud / Render ──────────────────────────────────
+# En Render no hay secrets.toml — se usan variables de entorno
+def _get_secret(section, key, env_var=None):
+    """Lee de st.secrets (Streamlit Cloud) o variables de entorno (Render)."""
+    try:
+        return st.secrets[section][key]
+    except Exception:
+        if env_var:
+            return os.environ.get(env_var)
+        # Intentar nombre compuesto: SECTION__KEY
+        _env = f"{section.upper()}__{key.upper()}"
+        return os.environ.get(_env) or os.environ.get(key.upper())
+
 # ── PostgreSQL / Supabase ────────────────────────────────────────────────────
 @st.cache_resource
 def _get_pg_dsn():
-    db = st.secrets.get("database", {})
-    dsn = (db.get("supabase_url") or db.get("url") or db.get("connection_string")
-           or st.secrets.get("DATABASE_URL"))
+    dsn = (
+        _get_secret("database", "supabase_url", "SUPABASE_URL") or
+        _get_secret("database", "url", "DATABASE_URL") or
+        _get_secret("database", "connection_string") or
+        os.environ.get("DATABASE_URL")
+    )
     if not dsn:
-        raise RuntimeError("Falta [database] supabase_url en secrets.toml")
+        raise RuntimeError("Falta conexión a BD. Configurá SUPABASE_URL en variables de entorno o secrets.toml")
     m = re.match(r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)', dsn)
+    if m:
+        user, password, ref, db_ = m.groups()
+        if '.' not in user:
+            user = f'postgres.{ref}'
+        dsn = f'postgresql://{user}:{password}@aws-1-sa-east-1.pooler.supabase.com:6543/{db_}'
+    elif ':5432/' in dsn:
+        dsn = dsn.replace(':5432/', ':6543/')
+    return dsn
     if m:
         user, password, ref, db_ = m.groups()
         if '.' not in user:
@@ -593,8 +617,8 @@ def verificar_usuario(username, password):
     username_clean = username.strip()
     # Control 1: Superadmin en secrets.toml
     try:
-        if username_clean == st.secrets["superadmin"]["username"]:
-            stored_hash = st.secrets["superadmin"]["password_hash"].encode("utf-8")
+        if username_clean == _get_secret("superadmin", "username", "SUPERADMIN_USERNAME"):
+            stored_hash = (_get_secret("superadmin", "password_hash", "SUPERADMIN_PASSWORD_HASH") or "").encode("utf-8")
             if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
                 return {"nombre_empresa": "Panel de Control Global",
                         "archivo_db": "central.db", "rol": "superadmin"}
