@@ -10,11 +10,15 @@ import re
 import urllib.parse
 import bcrypt
 
+import math
 import psycopg2
 import psycopg2.extras
 import requests
 from io import BytesIO
 from contextlib import contextmanager
+
+# Configuración de logging — debe ir antes de cualquier código que loggee
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # ── Compatibilidad Streamlit Cloud / Render ──────────────────────────────────
 # En Render no hay secrets.toml — se usan variables de entorno
@@ -75,14 +79,6 @@ def _get_pg_dsn():
     elif ':5432/' in dsn:
         dsn = dsn.replace(':5432/', ':6543/')
     return dsn
-    if m:
-        user, password, ref, db_ = m.groups()
-        if '.' not in user:
-            user = f'postgres.{ref}'
-        dsn = f'postgresql://{user}:{password}@aws-1-sa-east-1.pooler.supabase.com:6543/{db_}'
-    elif ':5432/' in dsn:
-        dsn = dsn.replace(':5432/', ':6543/')
-    return dsn
 
 @st.cache_resource
 def _get_pool():
@@ -115,20 +111,52 @@ def _pg_conn():
     finally:
         pool.putconn(conn)
 
+class _PooledConnection:
+    """
+    Wrapper sobre una conexión psycopg2 obtenida del pool.
+    Delega todos los atributos a la conexión real, pero sobreescribe
+    close() para devolver la conexión al pool en vez de cerrarla.
+    Necesario porque psycopg2 (extensión C) no permite monkey-patch
+    de atributos nativos como conn.close directamente.
+    """
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+
+    def close(self):
+        try:
+            self._pool.putconn(self._conn)
+        except Exception:
+            self._conn.close()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+        else:
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
+        self.close()
+        return False
+
+
 def conectar_db():
-    """Obtiene conexión del pool. Llamar conn.close() la devuelve al pool."""
+    """Obtiene conexión del pool envuelta en _PooledConnection.
+    Llamar conn.close() la devuelve al pool en vez de cerrarla."""
     pool = _get_pool()
     conn = pool.getconn()
     conn.autocommit = False
-    # Monkey-patch close() para devolver al pool en vez de cerrar
-    _orig_close = conn.close
-    def _pooled_close():
-        try:
-            pool.putconn(conn)
-        except Exception:
-            _orig_close()
-    conn.close = _pooled_close
-    return conn
+    return _PooledConnection(pool, conn)
 
 def conectar_db_central():
     """Igual que conectar_db — en Postgres es la misma BD."""
@@ -365,7 +393,6 @@ def _safe_float(val, default=0.0):
     if val is None:
         return default
     try:
-        import math
         f = float(val)
         return default if math.isnan(f) or math.isinf(f) else f
     except (ValueError, TypeError):
@@ -377,9 +404,6 @@ def _safe_int(val, default=0):
         return int(_safe_float(val, default))
     except (ValueError, TypeError):
         return default
-
-# Configuración de logging (reemplaza los print() de depuración)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
 st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
@@ -429,24 +453,8 @@ def limpiar_nombre_archivo(nombre_comercial):
 # =====================================================================
 # 1. BASE DE DATOS: CONFIGURACIÓN MULTI-TENANT Y ENRUTAMIENTO
 # =====================================================================
-
-def conectar_db_central():
-    """Conexión PostgreSQL con RealDictCursor."""
-    try:
-        return psycopg2.connect(_get_pg_dsn(),
-                                cursor_factory=psycopg2.extras.RealDictCursor,
-                                connect_timeout=10)
-    except psycopg2.OperationalError as e:
-        raise RuntimeError(f"Error conectando a PostgreSQL: {e}")
-
-def conectar_db():
-    """Conexión PostgreSQL. Compatible con pd.read_sql_query y context manager."""
-    try:
-        return psycopg2.connect(_get_pg_dsn(),
-                                cursor_factory=psycopg2.extras.RealDictCursor,
-                                connect_timeout=10)
-    except psycopg2.OperationalError as e:
-        raise RuntimeError(f"Error conectando a PostgreSQL: {e}")
+# NOTA: conectar_db() y conectar_db_central() están definidas arriba
+# usando el pool de conexiones (_get_pool). No redefinir acá.
 
 def inicializar_nueva_empresa(ruta_db):
     """En PostgreSQL no hay archivos físicos. No-op."""
@@ -677,7 +685,6 @@ def verificar_usuario(username, password):
 # =====================================================================
 
 # Homologamos las variables de sesión para que todo el script use las mismas
-# Homologamos las variables de sesión para que todo el script use las mismas
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 if "username" not in st.session_state:
@@ -774,18 +781,18 @@ if not st.session_state.autenticado:
 # FUNCIONES AUXILIARES DE LÓGICA Y PARSEO
 # =====================================================================
 @st.cache_data(ttl=120)
-def obtener_datos_desplegables():
+def obtener_datos_desplegables(empresa_id: int):
+    """Cache correcto por empresa_id — evita que distintas empresas compartan el mismo cache."""
     try:
-        _eid = st.session_state.get("empresa_id", 0)
         with _pg_conn() as _conn_desp:
             with _conn_desp.cursor() as _cur_desp:
                 _cur_desp.execute(
                     "SELECT id, alias_propiedad, calle, numero, departamento, propietario, ciudad, provincia, tipo "
-                    "FROM propiedades WHERE empresa_id = %s", (_eid,)
+                    "FROM propiedades WHERE empresa_id = %s", (empresa_id,)
                 )
                 propiedades = pd.DataFrame([dict(r) for r in _cur_desp.fetchall()])
                 _cur_desp.execute(
-                    "SELECT id, apellidos, nombres FROM inquilinos WHERE empresa_id = %s", (_eid,)
+                    "SELECT id, apellidos, nombres FROM inquilinos WHERE empresa_id = %s", (empresa_id,)
                 )
                 inquilinos = pd.DataFrame([dict(r) for r in _cur_desp.fetchall()])
     except Exception as e:
@@ -1218,7 +1225,6 @@ if tab_dashboard:
             WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
         '''
 
-        conn = conectar_db()
         with _pg_conn() as _conn_d:
             with _conn_d.cursor() as _cur_d:
                 _cur_d.execute(query_dash, _params_pf)
@@ -1236,19 +1242,9 @@ if tab_dashboard:
                     _cols_pq = [x.name for x in _cur_pq.description]
             df_pagos_totales = pd.DataFrame([dict(r) for r in _rows_pq], columns=_cols_pq) if _rows_pq else pd.DataFrame(columns=_cols_pq)
         except Exception as _qe2:
-            st.error(f"❌ Error en _pagos_q: `{_qe2}`")
-            st.code(_pagos_q)
-            try:
-                with _pg_conn() as _conn2:
-                    with _conn2.cursor() as _cur2:
-                        _cur2.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'pagos_historial' ORDER BY ordinal_position")
-                        _cols_ph = [r["column_name"] for r in _cur2.fetchall()]
-                st.write("Columnas reales de pagos_historial:", _cols_ph)
-            except Exception as _ce:
-                st.write(f"No se pudo leer schema: {_ce}")
-            conn.close()
+            logging.error(f"[Dashboard] Error en query pagos: {_qe2} | Query: {_pagos_q}")
+            st.error("❌ Error al cargar la recaudación. Revisá los logs del servidor.")
             st.stop()
-        conn.close()
         
         total_activos = len(df_dash)
         caja_historica = df_pagos_totales['monto_total'].sum() if not df_pagos_totales.empty else 0.0
@@ -1270,8 +1266,8 @@ if tab_dashboard:
                 if 0 <= dias_para_vencer <= 60:
                     vencen_pronto += 1
                     lista_alertas_vencimiento.append(f"⚠️ El contrato de **{row['inquilino']}** ({row['alias_propiedad']}) vence en **{dias_para_vencer} días** ({row['fin_contrato']}).")
-            except:
-                pass
+            except Exception as _e_venc:
+                logging.warning(f"[Dashboard] Error procesando vencimiento para fila: {_e_venc}")
                 
             opciones_meses = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
             _act_raw = row['act_contrato']
@@ -1284,7 +1280,7 @@ if tab_dashboard:
                 _prox_str = str(row.get('prox_actualizacion', '') or '').strip()
                 if _prox_str:
                     try: _prox_dt = datetime.strptime(_prox_str, "%Y-%m-%d").date()
-                    except: _prox_dt = datetime.strptime(_prox_str, "%d/%m/%Y").date()
+                    except Exception: _prox_dt = datetime.strptime(_prox_str, "%d/%m/%Y").date()
                     
                     _mes_actual = fecha_hoy.replace(day=1)
                     _mes_proximo = (_mes_actual + dateutil.relativedelta.relativedelta(months=1))
@@ -1473,7 +1469,6 @@ if tab_pagos:
         )
         st.session_state["cotizacion_usd_hist"] = _cotizacion_usd_pago
     
-        conn = conectar_db()
     # CORRECCIÓN: Agregamos c.monto_inicial a la consulta SQL
         query_activos = '''
             SELECT 
@@ -2270,7 +2265,7 @@ if tab_pagos:
                             _n = int(_match_p.group(1))
                             _ini_str = str(c_datos['inicio_contrato']).strip()
                             try: _ini_dt = datetime.strptime(_ini_str, "%Y-%m-%d").date()
-                            except: _ini_dt = datetime.strptime(_ini_str, "%d/%m/%Y").date()
+                            except Exception: _ini_dt = datetime.strptime(_ini_str, "%d/%m/%Y").date()
                             _fm = _ini_dt + dateutil.relativedelta.relativedelta(months=_n - 1)
                             _meses_pdf = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",
                                          7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
@@ -2316,7 +2311,6 @@ if tab_historial_pagos:
         _where_hist = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if _pf_hist_activo else ""
         _params_hist = (_eid_hist, _pf_hist, _eid_hist) if _pf_hist_activo else (_eid_hist,)
 
-        conn = conectar_db()
         # Query ampliada: trae todos los montos detallados para poder reimprimir el recibo
         query_historial = f"""
             SELECT
@@ -2370,7 +2364,6 @@ if tab_historial_pagos:
                 _rows_h = _cur_h.fetchall()
                 _cols_h = [x.name for x in _cur_h.description]
         df_historial = pd.DataFrame([dict(r) for r in _rows_h], columns=_cols_h) if _rows_h else pd.DataFrame(columns=_cols_h)
-        conn.close()
 
         # Convertir columnas NUMERIC (Decimal) a float
         if not df_historial.empty:
@@ -2646,7 +2639,7 @@ if tab_carga:
     with tab_carga:
         st.subheader("Formulario de Registro Técnico del Contrato")
     
-        dict_propiedades, dict_inquilinos = obtener_datos_desplegables()
+        dict_propiedades, dict_inquilinos = obtener_datos_desplegables(st.session_state.get("empresa_id", 0))
             
         if not dict_propiedades or not dict_inquilinos:
             st.warning("⚠️ Módulo de carga bloqueado: Debe registrar al menos una Propiedad y un Inquilino en la pestaña '⚙️ Cargar Inquilinos / Propiedades' para poder generar un contrato.")
@@ -3660,7 +3653,7 @@ if tab_auxiliares:
             st.markdown("### 🔄 Modificar Datos de Inquilinos o Propiedades Existentes")
     
             # Consultamos los desplegables actualizados del sistema
-            dict_propiedades_edit, dict_inquilinos_edit = obtener_datos_desplegables()
+            dict_propiedades_edit, dict_inquilinos_edit = obtener_datos_desplegables(st.session_state.get("empresa_id", 0))
     
             # AQUÍ HACEMOS LA SEPARACIÓN EN PESTAÑAS
             tab_edit_inq, tab_edit_prop = st.tabs(["👤 Editar Inquilino", "🏠 Editar Propiedad"])
@@ -3674,10 +3667,12 @@ if tab_auxiliares:
                     id_inq_edit = dict_inquilinos_edit[inquilino_a_editar]
                         
                     conn = conectar_db()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT apellidos, nombres, dni, telefono, email FROM inquilinos WHERE id = %s", (id_inq_edit,))
-                    datos_inq = cursor.fetchone()
-                    conn.close()
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT apellidos, nombres, dni, telefono, email FROM inquilinos WHERE id = %s", (id_inq_edit,))
+                        datos_inq = cursor.fetchone()
+                    finally:
+                        conn.close()
                         
                     if datos_inq:
                         crear_formulario_editar_inquilino(id_inq_edit, datos_inq)
@@ -3691,10 +3686,12 @@ if tab_auxiliares:
                     id_prop_edit = dict_propiedades_edit[propiedad_a_editar]
                         
                     conn = conectar_db()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT alias_propiedad, calle, numero, departamento, COALESCE(grupo, '') AS grupo FROM propiedades WHERE id = %s", (id_prop_edit,))
-                    datos_prop = cursor.fetchone()
-                    conn.close()
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT alias_propiedad, calle, numero, departamento, COALESCE(grupo, '') AS grupo FROM propiedades WHERE id = %s", (id_prop_edit,))
+                        datos_prop = cursor.fetchone()
+                    finally:
+                        conn.close()
                         
                     if datos_prop:
                         crear_formulario_editar_propiedad(id_prop_edit, datos_prop)
@@ -4247,13 +4244,13 @@ if tab_superadmin:
                                                             valor_celda = None
                                                         elif col_db in ['inicio_contrato', 'fin_contrato', 'prox_actualizacion']:
                                                             try: valor_celda = pd.to_datetime(str(valor_celda).strip(), dayfirst=True).strftime('%Y-%m-%d')
-                                                            except: valor_celda = None
+                                                            except Exception: valor_celda = None
                                                         elif col_db in ['act_contrato', 'mes_contrato', 'mes_actualizacion_contrato', 'cuota_honorarios', 'honorarios_pagados', 'garantia_pagada']:
                                                             try: valor_celda = int(float(str(valor_celda).split('.')[0]))
-                                                            except: valor_celda = None
+                                                            except Exception: valor_celda = None
                                                         elif col_db in ['monto_inicial', 'alquiler', 'monto_honorarios', 'monto_garantia', 'imp_inmobiliario', 'expensas', 'edesal', 'gas', 'municipalidad', 'ooss', 'cochera']:
                                                             try: valor_celda = round(float(str(valor_celda).replace(',', '.')), 2)
-                                                            except: valor_celda = None
+                                                            except Exception: valor_celda = None
                                                         else:
                                                             valor_celda = str(valor_celda).strip()
                                                         registro_fila[col_db] = valor_celda
@@ -4682,8 +4679,6 @@ if tab_gastos:
     with tab_gastos:
         st.subheader("🔧 Registro de Gastos de Propiedades")
 
-        conn = conectar_db()
-
         # --- Cargar propiedades disponibles (filtradas si es propietario) ---
         _pf_g = st.session_state.get("propietario_filtro", "")
         _pf_g_activo = rol_actual == "propietario" and bool(_pf_g)
@@ -4697,7 +4692,6 @@ if tab_gastos:
                 with _cpg2.cursor() as _cupg2:
                     _cupg2.execute("SELECT id, alias_propiedad, propietario, calle, numero, grupo FROM propiedades WHERE empresa_id = %s ORDER BY alias_propiedad", (st.session_state.get("empresa_id", 0),))
                     _props_gasto = pd.DataFrame([dict(r) for r in _cupg2.fetchall()])
-        conn.close()
 
         _categorias_gasto = [
             "🔨 Reparación / Arreglo",
@@ -4862,12 +4856,9 @@ if tab_gastos:
 
         # ── SUBPESTAÑA 2: HISTORIAL ─────────────────────────────────────
         with subtab_historial:
-            conn = conectar_db()
             _eid_g = st.session_state.get("empresa_id", 0)
             _where_g = "AND p.propietario = %s" if _pf_g_activo else ""
             _params_g = (_eid_g, _pf_g) if _pf_g_activo else (_eid_g,)
-            with _pg_conn() as _cg, _cg.cursor() as _cug:
-              _df_gastos = None
             with _pg_conn() as _conn_dg:
                 with _conn_dg.cursor() as _cur_dg:
                     _cur_dg.execute(f"""
@@ -4890,7 +4881,6 @@ if tab_gastos:
                     _rows_dg = _cur_dg.fetchall()
                     _cols_dg = [x.name for x in _cur_dg.description]
             _df_gastos = pd.DataFrame([dict(r) for r in _rows_dg], columns=_cols_dg) if _rows_dg else pd.DataFrame(columns=_cols_dg)
-            conn.close()
 
             if _df_gastos.empty:
                 st.info("Aún no se registraron gastos.")
@@ -4940,8 +4930,6 @@ if tab_gastos:
         # ── SUBPESTAÑA 3: MÉTRICAS POR PROPIEDAD ────────────────────────
         with subtab_metricas:
             st.markdown("#### 📊 Ingresos vs. Salidas por Propiedad")
-
-            conn = conectar_db()
 
             # ── Selector de vista: Individual o Grupo ──
             _vista_metrica = st.radio(
