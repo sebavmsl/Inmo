@@ -27,13 +27,21 @@ def _get_secret(section, key, env_var=None):
             return val
     except Exception:
         pass
-    # Fallback: variable de entorno explícita
-    if env_var and os.environ.get(env_var):
-        return os.environ.get(env_var)
-    # Fallback: nombre compuesto SECTION__KEY
-    _env = f"{section.upper()}__{key.upper()}"
-    if os.environ.get(_env):
-        return os.environ.get(_env)
+    # Fallback: probar múltiples nombres de variable de entorno
+    _candidates = []
+    if env_var:
+        _candidates.append(env_var)
+    _candidates += [
+        f"{section.upper()}__{key.upper()}",
+        f"{section.lower()}__{key.lower()}",
+        f"{section}_{key}",
+        key.upper(),
+        key.lower(),
+        key,
+    ]
+    for _c in _candidates:
+        if os.environ.get(_c):
+            return os.environ.get(_c)
     return None
 
 # ── PostgreSQL / Supabase ────────────────────────────────────────────────────
@@ -43,10 +51,12 @@ def _get_pg_dsn():
         _get_secret("database", "supabase_url", "SUPABASE_URL") or
         _get_secret("database", "url", "DATABASE_URL") or
         _get_secret("database", "connection_string") or
-        os.environ.get("DATABASE_URL")
+        os.environ.get("supabase_url") or
+        os.environ.get("DATABASE_URL") or
+        os.environ.get("database_url")
     )
     if not dsn:
-        raise RuntimeError("Falta conexión a BD. Configurá SUPABASE_URL en variables de entorno o secrets.toml")
+        raise RuntimeError("Falta conexión a BD. Configurá supabase_url en variables de entorno o secrets.toml")
     m = re.match(r'postgresql://([^:]+):([^@]+)@db\.([a-z0-9]+)\.supabase\.co(?::\d+)?/(\S+)', dsn)
     if m:
         user, password, ref, db_ = m.groups()
@@ -626,6 +636,7 @@ def verificar_usuario(username, password):
     try:
         if username_clean == _get_secret("superadmin", "username", "SUPERADMIN_USERNAME"):
             stored_hash = (_get_secret("superadmin", "password_hash", "SUPERADMIN_PASSWORD_HASH") or "").encode("utf-8")
+            st.caption(f"DEBUG: user_secret='{_get_secret('superadmin','username','SUPERADMIN_USERNAME')}' user_input='{username_clean}' hash_len={len(stored_hash)}")
             if bcrypt.checkpw(password.encode("utf-8"), stored_hash):
                 return {"nombre_empresa": "Panel de Control Global",
                         "archivo_db": "central.db", "rol": "superadmin"}
