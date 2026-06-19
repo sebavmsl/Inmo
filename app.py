@@ -2570,71 +2570,96 @@ if tab_historial_pagos:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
 
-                # ── Descarga PDF ─────────────────────────────────────────
-                _titulo_rep = f"Reporte de Cobros — {_rep_desde.strftime('%d/%m/%Y')} al {_rep_hasta.strftime('%d/%m/%Y')}"
-                _subtitulo_rep = f"Usuario: {_rep_usuario} | Empresa: {st.session_state.get('nombre_empresa', '')}"
-                _filas_pdf_rep = ""
-                for _, _rr in df_rep_vista.iterrows():
-                    def _fv(v):
-                        try: return f"$ {float(v):,.2f}"
-                        except Exception: return str(v)
-                    _filas_pdf_rep += f"""<tr>
-                        <td>{_rr.get('FECHA IMPACTO','')}</td>
-                        <td>{_rr.get('PERIODO','')}</td>
-                        <td>{_rr.get('MES/AÑO','')}</td>
-                        <td>{_rr.get('PROPIEDAD','')}</td>
-                        <td>{_rr.get('INQUILINO','')}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('ALQUILER ($)',0))}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('EXPENSAS ($)',0))}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('COCHERA ($)',0))}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('SERVICIOS ($)',0))}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('TOTAL ($)',0))}</td>
-                        <td style='text-align:right'>{_fv(_rr.get('ABONADO ($)',0))}</td>
-                    </tr>"""
+                # ── Descarga PDF real con ReportLab ─────────────────────
+                try:
+                    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+                    from reportlab.lib.pagesizes import A4, landscape
+                    from reportlab.lib import colors
+                    from reportlab.lib.units import mm
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+                    import io as _io_pdf
 
-                _html_rep = f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">
-<style>
-  body {{ font-family: Arial, sans-serif; font-size: 11px; color: #222; padding: 20px; }}
-  h2 {{ color: #1a365d; margin-bottom: 4px; }}
-  .sub {{ color: #555; font-size: 12px; margin-bottom: 16px; }}
-  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-  th {{ background: #1a365d; color: white; padding: 7px 6px; text-align: left; font-size: 10px; }}
-  td {{ padding: 5px 6px; border-bottom: 1px solid #e0e0e0; }}
-  tr:nth-child(even) {{ background: #f7f9fc; }}
-  .totales {{ margin-top: 20px; background: #edf2f7; padding: 10px 14px; border-radius: 4px; font-size: 12px; }}
-  .totales span {{ margin-right: 24px; font-weight: bold; }}
-  .footer {{ margin-top: 30px; font-size: 10px; color: #888; border-top: 1px solid #ddd; padding-top: 8px; }}
-</style>
-</head><body>
-<h2>{_titulo_rep}</h2>
-<div class="sub">{_subtitulo_rep}</div>
-<table>
-  <thead><tr>
-    <th>Fecha</th><th>Período</th><th>Mes/Año</th><th>Propiedad</th><th>Inquilino</th>
-    <th>Alquiler</th><th>Expensas</th><th>Cochera</th><th>Servicios</th><th>Total</th><th>Abonado</th>
-  </tr></thead>
-  <tbody>{_filas_pdf_rep}</tbody>
-</table>
-<div class="totales">
-  <span>Alquiler: $ {df_rep_vista['ALQUILER ($)'].sum():,.2f}</span>
-  <span>Expensas: $ {df_rep_vista['EXPENSAS ($)'].sum() if 'EXPENSAS ($)' in df_rep_vista.columns else 0:,.2f}</span>
-  <span>Cochera: $ {df_rep_vista['COCHERA ($)'].sum() if 'COCHERA ($)' in df_rep_vista.columns else 0:,.2f}</span>
-  <span>Servicios: $ {df_rep_vista['SERVICIOS ($)'].sum():,.2f}</span>
-  <span>Total Cobrado: $ {df_rep_vista['TOTAL ($)'].sum():,.2f}</span>
-  <span>Total Abonado: $ {df_rep_vista['ABONADO ($)'].sum():,.2f}</span>
-</div>
-<div class="footer">Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} — {st.session_state.get('nombre_empresa','')} | {len(df_rep_vista)} registros</div>
-<script>window.print();</script>
-</body></html>"""
+                    _buf_pdf = _io_pdf.BytesIO()
+                    _doc_rep = SimpleDocTemplate(
+                        _buf_pdf,
+                        pagesize=landscape(A4),
+                        leftMargin=15*mm, rightMargin=15*mm,
+                        topMargin=15*mm, bottomMargin=15*mm,
+                        title=f"Reporte de Cobros {_rep_desde} - {_rep_hasta}"
+                    )
+                    _styles = getSampleStyleSheet()
+                    _story = []
 
-                _nombre_pdf = f"reporte_cobros_{_rep_desde}_{_rep_hasta}.html"
-                st.download_button(
-                    "🖨️ Descargar PDF (imprimir desde el navegador)",
-                    _html_rep,
-                    file_name=_nombre_pdf,
-                    mime="text/html",
-                )
+                    # Título
+                    _st_titulo = ParagraphStyle("titulo_rep", parent=_styles["Heading1"], fontSize=14, textColor=colors.HexColor("#1a365d"), spaceAfter=4)
+                    _st_sub    = ParagraphStyle("sub_rep",    parent=_styles["Normal"],   fontSize=9,  textColor=colors.HexColor("#555555"), spaceAfter=10)
+                    _story.append(Paragraph(f"Reporte de Cobros — {_rep_desde.strftime('%d/%m/%Y')} al {_rep_hasta.strftime('%d/%m/%Y')}", _st_titulo))
+                    _story.append(Paragraph(f"Usuario: {_rep_usuario}  |  Empresa: {st.session_state.get('nombre_empresa', '')}  |  {len(df_rep_vista)} registros", _st_sub))
+                    _story.append(Spacer(1, 4*mm))
+
+                    # Tabla de datos
+                    _headers_pdf = ["Fecha", "Período", "Mes/Año", "Propiedad", "Inquilino", "Alquiler", "Expensas", "Cochera", "Servicios", "Total ($)", "Abonado ($)"]
+                    _col_keys    = ["FECHA IMPACTO", "PERIODO", "MES/AÑO", "PROPIEDAD", "INQUILINO", "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]
+                    _money_cols  = {"ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"}
+
+                    _col_widths = [22*mm, 28*mm, 22*mm, 38*mm, 42*mm, 22*mm, 20*mm, 20*mm, 20*mm, 22*mm, 22*mm]
+
+                    _st_cell  = ParagraphStyle("cell",  parent=_styles["Normal"], fontSize=7, leading=9)
+                    _st_money = ParagraphStyle("money", parent=_styles["Normal"], fontSize=7, leading=9, alignment=TA_RIGHT)
+                    _st_hdr   = ParagraphStyle("hdr",   parent=_styles["Normal"], fontSize=7, leading=9, textColor=colors.white, alignment=TA_CENTER)
+
+                    _data_pdf = [[Paragraph(h, _st_hdr) for h in _headers_pdf]]
+                    for _, _rr in df_rep_vista.iterrows():
+                        _fila = []
+                        for _ck in _col_keys:
+                            _val = _rr.get(_ck, "")
+                            if _ck in _money_cols:
+                                try: _txt = f"$ {float(_val):,.2f}"
+                                except Exception: _txt = str(_val)
+                                _fila.append(Paragraph(_txt, _st_money))
+                            else:
+                                _fila.append(Paragraph(str(_val or ""), _st_cell))
+                        _data_pdf.append(_fila)
+
+                    # Fila de totales
+                    _tot_fila = [Paragraph("", _st_cell)] * 5
+                    for _ck in ["ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]:
+                        try: _tv = f"$ {df_rep_vista[_ck].sum():,.2f}"
+                        except Exception: _tv = ""
+                        _tot_fila.append(Paragraph(_tv, _st_money))
+                    _data_pdf.append(_tot_fila)
+
+                    _tbl_rep = Table(_data_pdf, colWidths=_col_widths, repeatRows=1)
+                    _tbl_rep.setStyle(TableStyle([
+                        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#1a365d")),
+                        ("ROWBACKGROUNDS",(0, 1), (-1, -2), [colors.white, colors.HexColor("#f0f4f8")]),
+                        ("BACKGROUND",    (0, -1), (-1, -1), colors.HexColor("#dce6f4")),
+                        ("FONTNAME",      (0, -1), (-1, -1), "Helvetica-Bold"),
+                        ("GRID",          (0, 0), (-1, -1), 0.3, colors.HexColor("#c0c0c0")),
+                        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+                        ("TOPPADDING",    (0, 0), (-1, -1), 3),
+                        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                    ]))
+                    _story.append(_tbl_rep)
+                    _story.append(Spacer(1, 6*mm))
+
+                    # Pie de página
+                    _story.append(Paragraph(
+                        f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} — {st.session_state.get('nombre_empresa', '')}",
+                        ParagraphStyle("footer_rep", parent=_styles["Normal"], fontSize=7, textColor=colors.grey)
+                    ))
+
+                    _doc_rep.build(_story)
+                    _buf_pdf.seek(0)
+                    st.download_button(
+                        "🖨️ Descargar PDF",
+                        _buf_pdf,
+                        file_name=f"reporte_cobros_{_rep_desde}_{_rep_hasta}.pdf",
+                        mime="application/pdf",
+                    )
+                except Exception as _e_pdf:
+                    st.error(f"Error al generar PDF: {_e_pdf}")
 
             # ── Sección de Reimpresión ────────────────────────────────────
             st.markdown("---")
