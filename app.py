@@ -2097,7 +2097,7 @@ if tab_pagos:
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
-                        c_datos['codigo'], c_datos.get('propiedad_dir', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
+                        c_datos['codigo'], c_datos.get('alias_propiedad', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
                         mes_periodo_texto, _monto_alq_insert,
                         datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                         _monto_exp_insert, _monto_ede_insert, _monto_gas_insert, _monto_mun_insert,
@@ -2357,7 +2357,7 @@ if tab_historial_pagos:
                 0                                           AS "RETENCIÓN AGENCIA (USD)"
             FROM pagos_historial ph
             LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
-            LEFT JOIN propiedades p2 ON ph.propiedad = p2.alias_propiedad AND p2.empresa_id = ph.empresa_id
+            LEFT JOIN propiedades p2 ON (ph.propiedad = p2.alias_propiedad OR ph.propiedad = (p2.calle || ' ' || p2.numero)) AND p2.empresa_id = ph.empresa_id
             WHERE ph.empresa_id = %s {_where_hist}
             ORDER BY ph.id DESC
         """
