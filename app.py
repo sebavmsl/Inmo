@@ -2543,31 +2543,27 @@ if tab_historial_pagos:
 
                 st.dataframe(df_rep_vista, use_container_width=True, hide_index=True)
 
-                # ── Descarga Excel ───────────────────────────────────────
+                # ── Descarga Excel (CSV compatible con Excel) ────────────
                 import io as _io
-                _buf_xlsx = _io.BytesIO()
-                with pd.ExcelWriter(_buf_xlsx, engine="xlsxwriter") as _writer:
-                    df_rep_vista.to_excel(_writer, index=False, sheet_name="Cobros")
-                    # Hoja de totales
-                    _df_tot = pd.DataFrame({
-                        "Concepto": ["Total Alquiler", "Total Expensas", "Total Cochera", "Total Servicios", "Total Cobrado", "Total Abonado"],
-                        "Monto ($)": [
-                            df_rep_vista["ALQUILER ($)"].sum(),
-                            df_rep_vista["EXPENSAS ($)"].sum() if "EXPENSAS ($)" in df_rep_vista.columns else 0,
-                            df_rep_vista["COCHERA ($)"].sum() if "COCHERA ($)" in df_rep_vista.columns else 0,
-                            df_rep_vista["SERVICIOS ($)"].sum(),
-                            df_rep_vista["TOTAL ($)"].sum(),
-                            df_rep_vista["ABONADO ($)"].sum(),
-                        ]
-                    })
-                    _df_tot.to_excel(_writer, index=False, sheet_name="Totales")
-                _buf_xlsx.seek(0)
-                _nombre_xlsx = f"reporte_cobros_{_rep_desde}_{_rep_hasta}.xlsx"
+                _buf_csv = _io.StringIO()
+                df_rep_vista.to_csv(_buf_csv, index=False, sep=";", decimal=",")
+                # Agregar hoja de totales al final
+                _buf_csv.write("\n;TOTALES\n")
+                for _concepto, _col in [
+                    ("Total Alquiler",  "ALQUILER ($)"),
+                    ("Total Expensas",  "EXPENSAS ($)"),
+                    ("Total Cochera",   "COCHERA ($)"),
+                    ("Total Servicios", "SERVICIOS ($)"),
+                    ("Total Cobrado",   "TOTAL ($)"),
+                    ("Total Abonado",   "ABONADO ($)"),
+                ]:
+                    _v = df_rep_vista[_col].sum() if _col in df_rep_vista.columns else 0
+                    _buf_csv.write(f"{_concepto};{_v:,.2f}\n")
                 st.download_button(
-                    "⬇️ Descargar Excel",
-                    _buf_xlsx,
-                    file_name=_nombre_xlsx,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "⬇️ Descargar Excel (CSV)",
+                    _buf_csv.getvalue().encode("utf-8-sig"),  # utf-8-sig para que Excel lo abra bien
+                    file_name=f"reporte_cobros_{_rep_desde}_{_rep_hasta}.csv",
+                    mime="text/csv",
                 )
 
                 # ── Descarga PDF real con ReportLab ─────────────────────
