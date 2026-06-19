@@ -2093,8 +2093,8 @@ if tab_pagos:
                             monto_cochera, monto_ooss, monto_imp_inmobiliario,
                             monto_honorarios, monto_garantia,
                             monto_abonado, saldo_pendiente, saldos_anteriores,
-                            cotizacion_usd
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            cotizacion_usd, registrado_por
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
                         c_datos['codigo'], c_datos.get('propiedad_dir', ''), c_datos.get('inquilino_nombre', ''),
@@ -2104,7 +2104,7 @@ if tab_pagos:
                         _monto_coch_insert, _monto_ooss_insert, _monto_imp_insert2,
                         monto_honorarios_pago, monto_garantia_pago,
                         monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
-                        _tc_insert
+                        _tc_insert, st.session_state.get("username", "")
                     ))
 
                     # 2. Avanzar el mes vivo SOLO si es el período actual Y es el primer pago
@@ -2468,6 +2468,173 @@ if tab_historial_pagos:
             c_r3.metric("Cochera",           f"$ {df_historial['COCHERA ($)'].sum():,.2f}")
             c_r4.metric("Servicios",         f"$ {df_historial['SERVICIOS ($)'].sum():,.2f}")
             c_r5.metric("Saldo Pendiente",   f"$ {df_historial['SALDO PEND. ($)'].sum():,.2f}")
+
+            # ── Sección de Reportes ───────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 📋 Generar Reporte de Cobros")
+
+            with st.expander("⚙️ Configurar y descargar reporte", expanded=False):
+                _rc1, _rc2, _rc3 = st.columns(3)
+
+                # Filtro por fechas
+                _fecha_min = datetime.strptime("01/01/2020", "%d/%m/%Y").date()
+                _fecha_max = datetime.now().date()
+                _rep_desde = _rc1.date_input("Desde:", value=_fecha_min, key="rep_fecha_desde")
+                _rep_hasta = _rc2.date_input("Hasta:", value=_fecha_max, key="rep_fecha_hasta")
+
+                # Filtro por usuario (registrado_por)
+                _usuarios_rep = ["Toda la empresa"]
+                try:
+                    with _pg_conn() as _conn_ru:
+                        with _conn_ru.cursor() as _cur_ru:
+                            _cur_ru.execute(
+                                "SELECT DISTINCT registrado_por FROM pagos_historial WHERE empresa_id = %s AND registrado_por IS NOT NULL AND registrado_por <> '' ORDER BY registrado_por",
+                                (_eid_hist,)
+                            )
+                            _usuarios_rep += [r["registrado_por"] for r in _cur_ru.fetchall()]
+                except Exception:
+                    pass  # columna aún no creada — solo se mostrará "Toda la empresa"
+
+                _rep_usuario = _rc3.selectbox("Filtrar por usuario:", _usuarios_rep, key="rep_usuario_sel")
+
+                # Aplicar filtros sobre df_historial ya cargado
+                df_rep = df_historial.copy()
+
+                # Filtro fecha — parsear FECHA IMPACTO (formato dd/mm/yyyy HH:MM o similar)
+                def _parse_fecha_rep(s):
+                    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                        try:
+                            return datetime.strptime(str(s).strip()[:19], fmt).date()
+                        except ValueError:
+                            continue
+                    return None
+
+                df_rep["_fecha_dt"] = df_rep["FECHA IMPACTO"].apply(_parse_fecha_rep)
+                df_rep = df_rep[
+                    df_rep["_fecha_dt"].apply(lambda d: d is not None and _rep_desde <= d <= _rep_hasta)
+                ]
+
+                # Filtro usuario
+                if _rep_usuario != "Toda la empresa" and "registrado_por" in df_rep.columns:
+                    df_rep = df_rep[df_rep["registrado_por"] == _rep_usuario]
+
+                # Columnas del reporte según spec
+                _cols_reporte = [
+                    "FECHA IMPACTO", "PERIODO", "MES/AÑO", "PROPIEDAD", "INQUILINO",
+                    "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)",
+                ]
+                # Suma de servicios (todo excepto alquiler y cochera)
+                _servicios_cols = ["IMP. INMOBILIARIO ($)", "LUZ EDESAL ($)", "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)", "HONORARIOS ($)", "GARANTÍA ($)"]
+                _cols_existentes_serv = [c for c in _servicios_cols if c in df_rep.columns]
+                df_rep["SERVICIOS ($)"] = df_rep[_cols_existentes_serv].sum(axis=1).round(2)
+                _cols_reporte += ["SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]
+                _cols_reporte = [c for c in _cols_reporte if c in df_rep.columns]
+
+                df_rep_vista = df_rep[_cols_reporte].copy()
+
+                st.caption(f"**{len(df_rep_vista)} registros** en el período seleccionado.")
+
+                # Totales
+                _tr1, _tr2, _tr3, _tr4 = st.columns(4)
+                _tr1.metric("Total Alquiler", f"$ {df_rep_vista['ALQUILER ($)'].sum():,.2f}")
+                _tr2.metric("Total Servicios", f"$ {df_rep_vista['SERVICIOS ($)'].sum():,.2f}")
+                _tr3.metric("Total Cobrado", f"$ {df_rep_vista['TOTAL ($)'].sum():,.2f}")
+                _tr4.metric("Total Abonado", f"$ {df_rep_vista['ABONADO ($)'].sum():,.2f}")
+
+                st.dataframe(df_rep_vista, use_container_width=True, hide_index=True)
+
+                # ── Descarga Excel ───────────────────────────────────────
+                import io as _io
+                _buf_xlsx = _io.BytesIO()
+                with pd.ExcelWriter(_buf_xlsx, engine="openpyxl") as _writer:
+                    df_rep_vista.to_excel(_writer, index=False, sheet_name="Cobros")
+                    # Hoja de totales
+                    _df_tot = pd.DataFrame({
+                        "Concepto": ["Total Alquiler", "Total Expensas", "Total Cochera", "Total Servicios", "Total Cobrado", "Total Abonado"],
+                        "Monto ($)": [
+                            df_rep_vista["ALQUILER ($)"].sum(),
+                            df_rep_vista["EXPENSAS ($)"].sum() if "EXPENSAS ($)" in df_rep_vista.columns else 0,
+                            df_rep_vista["COCHERA ($)"].sum() if "COCHERA ($)" in df_rep_vista.columns else 0,
+                            df_rep_vista["SERVICIOS ($)"].sum(),
+                            df_rep_vista["TOTAL ($)"].sum(),
+                            df_rep_vista["ABONADO ($)"].sum(),
+                        ]
+                    })
+                    _df_tot.to_excel(_writer, index=False, sheet_name="Totales")
+                _buf_xlsx.seek(0)
+                _nombre_xlsx = f"reporte_cobros_{_rep_desde}_{_rep_hasta}.xlsx"
+                st.download_button(
+                    "⬇️ Descargar Excel",
+                    _buf_xlsx,
+                    file_name=_nombre_xlsx,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+
+                # ── Descarga PDF ─────────────────────────────────────────
+                _titulo_rep = f"Reporte de Cobros — {_rep_desde.strftime('%d/%m/%Y')} al {_rep_hasta.strftime('%d/%m/%Y')}"
+                _subtitulo_rep = f"Usuario: {_rep_usuario} | Empresa: {st.session_state.get('nombre_empresa', '')}"
+                _filas_pdf_rep = ""
+                for _, _rr in df_rep_vista.iterrows():
+                    def _fv(v):
+                        try: return f"$ {float(v):,.2f}"
+                        except Exception: return str(v)
+                    _filas_pdf_rep += f"""<tr>
+                        <td>{_rr.get('FECHA IMPACTO','')}</td>
+                        <td>{_rr.get('PERIODO','')}</td>
+                        <td>{_rr.get('MES/AÑO','')}</td>
+                        <td>{_rr.get('PROPIEDAD','')}</td>
+                        <td>{_rr.get('INQUILINO','')}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('ALQUILER ($)',0))}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('EXPENSAS ($)',0))}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('COCHERA ($)',0))}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('SERVICIOS ($)',0))}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('TOTAL ($)',0))}</td>
+                        <td style='text-align:right'>{_fv(_rr.get('ABONADO ($)',0))}</td>
+                    </tr>"""
+
+                _html_rep = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>
+  body {{ font-family: Arial, sans-serif; font-size: 11px; color: #222; padding: 20px; }}
+  h2 {{ color: #1a365d; margin-bottom: 4px; }}
+  .sub {{ color: #555; font-size: 12px; margin-bottom: 16px; }}
+  table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
+  th {{ background: #1a365d; color: white; padding: 7px 6px; text-align: left; font-size: 10px; }}
+  td {{ padding: 5px 6px; border-bottom: 1px solid #e0e0e0; }}
+  tr:nth-child(even) {{ background: #f7f9fc; }}
+  .totales {{ margin-top: 20px; background: #edf2f7; padding: 10px 14px; border-radius: 4px; font-size: 12px; }}
+  .totales span {{ margin-right: 24px; font-weight: bold; }}
+  .footer {{ margin-top: 30px; font-size: 10px; color: #888; border-top: 1px solid #ddd; padding-top: 8px; }}
+</style>
+</head><body>
+<h2>{_titulo_rep}</h2>
+<div class="sub">{_subtitulo_rep}</div>
+<table>
+  <thead><tr>
+    <th>Fecha</th><th>Período</th><th>Mes/Año</th><th>Propiedad</th><th>Inquilino</th>
+    <th>Alquiler</th><th>Expensas</th><th>Cochera</th><th>Servicios</th><th>Total</th><th>Abonado</th>
+  </tr></thead>
+  <tbody>{_filas_pdf_rep}</tbody>
+</table>
+<div class="totales">
+  <span>Alquiler: $ {df_rep_vista['ALQUILER ($)'].sum():,.2f}</span>
+  <span>Expensas: $ {df_rep_vista['EXPENSAS ($)'].sum() if 'EXPENSAS ($)' in df_rep_vista.columns else 0:,.2f}</span>
+  <span>Cochera: $ {df_rep_vista['COCHERA ($)'].sum() if 'COCHERA ($)' in df_rep_vista.columns else 0:,.2f}</span>
+  <span>Servicios: $ {df_rep_vista['SERVICIOS ($)'].sum():,.2f}</span>
+  <span>Total Cobrado: $ {df_rep_vista['TOTAL ($)'].sum():,.2f}</span>
+  <span>Total Abonado: $ {df_rep_vista['ABONADO ($)'].sum():,.2f}</span>
+</div>
+<div class="footer">Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} — {st.session_state.get('nombre_empresa','')} | {len(df_rep_vista)} registros</div>
+<script>window.print();</script>
+</body></html>"""
+
+                _nombre_pdf = f"reporte_cobros_{_rep_desde}_{_rep_hasta}.html"
+                st.download_button(
+                    "🖨️ Descargar PDF (imprimir desde el navegador)",
+                    _html_rep,
+                    file_name=_nombre_pdf,
+                    mime="text/html",
+                )
 
             # ── Sección de Reimpresión ────────────────────────────────────
             st.markdown("---")
