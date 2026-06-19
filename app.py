@@ -2318,6 +2318,8 @@ if tab_historial_pagos:
                 ph.codigo_contrato                          AS "COD CONTRATO",
                 ph.propiedad                                AS "PROPIEDAD",
                 ph.propiedad                                AS "DIR PROPIEDAD",
+                COALESCE(p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END, ph.propiedad) AS "DOMICILIO",
+                COALESCE(ph.propiedad || ' (' || p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END || ')', ph.propiedad) AS "ALIAS / UBICACIÓN",
                 ph.inquilino                                AS "INQUILINO",
                 ph.inquilino                                AS "_apellidos",
                 ''                                          AS "_nombres",
@@ -2355,6 +2357,7 @@ if tab_historial_pagos:
                 0                                           AS "RETENCIÓN AGENCIA (USD)"
             FROM pagos_historial ph
             LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
+            LEFT JOIN propiedades p2 ON ph.propiedad = p2.alias_propiedad AND p2.empresa_id = ph.empresa_id
             WHERE ph.empresa_id = %s {_where_hist}
             ORDER BY ph.id DESC
         """
@@ -2368,7 +2371,7 @@ if tab_historial_pagos:
         # Convertir columnas NUMERIC (Decimal) a float
         if not df_historial.empty:
             for _col in df_historial.columns:
-                if _col not in ['ID PAGO', 'COD CONTRATO', 'PROPIEDAD', 'DIR PROPIEDAD',
+                if _col not in ['ID PAGO', 'COD CONTRATO', 'PROPIEDAD', 'DIR PROPIEDAD', 'DOMICILIO', 'ALIAS / UBICACIÓN',
                                  'INQUILINO', '_apellidos', '_nombres', '_telefono',
                                  'PERIODO', 'FECHA IMPACTO', 'METODO', '_comentarios',
                                  '_inicio_contrato']:
@@ -2520,7 +2523,7 @@ if tab_historial_pagos:
 
                 # Columnas del reporte según spec
                 _cols_reporte = [
-                    "FECHA IMPACTO", "PERIODO", "MES/AÑO", "PROPIEDAD", "INQUILINO",
+                    "FECHA IMPACTO", "PERIODO", "MES/AÑO", "ALIAS / UBICACIÓN", "INQUILINO",
                     "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)",
                 ]
                 # Suma de servicios (todo excepto alquiler y cochera)
@@ -2595,11 +2598,11 @@ if tab_historial_pagos:
                     _story.append(Spacer(1, 4*mm))
 
                     # Tabla de datos
-                    _headers_pdf = ["Fecha", "Período", "Mes/Año", "Propiedad", "Inquilino", "Alquiler", "Expensas", "Cochera", "Servicios", "Total ($)", "Abonado ($)"]
-                    _col_keys    = ["FECHA IMPACTO", "PERIODO", "MES/AÑO", "PROPIEDAD", "INQUILINO", "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]
+                    _headers_pdf = ["Fecha", "Período", "Mes/Año", "Alias / Ubicación", "Inquilino", "Alquiler", "Expensas", "Cochera", "Servicios", "Total ($)", "Abonado ($)"]
+                    _col_keys    = ["FECHA IMPACTO", "PERIODO", "MES/AÑO", "ALIAS / UBICACIÓN", "INQUILINO", "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]
                     _money_cols  = {"ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)", "SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"}
 
-                    _col_widths = [22*mm, 28*mm, 22*mm, 38*mm, 42*mm, 22*mm, 20*mm, 20*mm, 20*mm, 22*mm, 22*mm]
+                    _col_widths = [22*mm, 26*mm, 20*mm, 50*mm, 38*mm, 20*mm, 18*mm, 18*mm, 18*mm, 20*mm, 20*mm]
 
                     _st_cell  = ParagraphStyle("cell",  parent=_styles["Normal"], fontSize=7, leading=9)
                     _st_money = ParagraphStyle("money", parent=_styles["Normal"], fontSize=7, leading=9, alignment=TA_RIGHT)
