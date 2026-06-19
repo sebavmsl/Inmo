@@ -2097,7 +2097,7 @@ if tab_pagos:
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
-                        c_datos['codigo'], c_datos.get('propiedad_dir', ''), c_datos.get('inquilino_nombre', ''),
+                        c_datos['codigo'], c_datos.get('propiedad_dir', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
                         mes_periodo_texto, _monto_alq_insert,
                         datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                         _monto_exp_insert, _monto_ede_insert, _monto_gas_insert, _monto_mun_insert,
