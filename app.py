@@ -2546,7 +2546,7 @@ if tab_historial_pagos:
                 # ── Descarga Excel ───────────────────────────────────────
                 import io as _io
                 _buf_xlsx = _io.BytesIO()
-                with pd.ExcelWriter(_buf_xlsx, engine="openpyxl") as _writer:
+                with pd.ExcelWriter(_buf_xlsx, engine="xlsxwriter") as _writer:
                     df_rep_vista.to_excel(_writer, index=False, sheet_name="Cobros")
                     # Hoja de totales
                     _df_tot = pd.DataFrame({
