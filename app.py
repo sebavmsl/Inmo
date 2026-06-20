@@ -806,6 +806,7 @@ if not st.session_state.autenticado:
                 st.warning("⚠️ Por favor complete todos los campos")
         
         st.caption("Solicite su acceso a 'contacto@controlz.net.ar'.")
+        st.caption(f"Versión {APP_VERSION}")
     st.stop() # Frena por completo el renderizado del dashboard si no pasas el login
 
 
@@ -1087,7 +1088,8 @@ with top_col2:
     st.markdown(
         f"<p style='text-align: right; margin-bottom: 5px;'>"
         f"🏢 Empresa: <b>{st.session_state.empresa_actual_nombre.upper()}</b><br>"
-        f"👤 Operador: <b>{st.session_state.usuario_actual.upper()}</b>"
+        f"👤 Operador: <b>{st.session_state.usuario_actual.upper()}</b><br>"
+        f"<span style='font-size: 0.75em; color: gray;'>Versión {APP_VERSION}</span>"
         f"</p>", 
         unsafe_allow_html=True
     )
