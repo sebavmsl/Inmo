@@ -17,6 +17,13 @@ import requests
 from io import BytesIO
 from contextlib import contextmanager
 
+# =====================================================================
+# VERSIÓN DEL ARCHIVO — mantener el "v1" fijo y subir de a uno los
+# últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
+# v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
+# =====================================================================
+APP_VERSION = "v1.001"
+
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
@@ -417,6 +424,32 @@ footer {visibility: hidden;}
 </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# 2.b Sello de versión — esquina inferior derecha, visible en toda la app
+# (incluida la pantalla de login). Permite confirmar a simple vista qué
+# build del archivo está corriendo.
+st.markdown(
+    f"""
+    <div style="
+        position: fixed;
+        bottom: 8px;
+        right: 14px;
+        z-index: 9999;
+        background-color: rgba(0,0,0,0.55);
+        color: #ffffff;
+        padding: 2px 10px;
+        border-radius: 8px;
+        font-size: 11px;
+        font-family: monospace;
+        letter-spacing: 0.5px;
+        pointer-events: none;
+    ">
+        {APP_VERSION}
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 # 1. Definimos qué columnas esperamos para cada tabla (puedes ampliarlo)
 ESQUEMAS_VALIDOS = {
