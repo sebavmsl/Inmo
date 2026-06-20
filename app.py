@@ -1355,7 +1355,6 @@ if tab_planilla:
         _where_plan = "AND p.propietario = %s" if _pf_plan_activo else ""
         _params_plan = (_eid_plan, _pf_plan) if _pf_plan_activo else (_eid_plan,)
 
-        conn = conectar_db()
         try:
             query = f'''
                 SELECT 
@@ -1410,8 +1409,6 @@ if tab_planilla:
                 st.info("No se registran contratos en la base de datos bajo los criterios de búsqueda.")
         except Exception as e:
             st.error(f"Error de lectura en la planilla general: {e}")
-        finally:
-            conn.close()
 
 
     # =====================================================================
@@ -1930,7 +1927,7 @@ if tab_pagos:
                 if _gord_row and _gord_row['total_pendiente'] and float(_gord_row['total_pendiente']) > 0:
                     _total_gord = float(_gord_row['total_pendiente'])
                     _cant_gord = int(_gord_row['cantidad'])
-                    st.warning(f"🏘️ **Gastos ordinarios pendientes:** {_cant_gord} gasto(s) por **\\$ {_total_gord:,.2f}** sin cobrar a este inquilino.")
+                    st.warning(f"🏘️ **Gastos ordinarios pendientes:** {_cant_gord} gasto(s) por **$ {_total_gord:,.2f}** sin cobrar a este inquilino.")
             except Exception:
                 pass
 
@@ -2153,7 +2150,7 @@ if tab_pagos:
                           monto_serv_pago, c_datos['codigo']))
 
                     conn.commit()
-                    st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: \\$ {monto_abonado:,.2f} de \\$ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
+                    st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
                     if saldo_pendiente > 0:
                         st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
                     elif saldo_pendiente < 0:
@@ -3950,23 +3947,16 @@ if tab_superadmin:
                             conn = conectar_db_central()
                             cursor = conn.cursor()
                                 
-                            # Determinar el directorio y el archivo de base de datos de destino
+                            # Identificador lógico de la empresa (ya no es un archivo físico:
+                            # todo vive en Postgres/Supabase. Se mantiene como string porque
+                            # "archivo_db" se sigue usando como clave de enrutamiento en usuarios_central).
                             if rol_sesion == "admin":
                                 # Si es un admin de empresa, heredamos de forma estricta su base de datos actual
                                 ruta_db_completa = st.session_state.get("empresa_db")
-                                nombre_directorio = os.path.dirname(ruta_db_completa)
                             else:
-                                # Si es superadmin y crea una empresa nueva:
-                                token_carpeta = secrets.token_hex(8)
-                                nombre_directorio = token_carpeta  
-                                nombre_archivo_final = "data.db"
-                                ruta_db_completa = os.path.join(nombre_directorio, nombre_archivo_final)
-    
-                            # Asegurar la existencia física del directorio
-                            if nombre_directorio and not os.path.exists(nombre_directorio):
-                                os.makedirs(nombre_directorio, exist_ok=True)
-                                st.info(f"📁 Directorio seguro creado de forma física en el servidor.")
-                                
+                                # Si es superadmin y crea una empresa nueva: identificador único
+                                ruta_db_completa = f"{secrets.token_hex(8)}/data.db"
+
                             # Cifrado seguro utilizando Bcrypt
                             rondas_seguridad = st.secrets["seguridad"]["bcrypt_rounds"]
                             salt = bcrypt.gensalt(rounds=rondas_seguridad)
@@ -3988,13 +3978,6 @@ if tab_superadmin:
                             ))
                             conn.commit()
                                 
-                            # Inicializar el archivo físico SQLite si no existía
-                            if not os.path.exists(ruta_db_completa):
-                                conn_nueva_empresa = conectar_db()
-                                crear_tablas_empresa(conn_nueva_empresa)
-                                conn_nueva_empresa.close()
-                                st.info(f"📁 Base de datos inicializada con tablas para: {new_empresa}")
-    
                             st.success(f"¡Usuario '{new_username}' registrado con éxito!")
                             st.balloons()                            
                                 
@@ -4117,16 +4100,16 @@ if tab_superadmin:
                         st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
 
                         permisos_actuales = []
-                        if ruta_db_user and os.path.exists(ruta_db_user):
-                            try:
-                                conn_emp = conectar_db()
-                                cursor_emp = conn_emp.cursor()
-                                if cursor_emp.fetchone():
-                                    cursor_emp.execute("SELECT pestana FROM permisos_usuario WHERE username = %s", (user_seleccionado,))
-                                    permisos_actuales = [row["pestana"] for row in cursor_emp.fetchall()]
-                                conn_emp.close()
-                            except Exception as e:
-                                st.warning(f"Aviso al recuperar permisos existentes: {e}")
+                        try:
+                            with _pg_conn() as _conn_perm:
+                                with _conn_perm.cursor() as _cur_perm:
+                                    _cur_perm.execute(
+                                        "SELECT pestana FROM permisos_usuario WHERE username = %s",
+                                        (user_seleccionado,)
+                                    )
+                                    permisos_actuales = [row["pestana"] for row in _cur_perm.fetchall()]
+                        except Exception as e:
+                            st.warning(f"Aviso al recuperar permisos existentes: {e}")
 
                         p_dash  = st.checkbox("📈 Tablero de Control",              value=("dashboard"       in permisos_actuales))
                         p_plan  = st.checkbox("📊 Planilla de Contratos",            value=("planilla"        in permisos_actuales))
@@ -4158,7 +4141,7 @@ if tab_superadmin:
                             conn_central.commit()
                                 
                             # 2. Sincronización en BD Empresa
-                            if ruta_db_user and ruta_db_user:
+                            if ruta_db_user:
                                 conn_emp = conectar_db()
                                 cursor_emp = conn_emp.cursor()
                                     
@@ -4993,7 +4976,7 @@ if tab_gastos:
                     # Mostrar prorrateo en tiempo real
                     if _es_compartido and _ids_edif and _monto > 0:
                         _monto_por_unidad = _monto / len(_ids_edif)
-                        st.info(f"📐 Se distribuirán **\\$ {_monto_por_unidad:,.2f}** a cada una de las **{len(_ids_edif)} unidades**")
+                        st.info(f"📐 Se distribuirán **$ {_monto_por_unidad:,.2f}** a cada una de las **{len(_ids_edif)} unidades**")
 
                     _descripcion = st.text_input("📄 Descripción:", placeholder="Ej: Cambio de cañería cocina")
 
@@ -5036,7 +5019,7 @@ if tab_gastos:
                                                     _proveedor.strip(), _comprobante.strip(),
                                                     _pagado_por, _observaciones.strip(), _tipo_gasto_ord, _tc_gi
                                                 ))
-                                    st.success(f"✅ Gasto de \\$ {_monto:,.2f} distribuido en {len(_ids_edif)} unidades (\\$ {_monto_unit:,.2f} c/u).")
+                                    st.success(f"✅ Gasto de $ {_monto:,.2f} distribuido en {len(_ids_edif)} unidades ($ {_monto_unit:,.2f} c/u).")
                                 else:
                                     with _pg_conn() as _conn_gi:
                                         with _conn_gi.cursor() as _cur_gi:
@@ -5047,7 +5030,7 @@ if tab_gastos:
                                                 _proveedor.strip(), _comprobante.strip(),
                                                 _pagado_por, _observaciones.strip(), _tipo_gasto_ord, _tc_gi
                                             ))
-                                    st.success(f"✅ Gasto de \\$ {_monto:,.2f} registrado en {_prop_label}.")
+                                    st.success(f"✅ Gasto de $ {_monto:,.2f} registrado en {_prop_label}.")
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -5424,7 +5407,7 @@ if tab_gastos:
                     _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
                     _ku4, _ku5 = st.columns(2)
                     _total_exp = float(_dfi["expensas"].sum()) if not _dfi.empty else 0.0
-                    _ku4.metric("🏘️ Expensas cobradas", f"\$ {_total_exp:,.2f}")
+                    _ku4.metric("🏘️ Expensas cobradas", f"$ {_total_exp:,.2f}")
 
                     st.markdown("**📤 Pasivos — U$S**")
                     _kpu1, _kpu2, _kpu3 = st.columns(3)
