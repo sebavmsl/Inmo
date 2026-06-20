@@ -2062,6 +2062,10 @@ if tab_pagos:
                     _comentario_completo = comentarios_pago or ""
                     if _saldo_a_guardar > 0:
                         _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {_saldo_a_guardar:,.2f}"
+                    # Generar número de comprobante único y guardarlo
+                    import time as _time
+                    _nro_comprobante_insert = f"RC-{c_datos['codigo']:04d}-{int(_time.time()) % 100000}"
+                    st.session_state["ultimo_nro_comprobante"] = _nro_comprobante_insert
                     _val_ooss_insert = _safe_float(c_datos.get('ooss'))
                     _val_imp_insert = _safe_float(c_datos.get('imp_inmobiliario')) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
                     # Calcular valores USD al tipo de cambio del momento
@@ -2093,8 +2097,8 @@ if tab_pagos:
                             monto_cochera, monto_ooss, monto_imp_inmobiliario,
                             monto_honorarios, monto_garantia,
                             monto_abonado, saldo_pendiente, saldos_anteriores,
-                            cotizacion_usd, registrado_por
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            cotizacion_usd, registrado_por, nro_comprobante
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
                         c_datos['codigo'], c_datos.get('alias_propiedad', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
@@ -2104,7 +2108,7 @@ if tab_pagos:
                         _monto_coch_insert, _monto_ooss_insert, _monto_imp_insert2,
                         monto_honorarios_pago, monto_garantia_pago,
                         monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
-                        _tc_insert, st.session_state.get("username", "")
+                        _tc_insert, st.session_state.get("username", ""), _nro_comprobante_insert
                     ))
 
                     # 2. Avanzar el mes vivo SOLO si es el período actual Y es el primer pago
@@ -2255,7 +2259,7 @@ if tab_pagos:
                     _alq_desc_pdf  = _alq_desc_edit if not _es_complemento else "Complemento de pago — Alquiler ya registrado"
                     _total_pdf_editado = _alq_monto_pdf + sum(d['Monto'] for d in _desglose_editado)
                     import time as _time
-                    _nro_recibo = f"RC-{c_datos['codigo']:04d}-{int(_time.time()) % 100000}"
+                    _nro_recibo = st.session_state.get("ultimo_nro_comprobante", f"RC-{c_datos['codigo']:04d}-{int(_time.time()) % 100000}")
 
                     # Calcular MES/AÑO para el PDF
                     _mes_anio_pdf = ""
@@ -2303,7 +2307,6 @@ if tab_pagos:
 # =====================================================================
 if tab_historial_pagos:
     with tab_historial_pagos:
-        st.subheader("🗄️ Registro Completo de Caja y Balance Mensual")
 
         _pf_hist = st.session_state.get("propietario_filtro", "")
         _pf_hist_activo = rol_actual == "propietario" and bool(_pf_hist)
@@ -2344,6 +2347,7 @@ if tab_historial_pagos:
                 COALESCE(ph.comentario,'')                 AS "_comentarios",
                 COALESCE(c.inicio_contrato, '')            AS "_inicio_contrato",
                 0                                           AS "_pct_admin",
+                COALESCE(ph.nro_comprobante, '')           AS "NRO COMPROBANTE",
                 COALESCE(ph.cotizacion_usd,0)              AS "COTIZACIÓN USD",
                 CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
                      THEN ROUND((COALESCE(ph.monto_alquiler,0) / ph.cotizacion_usd)::NUMERIC, 2)
@@ -2372,7 +2376,7 @@ if tab_historial_pagos:
         if not df_historial.empty:
             for _col in df_historial.columns:
                 if _col not in ['ID PAGO', 'COD CONTRATO', 'PROPIEDAD', 'DIR PROPIEDAD', 'DOMICILIO', 'ALIAS / UBICACIÓN',
-                                 'INQUILINO', '_apellidos', '_nombres', '_telefono',
+                                 'INQUILINO', '_apellidos', '_nombres', '_telefono', 'NRO COMPROBANTE',
                                  'PERIODO', 'FECHA IMPACTO', 'METODO', '_comentarios',
                                  '_inicio_contrato']:
                     try:
@@ -2384,18 +2388,6 @@ if tab_historial_pagos:
             st.info("Aún no se registran cobros mensuales asentados de manera definitiva en el libro de caja.")
         else:
             st.caption("💡 Los valores en USD se calculan con la cotización registrada al momento de cada cobro.")
-
-            # ── Filtros ──────────────────────────────────────────────────
-            f_periodo = st.text_input(
-                "Filtrar historial por palabra clave (Ej: Mayo o Efectivo):",
-                placeholder="Escriba para filtrar..."
-            )
-            if f_periodo:
-                df_historial = df_historial[
-                    df_historial['PERIODO'].str.contains(f_periodo, case=False, na=False) |
-                    df_historial['INQUILINO'].str.contains(f_periodo, case=False, na=False) |
-                    df_historial['METODO'].str.contains(f_periodo, case=False, na=False)
-                ]
 
             # ── Calcular columna MES/AÑO a partir del periodo y fecha de inicio ──
             _meses_es = {
@@ -2460,17 +2452,6 @@ if tab_historial_pagos:
                 "SALDO PEND. ($)",
                 "COTIZACIÓN USD", "FECHA IMPACTO", "METODO"
             ]
-
-            st.dataframe(df_historial[_cols_vista], use_container_width=True, hide_index=True)
-
-            st.markdown("---")
-            st.markdown("##### 📊 Resumen Estadístico de Caja Registrada")
-            c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns(5)
-            c_r1.metric("Total Cobrado",     f"$ {df_historial['TOTAL ($)'].sum():,.2f}")
-            c_r2.metric("Alquiler",          f"$ {df_historial['ALQUILER ($)'].sum():,.2f}")
-            c_r3.metric("Cochera",           f"$ {df_historial['COCHERA ($)'].sum():,.2f}")
-            c_r4.metric("Servicios",         f"$ {df_historial['SERVICIOS ($)'].sum():,.2f}")
-            c_r5.metric("Saldo Pendiente",   f"$ {df_historial['SALDO PEND. ($)'].sum():,.2f}")
 
             # ── Sección de Reportes ───────────────────────────────────────
             st.markdown("---")
@@ -2754,7 +2735,7 @@ if tab_historial_pagos:
                             <tr>
                                 <td><h1 class="title-main">RECIBO DE ALQUILER</h1></td>
                                 <td class="meta-text">
-                                    <strong>Comprobante N°:</strong> RC-00{_r['COD CONTRATO']}-{str(_r['PERIODO']).replace(' ','')}<br>
+                                    <strong>Comprobante N°:</strong> {_r.get('NRO COMPROBANTE') or f"RC-00{_r['COD CONTRATO']}-{str(_r['PERIODO']).replace(' ','')}"}<br>
                                     <strong>Fecha Emisión Original:</strong> {_r['FECHA IMPACTO']}<br>
                                     <strong>Período:</strong> {_r['PERIODO']}<br>
                                     <strong>ID Registro:</strong> #{_r['ID PAGO']}
@@ -2819,6 +2800,32 @@ if tab_historial_pagos:
                     type="primary",
                     help="Descarga el comprobante reconstruido. Al abrirlo en el navegador se activará la ventana de impresión/PDF."
                 )
+
+            # ── Filtros ──────────────────────────────────────────────────
+            f_periodo = st.text_input(
+                "Filtrar historial por palabra clave (Ej: Mayo o Efectivo):",
+                placeholder="Escriba para filtrar..."
+            )
+            if f_periodo:
+                df_historial = df_historial[
+                    df_historial['PERIODO'].str.contains(f_periodo, case=False, na=False) |
+                    df_historial['INQUILINO'].str.contains(f_periodo, case=False, na=False) |
+                    df_historial['METODO'].str.contains(f_periodo, case=False, na=False)
+                ]
+
+            # ── Tabla completa y Resumen al final ────────────────────────
+            st.markdown("---")
+            st.subheader("🗄️ Registro Completo de Caja y Balance Mensual")
+            st.dataframe(df_historial[_cols_vista], use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("##### 📊 Resumen Estadístico de Caja Registrada")
+            c_r1, c_r2, c_r3, c_r4, c_r5 = st.columns(5)
+            c_r1.metric("Total Cobrado",     f"$ {df_historial['TOTAL ($)'].sum():,.2f}")
+            c_r2.metric("Alquiler",          f"$ {df_historial['ALQUILER ($)'].sum():,.2f}")
+            c_r3.metric("Cochera",           f"$ {df_historial['COCHERA ($)'].sum():,.2f}")
+            c_r4.metric("Servicios",         f"$ {df_historial['SERVICIOS ($)'].sum():,.2f}")
+            c_r5.metric("Saldo Pendiente",   f"$ {df_historial['SALDO PEND. ($)'].sum():,.2f}")
     
     
     
