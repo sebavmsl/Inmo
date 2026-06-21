@@ -22,7 +22,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.002"
+APP_VERSION = "v1.010"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -92,8 +92,8 @@ def _get_pool():
     """Pool de conexiones persistente — se crea una sola vez por instancia."""
     from psycopg2 import pool as pg_pool
     return pg_pool.ThreadedConnectionPool(
-        minconn=1,
-        maxconn=5,
+        minconn=2,
+        maxconn=20,
         dsn=_get_pg_dsn(),
         cursor_factory=psycopg2.extras.RealDictCursor,
         connect_timeout=10,
@@ -615,6 +615,7 @@ def crear_formulario_editar_inquilino(id_inq_edit, datos_inq):
                     ''', (edit_apellido, edit_nombre, edit_dni, edit_tel, edit_email, id_inq_edit))
                     
                     conn.commit()
+                    st.cache_data.clear()
                     st.success(f"✅ Inquilino actualizado correctamente!")
                     st.rerun()
                 except psycopg2.errors.UniqueViolation as e:
@@ -667,6 +668,7 @@ def crear_formulario_editar_propiedad(id_prop_edit, datos_prop):
                     ''', (edit_alias, edit_calle, edit_numero, edit_depto, edit_grupo.strip() or None, id_prop_edit))
                     
                     conn.commit()
+                    st.cache_data.clear()
                     st.success(f"✅ Propiedad actualizada correctamente!")
                     st.rerun()
                 except psycopg2.errors.UniqueViolation as e:
@@ -844,8 +846,234 @@ def obtener_datos_desplegables(empresa_id: int):
     return dict_propiedades, dict_inquilinos
 
 # =====================================================================
-# FUNCIONES DE CÁLCULO AUTOMÁTICO DE ÍNDICES (ICL e IPC)
+# FUNCIONES DE LECTURA CACHEADAS (PERFORMANCE)
+# ---------------------------------------------------------------------
+# Streamlit re-ejecuta el cuerpo de TODAS las pestañas en cada rerun
+# (no solo la que se está viendo). Sin cache, eso significa repetir
+# estas consultas pesadas en cada clic, multiplicado por la cantidad
+# de usuarios conectados. TTL corto (30s) + limpieza explícita
+# (st.cache_data.clear()) justo después de cada guardado exitoso, para
+# que el propio usuario vea sus cambios al instante.
 # =====================================================================
+
+def _query_df(query: str, params: tuple):
+    """Ejecuta una query y devuelve un DataFrame. Helper interno para las funciones cacheadas."""
+    with _pg_conn() as _conn:
+        with _conn.cursor() as _cur:
+            _cur.execute(query, params)
+            _rows = _cur.fetchall()
+            _cols = [c.name for c in _cur.description]
+    return pd.DataFrame([dict(r) for r in _rows], columns=_cols) if _rows else pd.DataFrame(columns=_cols)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_contratos_activos(empresa_id: int, propietario_filtro: str = ""):
+    """Dashboard: contratos activos (para alertas de vencimiento/actualización)."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
+    query = f'''
+        SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
+            c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
+        FROM contratos c
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
+        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where}
+    '''
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_pagos_totales(empresa_id: int, propietario_filtro: str = ""):
+    """Dashboard: suma de cobros históricos."""
+    _where = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro, empresa_id) if propietario_filtro else (empresa_id,)
+    query = f"SELECT COALESCE(ph.monto_abonado, 0) AS monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {_where}"
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_planilla_contratos(empresa_id: int, propietario_filtro: str = ""):
+    """Planilla: listado general de contratos."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
+    query = f'''
+        SELECT
+            c.codigo AS "CÓDIGO",
+            p.alias_propiedad AS "ALIAS PROPIEDAD",
+            (i.apellidos || ', ' || i.nombres) AS "INQUILINO",
+            (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS "PROPIEDAD",
+            c.estado AS "ESTADO",
+            c.inicio_contrato AS "INICIO_CONTRATO",
+            c.fin_contrato AS "FIN_CONTRATO",
+            c.calc_duracion AS "CALC_DURACION",
+            c.monto_inicial AS "MONTO INICIAL",
+            c.alquiler AS "ALQUILER",
+            c.servicios_total AS "SERVICIOS_TOTAL",
+            c.total_pagado AS "TOTAL_ESTIMADO"
+        FROM contratos c
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
+        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        WHERE c.empresa_id = %s AND 1=1 {_where}
+        ORDER BY c.codigo DESC
+    '''
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_historial_pagos(empresa_id: int, propietario_filtro: str = ""):
+    """Historial de Caja: listado completo de cobros registrados."""
+    _where = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro, empresa_id) if propietario_filtro else (empresa_id,)
+    query = f"""
+        SELECT
+            ph.id                                       AS "ID PAGO",
+            ph.codigo_contrato                          AS "COD CONTRATO",
+            ph.propiedad                                AS "PROPIEDAD",
+            ph.propiedad                                AS "DIR PROPIEDAD",
+            COALESCE(p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END, ph.propiedad) AS "DOMICILIO",
+            COALESCE(ph.propiedad || ' (' || p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END || ')', ph.propiedad) AS "ALIAS / UBICACIÓN",
+            ph.inquilino                                AS "INQUILINO",
+            ph.inquilino                                AS "_apellidos",
+            ''                                          AS "_nombres",
+            ''                                          AS "_telefono",
+            ph.periodo                                  AS "PERIODO",
+            COALESCE(ph.monto_alquiler,0)               AS "ALQUILER ($)",
+            0                                           AS "SERVICIOS ($)",
+            COALESCE(ph.monto_abonado,0)               AS "TOTAL ($)",
+            ph.fecha                                    AS "FECHA IMPACTO",
+            COALESCE(ph.metodo_pago,'')                 AS "METODO",
+            COALESCE(ph.monto_expensas,0)               AS "_expensas",
+            COALESCE(ph.monto_edesal,0)                 AS "_edesal",
+            COALESCE(ph.monto_gas,0)                    AS "_gas",
+            COALESCE(ph.monto_municipalidad,0)          AS "_municipalidad",
+            COALESCE(ph.monto_cochera,0)                AS "_cochera",
+            COALESCE(ph.monto_ooss,0)                   AS "_ooss",
+            COALESCE(ph.monto_imp_inmobiliario,0)       AS "_imp_inmobiliario",
+            COALESCE(ph.monto_honorarios,0)             AS "_honorarios",
+            COALESCE(ph.monto_garantia,0)               AS "_garantia",
+            COALESCE(ph.monto_abonado,0)                AS "_abonado",
+            COALESCE(ph.saldo_pendiente,0)              AS "_saldo_pendiente",
+            COALESCE(ph.comentario,'')                 AS "_comentarios",
+            COALESCE(c.inicio_contrato, '')            AS "_inicio_contrato",
+            0                                           AS "_pct_admin",
+            COALESCE(ph.nro_comprobante, '')           AS "NRO COMPROBANTE",
+            COALESCE(ph.cotizacion_usd,0)              AS "COTIZACIÓN USD",
+            CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
+                 THEN ROUND((COALESCE(ph.monto_alquiler,0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                             AS "ALQUILER (USD)",
+            CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
+                 THEN ROUND((COALESCE(ph.monto_cochera,0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                             AS "COCHERA (USD)",
+            CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
+                 THEN ROUND((COALESCE(ph.monto_imp_inmobiliario,0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                             AS "IMP. INMOBILIARIO (USD)",
+            0                                           AS "RETENCIÓN AGENCIA (USD)"
+        FROM pagos_historial ph
+        LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
+        LEFT JOIN propiedades p2 ON (ph.propiedad = p2.alias_propiedad OR ph.propiedad = (p2.calle || ' ' || p2.numero)) AND p2.empresa_id = ph.empresa_id
+        WHERE ph.empresa_id = %s {_where}
+        ORDER BY ph.id DESC
+    """
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_gastos_historial(empresa_id: int, propietario_filtro: str = ""):
+    """Gastos: historial completo de gastos de propiedades."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
+    query = f"""
+        SELECT gp.id AS "ID", p.alias_propiedad AS "PROPIEDAD", p.propietario AS "PROPIETARIO",
+               gp.fecha AS "FECHA", gp.categoria AS "CATEGORÍA", gp.descripcion AS "DESCRIPCIÓN",
+               gp.monto AS "MONTO ($)",
+               COALESCE(gp.cotizacion_usd, 0) AS "COTIZACIÓN USD",
+               CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
+                    THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
+                    ELSE 0 END AS "MONTO (USD)",
+               COALESCE(gp.tipo_gasto, 'Ordinario') AS "TIPO",
+               gp.proveedor AS "PROVEEDOR",
+               gp.comprobante AS "COMPROBANTE", gp.pagado_por AS "PAGADO POR",
+               gp.observaciones AS "OBSERVACIONES"
+        FROM gastos_propiedades gp
+        JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
+        WHERE gp.empresa_id = %s {_where}
+        ORDER BY gp.fecha DESC, gp.id DESC
+    """
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_metricas_ingresos(empresa_id: int, propietario_filtro: str = ""):
+    """Métricas: ingresos crudos desde pagos_historial (sin procesar mes_calendario)."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
+    query = f"""
+        SELECT
+            ph.propiedad                                                        AS propiedad,
+            COALESCE(p.propietario, '')                                        AS propietario,
+            COALESCE(p.grupo, '')                                              AS grupo,
+            ph.periodo                                                          AS periodo,
+            COALESCE(c.inicio_contrato, '')                                   AS inicio_contrato,
+            0                                                                   AS calc_duracion,
+            COALESCE(ph.monto_alquiler, 0)                                    AS alquiler,
+            COALESCE(ph.monto_cochera, 0)                                     AS cochera,
+            COALESCE(ph.monto_expensas, 0)                                    AS expensas,
+            COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
+                + COALESCE(ph.monto_expensas, 0)                              AS total_ingreso,
+            COALESCE(ph.monto_gasto_admin, 0)                                 AS gasto_admin,
+            COALESCE(ph.monto_imp_inmobiliario, 0)                            AS imp_inmobiliario,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND((COALESCE(ph.monto_alquiler, 0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS alquiler_usd,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND((COALESCE(ph.monto_cochera, 0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS cochera_usd,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND(((COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
+                      + COALESCE(ph.monto_expensas, 0)) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS total_ingreso_usd,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND((COALESCE(ph.monto_expensas, 0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS expensas_usd,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND((COALESCE(ph.monto_gasto_admin, 0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS gasto_admin_usd,
+            CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
+                 THEN ROUND((COALESCE(ph.monto_imp_inmobiliario, 0) / ph.cotizacion_usd)::NUMERIC, 2)
+                 ELSE 0 END                                                    AS imp_inmobiliario_usd
+        FROM pagos_historial ph
+        LEFT JOIN propiedades p ON ph.propiedad = p.alias_propiedad AND p.empresa_id = ph.empresa_id
+        LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
+        WHERE ph.empresa_id = %s {_where}
+        ORDER BY ph.periodo
+    """
+    return _query_df(query, _params)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_metricas_gastos(empresa_id: int, propietario_filtro: str = ""):
+    """Métricas: gastos crudos agrupados por propiedad/período."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
+    query = f"""
+        SELECT
+            p.alias_propiedad                              AS propiedad,
+            COALESCE(p.propietario, '')                   AS propietario,
+            COALESCE(p.grupo, '')                          AS grupo,
+            TO_CHAR(gp.fecha::date, 'YYYY-MM')           AS periodo,
+            SUM(gp.monto)                                 AS total_gasto,
+            SUM(CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
+                     THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
+                     ELSE 0 END)                           AS total_gasto_usd
+        FROM gastos_propiedades gp
+        JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
+        WHERE gp.empresa_id = %s {_where}
+        GROUP BY p.alias_propiedad, p.propietario, p.grupo, TO_CHAR(gp.fecha::date, 'YYYY-MM')
+        ORDER BY periodo
+    """
+    return _query_df(query, _params)
+
+
 
 @st.cache_data(ttl=3600)
 def _obtener_icl_bcra_xls(año: int) -> dict:
@@ -1120,7 +1348,7 @@ with top_col2:
             if _nuevo_eid != st.session_state.get("empresa_id"):
                 st.session_state.empresa_id = _nuevo_eid
                 st.session_state.empresa_actual_nombre = _emp_sel_top
-                obtener_datos_desplegables.clear()
+                st.cache_data.clear()
                 st.rerun()
         except Exception:
             pass
@@ -1248,36 +1476,13 @@ if tab_dashboard:
         _pf = st.session_state.get("propietario_filtro", "")
         _pf_activo = rol_actual == "propietario" and bool(_pf)
         _eid_dash = st.session_state.get("empresa_id", 0)
-        _where_pf = "AND p.propietario = %s" if _pf_activo else ""
-        _params_pf = (_eid_dash, _pf) if _pf_activo else (_eid_dash,)
 
-        query_dash = f'''
-            SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
-                c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
-            FROM contratos c
-            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-            JOIN inquilinos i ON c.dni_inquilino = i.dni
-            WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where_pf}
-        '''
-
-        with _pg_conn() as _conn_d:
-            with _conn_d.cursor() as _cur_d:
-                _cur_d.execute(query_dash, _params_pf)
-                _rows_d = _cur_d.fetchall()
-                _cols_d = [x.name for x in _cur_d.description]
-        df_dash = pd.DataFrame([dict(r) for r in _rows_d], columns=_cols_d) if _rows_d else pd.DataFrame(columns=_cols_d)
+        df_dash = _cached_contratos_activos(_eid_dash, _pf if _pf_activo else "")
         # Suma de cobros: usar monto_abonado (nombre real en schema migrado)
-        _pagos_q = f"SELECT COALESCE(ph.monto_abonado, 0) AS monto_total FROM pagos_historial ph WHERE ph.empresa_id = %s {'AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)' if _pf_activo else ''}"
-        _params_pagos = (_eid_dash, _pf, _eid_dash) if _pf_activo else (_eid_dash,)
         try:
-            with _pg_conn() as _conn_pq:
-                with _conn_pq.cursor() as _cur_pq:
-                    _cur_pq.execute(_pagos_q, _params_pagos)
-                    _rows_pq = _cur_pq.fetchall()
-                    _cols_pq = [x.name for x in _cur_pq.description]
-            df_pagos_totales = pd.DataFrame([dict(r) for r in _rows_pq], columns=_cols_pq) if _rows_pq else pd.DataFrame(columns=_cols_pq)
+            df_pagos_totales = _cached_pagos_totales(_eid_dash, _pf if _pf_activo else "")
         except Exception as _qe2:
-            logging.error(f"[Dashboard] Error en query pagos: {_qe2} | Query: {_pagos_q}")
+            logging.error(f"[Dashboard] Error en query pagos: {_qe2}")
             st.error("❌ Error al cargar la recaudación. Revisá los logs del servidor.")
             st.stop()
         
@@ -1387,36 +1592,9 @@ if tab_planilla:
         _pf_plan = st.session_state.get("propietario_filtro", "")
         _pf_plan_activo = rol_actual == "propietario" and bool(_pf_plan)
         _eid_plan = st.session_state.get("empresa_id", 0)
-        _where_plan = "AND p.propietario = %s" if _pf_plan_activo else ""
-        _params_plan = (_eid_plan, _pf_plan) if _pf_plan_activo else (_eid_plan,)
 
         try:
-            query = f'''
-                SELECT 
-                    c.codigo AS "CÓDIGO",
-                    p.alias_propiedad AS "ALIAS PROPIEDAD",
-                    (i.apellidos || ', ' || i.nombres) AS "INQUILINO",
-                    (p.calle || ' ' || p.numero || CASE WHEN p.departamento <> '' AND p.departamento IS NOT NULL THEN ', Dto: ' || p.departamento ELSE '' END) AS "PROPIEDAD",
-                    c.estado AS "ESTADO",
-                    c.inicio_contrato AS "INICIO_CONTRATO",
-                    c.fin_contrato AS "FIN_CONTRATO",
-                    c.calc_duracion AS "CALC_DURACION",
-                    c.monto_inicial AS "MONTO INICIAL",
-                    c.alquiler AS "ALQUILER",
-                    c.servicios_total AS "SERVICIOS_TOTAL",
-                    c.total_pagado AS "TOTAL_ESTIMADO"
-                FROM contratos c
-                JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-                JOIN inquilinos i ON c.dni_inquilino = i.dni
-                WHERE c.empresa_id = %s AND 1=1 {_where_plan}
-                ORDER BY c.codigo DESC
-            '''
-            with _pg_conn() as _conn_pl:
-                with _conn_pl.cursor() as _cur_pl:
-                    _cur_pl.execute(query, _params_plan)
-                    _rows_pl = _cur_pl.fetchall()
-                    _cols_pl = [x.name for x in _cur_pl.description]
-            df = pd.DataFrame([dict(r) for r in _rows_pl], columns=_cols_pl) if _rows_pl else pd.DataFrame(columns=_cols_pl)
+            df = _cached_planilla_contratos(_eid_plan, _pf_plan if _pf_plan_activo else "")
 
             # 2. AGREGA ESTAS LÍNEAS PARA VOLVER A PONER LAS BARRAS:
             if not df.empty:
@@ -1760,8 +1938,16 @@ if tab_pagos:
             # Convertir date a datetime igual que en la pestaña de carga
             inicio_contrato_recibo = datetime.combine(inicio_contrato_dt, datetime.min.time())
 
+            # Valor base del campo editable: SIEMPRE el alquiler vigente del contrato.
+            # El valor actualizado por índice se calcula aparte y se ofrece como sugerencia
+            # ("Monto Actualizado"); solo pisa el campo si el usuario aprieta "Aplicar".
+            val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
+            _key_alq_pago = f"monto_alq_pago_{c_datos['codigo']}"
+            if _key_alq_pago not in st.session_state:
+                st.session_state[_key_alq_pago] = val_base_alq
+
             st.markdown("#### 💰 Monto Neto de Alquiler")
-            r_col1, r_col2, r_col3 = st.columns([2, 2, 2])
+            r_col1, r_col2, r_col3 = st.columns([2, 2, 1])
             r_col1.markdown(f"🔗 [Verificar en arquiler.com](https://arquiler.com/pwa?amount={int(val_monto_ini_recibo)}&date={inicio_contrato_dt.strftime('%Y-%m-%d')}&months={meses_a_sumar}&rate={indice_recibo.lower()})")
 
             # Calcular la última fecha de actualización ya aplicada.
@@ -1777,6 +1963,8 @@ if tab_pagos:
 
             # Calcula: monto_inicial × (ICL_ultima_actualizacion / ICL_inicio_contrato)
             valor_auto_recibo = None
+            _fallo_consulta_indice = False
+            _sin_calculo_disponible = False
             if indice_recibo in ("ICL", "IPC"):
                 with st.spinner(f"⏳ Consultando {indice_recibo}..."):
                     if indice_recibo == "ICL":
@@ -1793,18 +1981,28 @@ if tab_pagos:
                 _fecha_desde_fmt = inicio_contrato_dt.strftime("%d/%m/%Y")
                 _fecha_hasta_fmt = _ultima_act_dt.strftime("%d/%m/%Y")
                 r_col2.metric(
-                    label=f"📡 Auto {indice_recibo} (oficial)",
+                    label="📊 Monto Actualizado",
                     value=valor_auto_recibo_fmt,
                     help=(
-                        f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'}. "
+                        f"Calculado con datos oficiales del {'BCRA' if indice_recibo == 'ICL' else 'INDEC'} ({indice_recibo}). "
                         f"Período: {_fecha_desde_fmt} → {_fecha_hasta_fmt} "
-                        f"({_meses_hasta_ultima_act} meses acumulados desde el inicio del contrato)."
+                        f"({_meses_hasta_ultima_act} meses acumulados desde el inicio del contrato). "
+                        "Es solo una sugerencia — no se aplica sola, usá el botón si querés cargarla."
                     )
                 )
-                val_base_alq = valor_auto_recibo
+                r_col3.markdown("<div style='height: 1.9em'></div>", unsafe_allow_html=True)
+                if r_col3.button(
+                    "⬅️ Aplicar",
+                    key=f"aplicar_monto_act_{c_datos['codigo']}",
+                    help="Carga este monto en 'Monto Neto Alquiler' de abajo. No guarda nada en la base de datos todavía — eso recién pasa al impactar el cobro.",
+                    use_container_width=True,
+                ):
+                    st.session_state[_key_alq_pago] = valor_auto_recibo
+                    st.rerun()
             else:
                 if indice_recibo in ("ICL", "IPC"):
                     fuente_r = "BCRA" if indice_recibo == "ICL" else "INDEC"
+                    _fallo_consulta_indice = True
                     r_col2.warning(
                         f"⚠️ No se pudo obtener el índice desde {fuente_r}. "
                         "Ingresá el valor manualmente o verificá en arquiler.com (↖).",
@@ -1813,17 +2011,15 @@ if tab_pagos:
                         _obtener_icl_bcra_xls.clear()
                         _obtener_ipc_indec.clear()
                         st.rerun()
-                val_base_alq = val_alq_ultimo_recibo if val_alq_ultimo_recibo > 0 else val_monto_ini_recibo
-
-            # Resetear el campo si el valor calculado cambió (evita cacheo de session_state)
-            _key_alq_pago = f"monto_alq_pago_{c_datos['codigo']}"
-            _key_alq_ref  = f"_ref_alq_pago_{c_datos['codigo']}"
-            if st.session_state.get(_key_alq_ref) != val_base_alq:
-                st.session_state[_key_alq_pago] = val_base_alq
-                st.session_state[_key_alq_ref]  = val_base_alq
+                else:
+                    _sin_calculo_disponible = True
+                    r_col2.info(
+                        f"ℹ️ El índice de este contrato ({indice_recibo}) no tiene cálculo automático. "
+                        "Verificá el monto manualmente antes de impactar el cobro.",
+                    )
 
             cp_col1, cp_col2, cp_col3, cp_col4 = st.columns(4)
-            monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, value=val_base_alq, step=5000.0, key=_key_alq_pago)
+            monto_alq_pago = cp_col1.number_input("Monto Neto Alquiler ($):", min_value=0.0, step=5000.0, key=_key_alq_pago)
             # cp_col2 y cp_col3 se llenan después del expander con el total real
             _ph_servicios = cp_col2.empty()
             _ph_total     = cp_col3.empty()
@@ -2083,8 +2279,53 @@ if tab_pagos:
                 st.session_state.pago_impactado = False
                 st.session_state.contrato_impactado_id = None
 
-            if st.button("📥 Impactar Cobro en Caja Histórica", type="primary",
-                           disabled=bool(_row_existente and saldo_periodo_anterior == 0)):
+            # ── Confirmación si el Monto Neto Alquiler difiere del Monto Actualizado, o si no se pudo verificar ──
+            _difiere_monto_alq = (
+                valor_auto_recibo is not None
+                and abs(float(valor_auto_recibo) - float(monto_alq_pago)) > 0.01
+            )
+            _requiere_confirmacion = _difiere_monto_alq or _fallo_consulta_indice or _sin_calculo_disponible
+            _key_conf_dif = f"confirmar_dif_monto_{c_datos['codigo']}_{mes_periodo_texto}"
+
+            _clic_impactar = st.button("📥 Impactar Cobro en Caja Histórica", type="primary",
+                           disabled=bool(_row_existente and saldo_periodo_anterior == 0))
+
+            _debe_guardar_cobro = False
+            if _clic_impactar:
+                if _requiere_confirmacion:
+                    st.session_state[_key_conf_dif] = "pedir"
+                else:
+                    _debe_guardar_cobro = True
+
+            if st.session_state.get(_key_conf_dif) == "pedir":
+                if _difiere_monto_alq:
+                    st.warning(
+                        f"⚠️ El **Monto Neto Alquiler** cargado (\\$ {monto_alq_pago:,.2f}) es distinto al "
+                        f"**Monto Actualizado** calculado por {indice_recibo} (\\$ {valor_auto_recibo:,.2f}). "
+                        "¿Confirmás que querés impactar el cobro con el monto que está cargado?"
+                    )
+                elif _fallo_consulta_indice:
+                    st.warning(
+                        f"⚠️ No se pudo consultar el índice **{indice_recibo}** para verificar si el "
+                        f"**Monto Neto Alquiler** (\\$ {monto_alq_pago:,.2f}) está actualizado. "
+                        "¿Confirmás que querés impactar el cobro igual, sin esa verificación?"
+                    )
+                else:
+                    st.warning(
+                        f"⚠️ Este contrato usa índice **{indice_recibo}**, que no tiene cálculo automático. "
+                        f"No hay forma de verificar si el **Monto Neto Alquiler** (\\$ {monto_alq_pago:,.2f}) está actualizado. "
+                        "¿Confirmás que el monto es correcto e impactás el cobro?"
+                    )
+                _wc1, _wc2 = st.columns(2)
+                if _wc1.button("✅ Sí, confirmar e impactar igual", type="primary", key=f"conf_dif_si_{c_datos['codigo']}"):
+                    st.session_state[_key_conf_dif] = None
+                    _debe_guardar_cobro = True
+                if _wc2.button("❌ Cancelar y revisar el monto", key=f"conf_dif_no_{c_datos['codigo']}"):
+                    st.session_state[_key_conf_dif] = None
+                    st.info("Cobro no impactado. Ajustá el monto si hace falta y volvé a intentar.")
+                    st.rerun()
+
+            if _debe_guardar_cobro:
                 conn = conectar_db()
                 cursor = conn.cursor()
                 try:
@@ -2107,7 +2348,6 @@ if tab_pagos:
                     _coch_usd   = round(monto_cochera / _tc_insert, 2)     if _tc_insert > 0 else 0.0
                     _imp_usd    = round(_val_imp_insert / _tc_insert, 2)   if _tc_insert > 0 else 0.0
                     _ret_agencia = round(monto_abonado * _safe_float(c_datos.get('honorarios')) / 100.0, 2)
-                    _ret_usd    = round(_ret_agencia / _tc_insert, 2)      if _tc_insert > 0 else 0.0
                     # Si ya existe un pago para este período, el alquiler ya fue registrado
                     # El segundo pago solo registra el complemento (monto_abonado), no duplica el alquiler
                     _monto_alq_insert = monto_alq_pago if not _rows_existentes else 0.0
@@ -2127,10 +2367,10 @@ if tab_pagos:
                             fecha, metodo_pago, comentario,
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                             monto_cochera, monto_ooss, monto_imp_inmobiliario,
-                            monto_honorarios, monto_garantia,
+                            monto_honorarios, monto_garantia, monto_gasto_admin,
                             monto_abonado, saldo_pendiente, saldos_anteriores,
                             cotizacion_usd, registrado_por, nro_comprobante
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
                         c_datos['codigo'], c_datos.get('alias_propiedad', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
@@ -2138,7 +2378,7 @@ if tab_pagos:
                         datetime.now().strftime("%d/%m/%Y %H:%M"), metodo_pago, _comentario_completo,
                         _monto_exp_insert, _monto_ede_insert, _monto_gas_insert, _monto_mun_insert,
                         _monto_coch_insert, _monto_ooss_insert, _monto_imp_insert2,
-                        monto_honorarios_pago, monto_garantia_pago,
+                        monto_honorarios_pago, monto_garantia_pago, _ret_agencia,
                         monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
                         _tc_insert, st.session_state.get("username", ""), _nro_comprobante_insert
                     ))
@@ -2185,6 +2425,7 @@ if tab_pagos:
                           monto_serv_pago, c_datos['codigo']))
 
                     conn.commit()
+                    st.cache_data.clear()
                     st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
                     if saldo_pendiente > 0:
                         st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
@@ -2343,66 +2584,8 @@ if tab_historial_pagos:
         _pf_hist = st.session_state.get("propietario_filtro", "")
         _pf_hist_activo = rol_actual == "propietario" and bool(_pf_hist)
         _eid_hist = st.session_state.get("empresa_id", 0)
-        _where_hist = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if _pf_hist_activo else ""
-        _params_hist = (_eid_hist, _pf_hist, _eid_hist) if _pf_hist_activo else (_eid_hist,)
 
-        # Query ampliada: trae todos los montos detallados para poder reimprimir el recibo
-        query_historial = f"""
-            SELECT
-                ph.id                                       AS "ID PAGO",
-                ph.codigo_contrato                          AS "COD CONTRATO",
-                ph.propiedad                                AS "PROPIEDAD",
-                ph.propiedad                                AS "DIR PROPIEDAD",
-                COALESCE(p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END, ph.propiedad) AS "DOMICILIO",
-                COALESCE(ph.propiedad || ' (' || p2.calle || ' ' || p2.numero || CASE WHEN p2.departamento <> '' AND p2.departamento IS NOT NULL THEN ', Dto: ' || p2.departamento ELSE '' END || ')', ph.propiedad) AS "ALIAS / UBICACIÓN",
-                ph.inquilino                                AS "INQUILINO",
-                ph.inquilino                                AS "_apellidos",
-                ''                                          AS "_nombres",
-                ''                                          AS "_telefono",
-                ph.periodo                                  AS "PERIODO",
-                COALESCE(ph.monto_alquiler,0)               AS "ALQUILER ($)",
-                0                                           AS "SERVICIOS ($)",
-                COALESCE(ph.monto_abonado,0)               AS "TOTAL ($)",
-                ph.fecha                                    AS "FECHA IMPACTO",
-                COALESCE(ph.metodo_pago,'')                 AS "METODO",
-                COALESCE(ph.monto_expensas,0)               AS "_expensas",
-                COALESCE(ph.monto_edesal,0)                 AS "_edesal",
-                COALESCE(ph.monto_gas,0)                    AS "_gas",
-                COALESCE(ph.monto_municipalidad,0)          AS "_municipalidad",
-                COALESCE(ph.monto_cochera,0)                AS "_cochera",
-                COALESCE(ph.monto_ooss,0)                   AS "_ooss",
-                COALESCE(ph.monto_imp_inmobiliario,0)       AS "_imp_inmobiliario",
-                COALESCE(ph.monto_honorarios,0)             AS "_honorarios",
-                COALESCE(ph.monto_garantia,0)               AS "_garantia",
-                COALESCE(ph.monto_abonado,0)                AS "_abonado",
-                COALESCE(ph.saldo_pendiente,0)              AS "_saldo_pendiente",
-                COALESCE(ph.comentario,'')                 AS "_comentarios",
-                COALESCE(c.inicio_contrato, '')            AS "_inicio_contrato",
-                0                                           AS "_pct_admin",
-                COALESCE(ph.nro_comprobante, '')           AS "NRO COMPROBANTE",
-                COALESCE(ph.cotizacion_usd,0)              AS "COTIZACIÓN USD",
-                CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
-                     THEN ROUND((COALESCE(ph.monto_alquiler,0) / ph.cotizacion_usd)::NUMERIC, 2)
-                     ELSE 0 END                             AS "ALQUILER (USD)",
-                CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
-                     THEN ROUND((COALESCE(ph.monto_cochera,0) / ph.cotizacion_usd)::NUMERIC, 2)
-                     ELSE 0 END                             AS "COCHERA (USD)",
-                CASE WHEN COALESCE(ph.cotizacion_usd,0) > 0
-                     THEN ROUND((COALESCE(ph.monto_imp_inmobiliario,0) / ph.cotizacion_usd)::NUMERIC, 2)
-                     ELSE 0 END                             AS "IMP. INMOBILIARIO (USD)",
-                0                                           AS "RETENCIÓN AGENCIA (USD)"
-            FROM pagos_historial ph
-            LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
-            LEFT JOIN propiedades p2 ON (ph.propiedad = p2.alias_propiedad OR ph.propiedad = (p2.calle || ' ' || p2.numero)) AND p2.empresa_id = ph.empresa_id
-            WHERE ph.empresa_id = %s {_where_hist}
-            ORDER BY ph.id DESC
-        """
-        with _pg_conn() as _conn_h:
-            with _conn_h.cursor() as _cur_h:
-                _cur_h.execute(query_historial, _params_hist)
-                _rows_h = _cur_h.fetchall()
-                _cols_h = [x.name for x in _cur_h.description]
-        df_historial = pd.DataFrame([dict(r) for r in _rows_h], columns=_cols_h) if _rows_h else pd.DataFrame(columns=_cols_h)
+        df_historial = _cached_historial_pagos(_eid_hist, _pf_hist if _pf_hist_activo else "")
 
         # Convertir columnas NUMERIC (Decimal) a float
         if not df_historial.empty:
@@ -3692,7 +3875,7 @@ if tab_carga:
     
                     conn.commit()
                     # Limpiar cache para que los nuevos datos aparezcan de inmediato
-                    obtener_datos_desplegables.clear()
+                    st.cache_data.clear()
                     st.session_state.datos_contrato = None
                     st.session_state.propiedad_activa = None
                     # Actualización del session_state post-guardado para mantener consistencia general
@@ -3747,7 +3930,7 @@ if tab_auxiliares:
                                 ))
                                 conn.commit()
                                 st.success(f"✅ Inquilino '{apellidos}, {nombres}' guardado correctamente.")
-                                obtener_datos_desplegables.clear()
+                                st.cache_data.clear()
                                 st.rerun()
                             except psycopg2.errors.UniqueViolation:
                                 st.error("⚠️ Ya existe un inquilino con ese DNI o con el mismo apellido y nombre.")
@@ -3813,7 +3996,7 @@ if tab_auxiliares:
                                 ))
                                 conn.commit()
                                 st.success("Propiedad guardada.")
-                                obtener_datos_desplegables.clear()
+                                st.cache_data.clear()
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error: {e}")
@@ -3869,6 +4052,7 @@ if tab_auxiliares:
                                                     "UPDATE propiedades SET grupo = %s WHERE id = %s AND empresa_id = %s",
                                                     (_nombre_grupo.strip(), _pid, _eid_grp)
                                                 )
+                                    st.cache_data.clear()
                                     st.success(f"✅ Grupo '{_nombre_grupo.strip()}' guardado con {len(_ids_grp)} propiedades.")
                                     st.rerun()
                                 except Exception as _eg:
@@ -4515,6 +4699,7 @@ if tab_superadmin:
                                                             with _conn_imp_c.cursor() as _cur_imp_c:
                                                                 _cur_imp_c.executemany(query_cont, datos_cont)
                                                         st.session_state[_cont_key] = True
+                                                        st.cache_data.clear()
                                                         st.success(f"✅ {len(datos_cont)} contrato(s) importado(s) correctamente.")
                                                         st.balloons()
                                                         st.rerun()
@@ -4597,6 +4782,7 @@ if tab_superadmin:
                                                                   _g["pagado_por"], _g["observaciones"], _g["tipo_gasto"],
                                                                   _g["cobrado"], _g["periodo_cobrado"]))
                                                 st.session_state[_gimp_key] = True
+                                                st.cache_data.clear()
                                                 st.success(f"✅ {len(_gastos_ok)} gasto(s) importados.")
                                                 st.balloons()
                                                 st.rerun()
@@ -4693,6 +4879,7 @@ if tab_superadmin:
                                                 with _conn_imp.cursor() as _cur_imp:
                                                     _cur_imp.executemany(query_imp, datos)
                                             st.session_state[_import_key] = True
+                                            st.cache_data.clear()
                                             st.success(f"✅ ¡{len(datos)} registro(s) importados en '{tabla_seleccionada}'!")
                                             st.balloons()
                                             st.rerun()
@@ -4751,6 +4938,7 @@ if tab_superadmin:
                                             _cur_borrar.execute("DELETE FROM empresas WHERE id = %s", (_eid_a_borrar,))
                                         _cur_borrar.execute("DELETE FROM usuarios_central WHERE nombre_empresa = %s", (empresa_a_eliminar,))
 
+                                st.cache_data.clear()
                                 st.success(f"🔥 La empresa '{empresa_a_eliminar}' y todos sus datos han sido eliminados de Supabase.")
                                 st.balloons()
                                 st.rerun()
@@ -4873,6 +5061,7 @@ if tab_superadmin:
                                                                     f"DELETE FROM {tabla_seleccionada} WHERE {id_col_name} IN ({placeholder}) AND empresa_id = %s",
                                                                     tuple(ids_a_borrar) + (_eid_del,)
                                                                 )
+                                                    st.cache_data.clear()
                                                     st.success(f"✅ {cant_filas} registros eliminados de '{tabla_seleccionada.upper()}' — '{empresa_datos_seleccionada}'.")
                                                     st.balloons()
                                                     st.rerun()
@@ -5066,6 +5255,7 @@ if tab_gastos:
                                                 _pagado_por, _observaciones.strip(), _tipo_gasto_ord, _tc_gi
                                             ))
                                     st.success(f"✅ Gasto de $ {_monto:,.2f} registrado en {_prop_label}.")
+                                st.cache_data.clear()
                                 st.rerun()
                             except Exception as _e:
                                 st.error(f"Error al guardar: {_e}")
@@ -5073,30 +5263,7 @@ if tab_gastos:
         # ── SUBPESTAÑA 2: HISTORIAL ─────────────────────────────────────
         with subtab_historial:
             _eid_g = st.session_state.get("empresa_id", 0)
-            _where_g = "AND p.propietario = %s" if _pf_g_activo else ""
-            _params_g = (_eid_g, _pf_g) if _pf_g_activo else (_eid_g,)
-            with _pg_conn() as _conn_dg:
-                with _conn_dg.cursor() as _cur_dg:
-                    _cur_dg.execute(f"""
-                SELECT gp.id AS "ID", p.alias_propiedad AS "PROPIEDAD", p.propietario AS "PROPIETARIO",
-                       gp.fecha AS "FECHA", gp.categoria AS "CATEGORÍA", gp.descripcion AS "DESCRIPCIÓN",
-                       gp.monto AS "MONTO ($)",
-                       COALESCE(gp.cotizacion_usd, 0) AS "COTIZACIÓN USD",
-                       CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
-                            THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
-                            ELSE 0 END AS "MONTO (USD)",
-                       COALESCE(gp.tipo_gasto, 'Ordinario') AS "TIPO",
-                       gp.proveedor AS "PROVEEDOR",
-                       gp.comprobante AS "COMPROBANTE", gp.pagado_por AS "PAGADO POR",
-                       gp.observaciones AS "OBSERVACIONES"
-                FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
-                WHERE gp.empresa_id = %s {_where_g}
-                ORDER BY gp.fecha DESC, gp.id DESC
-            """, _params_g)
-                    _rows_dg = _cur_dg.fetchall()
-                    _cols_dg = [x.name for x in _cur_dg.description]
-            _df_gastos = pd.DataFrame([dict(r) for r in _rows_dg], columns=_cols_dg) if _rows_dg else pd.DataFrame(columns=_cols_dg)
+            _df_gastos = _cached_gastos_historial(_eid_g, _pf_g if _pf_g_activo else "")
 
             if _df_gastos.empty:
                 st.info("Aún no se registraron gastos.")
@@ -5147,61 +5314,10 @@ if tab_gastos:
         with subtab_metricas:
             st.markdown("#### 📊 Ingresos vs. Salidas por Propiedad")
 
-            # ── Selector de vista: Individual o Grupo ──
-            _vista_metrica = st.radio(
-                "Ver métricas por:",
-                ["🏠 Propiedad individual", "🏢 Grupo / Edificio"],
-                horizontal=True,
-                key="radio_vista_metrica"
-            )
-            _ver_por_grupo = "Grupo" in _vista_metrica
-
             # ── Cargar ingresos desde pagos_historial (incluyendo expensas) ──
             _eid_m = st.session_state.get("empresa_id", 0)
-            _where_m = "AND p.propietario = %s" if _pf_g_activo else ""
-            _params_m = (_eid_m, _pf_g) if _pf_g_activo else (_eid_m,)
 
-            _df_ingresos_raw = None
-            with _pg_conn() as _conn_ir:
-                with _conn_ir.cursor() as _cur_ir:
-                    _cur_ir.execute(f"""
-                SELECT
-                    ph.propiedad                                                        AS propiedad,
-                    COALESCE(p.propietario, '')                                        AS propietario,
-                    COALESCE(p.grupo, '')                                              AS grupo,
-                    ph.periodo                                                          AS periodo,
-                    COALESCE(c.inicio_contrato, '')                                   AS inicio_contrato,
-                    0                                                                   AS calc_duracion,
-                    COALESCE(ph.monto_alquiler, 0)                                    AS alquiler,
-                    COALESCE(ph.monto_cochera, 0)                                     AS cochera,
-                    COALESCE(ph.monto_expensas, 0)                                    AS expensas,
-                    COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
-                        + COALESCE(ph.monto_expensas, 0)                              AS total_ingreso,
-                    0                                                                   AS gasto_admin,
-                    COALESCE(ph.monto_imp_inmobiliario, 0)                            AS imp_inmobiliario,
-                    CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
-                         THEN ROUND((COALESCE(ph.monto_alquiler, 0) / ph.cotizacion_usd)::NUMERIC, 2)
-                         ELSE 0 END                                                    AS alquiler_usd,
-                    CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
-                         THEN ROUND((COALESCE(ph.monto_cochera, 0) / ph.cotizacion_usd)::NUMERIC, 2)
-                         ELSE 0 END                                                    AS cochera_usd,
-                    CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
-                         THEN ROUND(((COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
-                              + COALESCE(ph.monto_expensas, 0)) / ph.cotizacion_usd)::NUMERIC, 2)
-                         ELSE 0 END                                                    AS total_ingreso_usd,
-                    0                                                                   AS gasto_admin_usd,
-                    CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
-                         THEN ROUND((COALESCE(ph.monto_imp_inmobiliario, 0) / ph.cotizacion_usd)::NUMERIC, 2)
-                         ELSE 0 END                                                    AS imp_inmobiliario_usd
-                FROM pagos_historial ph
-                LEFT JOIN propiedades p ON ph.propiedad = p.alias_propiedad AND p.empresa_id = ph.empresa_id
-                LEFT JOIN contratos c ON ph.codigo_contrato = c.codigo AND c.empresa_id = ph.empresa_id
-                WHERE ph.empresa_id = %s {_where_m}
-                ORDER BY ph.periodo
-            """, _params_m)
-                    _rows_ir = _cur_ir.fetchall()
-                    _cols_ir = [x.name for x in _cur_ir.description]
-            _df_ingresos_raw = pd.DataFrame([dict(r) for r in _rows_ir], columns=_cols_ir) if _rows_ir else pd.DataFrame(columns=_cols_ir)
+            _df_ingresos_raw = _cached_metricas_ingresos(_eid_m, _pf_g if _pf_g_activo else "").copy()
             # Convertir columnas NUMERIC (Decimal) a float para evitar TypeError
             if not _df_ingresos_raw.empty:
                 for _col in ['alquiler','cochera','expensas','total_ingreso','imp_inmobiliario','alquiler_usd','cochera_usd','total_ingreso_usd','gasto_admin_usd','imp_inmobiliario_usd']:
@@ -5250,26 +5366,7 @@ if tab_gastos:
                 _df_ingresos_raw["mes_calendario"] = pd.Series(dtype=str)
 
             # ── Cargar gastos desde gastos_propiedades ──
-            with _pg_conn() as _conn_gr:
-                with _conn_gr.cursor() as _cur_gr:
-                    _cur_gr.execute(f"""
-                SELECT
-                    p.alias_propiedad                              AS propiedad,
-                    COALESCE(p.propietario, '')                   AS propietario,
-                    TO_CHAR(gp.fecha::date, 'YYYY-MM')           AS periodo,
-                    SUM(gp.monto)                                 AS total_gasto,
-                    SUM(CASE WHEN COALESCE(gp.cotizacion_usd, 0) > 0
-                             THEN ROUND((gp.monto / gp.cotizacion_usd)::NUMERIC, 2)
-                             ELSE 0 END)                           AS total_gasto_usd
-                FROM gastos_propiedades gp
-                JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
-                WHERE gp.empresa_id = %s {"AND p.propietario = %s" if _pf_g_activo else ""}
-                GROUP BY p.alias_propiedad, p.propietario, TO_CHAR(gp.fecha::date, 'YYYY-MM')
-                ORDER BY periodo
-            """, _params_m)
-                    _rows_gr = _cur_gr.fetchall()
-                    _cols_gr = [x.name for x in _cur_gr.description]
-            _df_gastos_raw = pd.DataFrame([dict(r) for r in _rows_gr], columns=_cols_gr) if _rows_gr else pd.DataFrame(columns=_cols_gr)
+            _df_gastos_raw = _cached_metricas_gastos(_eid_m, _pf_g if _pf_g_activo else "")
 
             if _df_ingresos_raw.empty and _df_gastos_raw.empty:
                 st.info("Aún no hay datos de ingresos ni gastos para mostrar métricas.")
@@ -5326,8 +5423,21 @@ if tab_gastos:
                     _mcol1, = st.columns([1])
                     _f_propietario_m = _pf_g if _pf_g_activo else "Todos"
 
-                _props_lista_m = ["Todas"] + sorted(_props_gasto["alias_propiedad"].tolist()) if not _props_gasto.empty else ["Todas"]
-                _f_prop_m = _mcol1.selectbox("🏠 Propiedad:", _props_lista_m, key="met_prop")
+                # Dropdown "Propiedad" — incluye también los grupos/edificios como opciones,
+                # para no tener que cambiar de vista para filtrar por edificio.
+                _opciones_prop_m = {"Todas": (None, None)}
+                if not _props_gasto.empty and "grupo" in _props_gasto.columns:
+                    _grupos_disp_m = sorted({
+                        str(g).strip() for g in _props_gasto["grupo"].dropna().tolist() if str(g).strip()
+                    })
+                    for _g in _grupos_disp_m:
+                        _opciones_prop_m[f"🏢 {_g} (grupo/edificio)"] = ("grupo", _g)
+                if not _props_gasto.empty:
+                    for _p in sorted(_props_gasto["alias_propiedad"].tolist()):
+                        _opciones_prop_m[f"🏠 {_p}"] = ("propiedad", _p)
+
+                _f_prop_m_label = _mcol1.selectbox("🏠 Propiedad:", list(_opciones_prop_m.keys()), key="met_prop")
+                _f_prop_m_tipo, _f_prop_m_valor = _opciones_prop_m[_f_prop_m_label]
 
                 # Fila 2: Mes calendario (Año + Mes) + Período de contrato
                 _fcol1, _fcol2, _fcol3 = st.columns(3)
@@ -5358,17 +5468,13 @@ if tab_gastos:
                 if not _dfi.empty:
                     if _f_propietario_m != "Todos":
                         _dfi = _dfi[_dfi["propietario"] == _f_propietario_m]
-                    if _ver_por_grupo:
-                        # Filtrar por grupo
-                        _grupos_m = sorted(_dfi["grupo"].dropna().unique().tolist())
-                        _f_grupo_m = st.selectbox("🏢 Grupo:", ["Todos"] + _grupos_m, key="met_grupo_sel")
-                        if _f_grupo_m != "Todos":
-                            _dfi = _dfi[_dfi["grupo"] == _f_grupo_m]
-                        # Reemplazar propiedad por grupo para el agrupamiento
+                    if _f_prop_m_tipo == "grupo":
+                        _dfi = _dfi[_dfi["grupo"] == _f_prop_m_valor]
+                        # Reemplazar propiedad por grupo para el agrupamiento de la tabla/gráfico
                         _dfi = _dfi.copy()
                         _dfi["propiedad"] = _dfi["grupo"].fillna("Sin grupo")
-                    elif _f_prop_m != "Todas":
-                        _dfi = _dfi[_dfi["propiedad"] == _f_prop_m]
+                    elif _f_prop_m_tipo == "propiedad":
+                        _dfi = _dfi[_dfi["propiedad"] == _f_prop_m_valor]
                     # Filtro por período del contrato ("Mes N de M")
                     if _f_periodo_contrato != "Todos":
                         _dfi = _dfi[_dfi["periodo"] == _f_periodo_contrato]
@@ -5384,8 +5490,12 @@ if tab_gastos:
                     _dfg["periodo"] = _dfg["periodo"].astype(str).str[:7]
                     if _f_propietario_m != "Todos":
                         _dfg = _dfg[_dfg["propietario"] == _f_propietario_m]
-                    if _f_prop_m != "Todas":
-                        _dfg = _dfg[_dfg["propiedad"] == _f_prop_m]
+                    if _f_prop_m_tipo == "grupo":
+                        _dfg = _dfg[_dfg["grupo"] == _f_prop_m_valor]
+                        _dfg = _dfg.copy()
+                        _dfg["propiedad"] = _dfg["grupo"].fillna("Sin grupo")
+                    elif _f_prop_m_tipo == "propiedad":
+                        _dfg = _dfg[_dfg["propiedad"] == _f_prop_m_valor]
                     if _anio_sel != "Todos":
                         _dfg = _dfg[_dfg["periodo"].str[:4] == _anio_sel]
                     if _mes_sel != "Todos":
@@ -5399,6 +5509,7 @@ if tab_gastos:
                 _total_ing     = _dfi["total_ingreso"].sum()    if not _dfi.empty else 0.0
                 _total_alq     = _dfi["alquiler"].sum()         if not _dfi.empty else 0.0
                 _total_coch    = _dfi["cochera"].sum()          if not _dfi.empty else 0.0
+                _total_exp     = _dfi["expensas"].sum()         if not _dfi.empty else 0.0
                 _total_gas     = _dfg["total_gasto"].sum()      if not _dfg.empty else 0.0
                 _total_adm     = _dfi["gasto_admin"].sum()      if not _dfi.empty else 0.0
                 _total_imp_inm = _dfi["imp_inmobiliario"].sum() if not _dfi.empty else 0.0
@@ -5409,6 +5520,7 @@ if tab_gastos:
                 _total_ing_usd     = float(_dfi["total_ingreso_usd"].sum())    if not _dfi.empty else 0.0
                 _total_alq_usd     = float(_dfi["alquiler_usd"].sum())         if not _dfi.empty else 0.0
                 _total_coch_usd    = _dfi["cochera_usd"].sum()          if not _dfi.empty else 0.0
+                _total_exp_usd     = float(_dfi["expensas_usd"].sum())         if not _dfi.empty else 0.0
                 _total_gas_usd     = float(_dfg["total_gasto_usd"].sum())      if not _dfg.empty else 0.0
                 _total_adm_usd     = float(_dfi["gasto_admin_usd"].sum())      if not _dfi.empty else 0.0
                 _total_imp_inm_usd = float(_dfi["imp_inmobiliario_usd"].sum()) if not _dfi.empty else 0.0
@@ -5420,9 +5532,11 @@ if tab_gastos:
                     # ── KPIs en PESOS ──
                     st.markdown("**📥 Ingresos — $**")
                     _km1, _km2, _km3 = st.columns(3)
-                    _km1.metric("💰 Total Ingresos",  f"$ {_total_ing:,.2f}", help="Alquiler + Cochera del período filtrado")
+                    _km1.metric("💰 Total Ingresos",  f"$ {_total_ing:,.2f}", help="Alquiler + Cochera + Expensas del período filtrado")
                     _km2.metric("🏠 Alquiler",        f"$ {_total_alq:,.2f}")
                     _km3.metric("🚗 Cochera",         f"$ {_total_coch:,.2f}")
+                    _km4, _km5 = st.columns(2)
+                    _km4.metric("🏘️ Expensas cobradas", f"$ {_total_exp:,.2f}")
 
                     st.markdown("**📤 Pasivos — $**")
                     _kp1, _kp2, _kp3 = st.columns(3)
@@ -5437,12 +5551,11 @@ if tab_gastos:
                     # ── KPIs en USD ──
                     st.markdown("**📥 Ingresos — U$S**")
                     _ku1, _ku2, _ku3 = st.columns(3)
-                    _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera en USD al tipo de cambio de cada cobro")
+                    _ku1.metric("💰 Total Ingresos",  f"U$S {_total_ing_usd:,.2f}", help="Alquiler + Cochera + Expensas en USD al tipo de cambio de cada cobro")
                     _ku2.metric("🏠 Alquiler",        f"U$S {_total_alq_usd:,.2f}")
                     _ku3.metric("🚗 Cochera",         f"U$S {_total_coch_usd:,.2f}")
                     _ku4, _ku5 = st.columns(2)
-                    _total_exp = float(_dfi["expensas"].sum()) if not _dfi.empty else 0.0
-                    _ku4.metric("🏘️ Expensas cobradas", f"$ {_total_exp:,.2f}")
+                    _ku4.metric("🏘️ Expensas cobradas", f"U$S {_total_exp_usd:,.2f}")
 
                     st.markdown("**📤 Pasivos — U$S**")
                     _kpu1, _kpu2, _kpu3 = st.columns(3)
