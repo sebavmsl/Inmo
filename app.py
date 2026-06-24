@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.014"
+APP_VERSION = "v1.030"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -399,8 +399,12 @@ def generar_pdf_rendicion(
     filas_propiedades,
     total_alquiler, total_cochera, total_expensas, total_cobrado, total_comision, total_neto,
     saldo_anterior, monto_a_liquidar, monto_liquidado, saldo_pendiente,
+    filas_detalle_recibos=None, total_servicios=0.0, total_otros=0.0,
+    filas_retencion_gastos=None, total_retencion_gastos=0.0,
 ):
     """Genera el PDF de rendición de cuentas a un propietario. Devuelve bytes."""
+    filas_detalle_recibos = filas_detalle_recibos or []
+    filas_retencion_gastos = filas_retencion_gastos or []
     buffer = BytesIO()
     doc = SimpleDocTemplate(
         buffer, pagesize=A4,
@@ -487,6 +491,43 @@ def generar_pdf_rendicion(
     ]))
     story += [it, Spacer(1, 14)]
 
+    # Detalle de recibos incluidos
+    if filas_detalle_recibos:
+        story.append(_rl_seccion_titulo("Detalle de Recibos Incluidos", AZUL_MED, GRIS_BG, doc.width))
+        story.append(Spacer(1, 6))
+        rows_d = [[
+            _p("Fecha", bold=True, color=BLANCO, size=8),
+            _p("Propiedad", bold=True, color=BLANCO, size=8),
+            _p("Período", bold=True, color=BLANCO, size=8),
+            _p("Alquiler", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+            _p("Cochera", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+            _p("Expensas", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+            _p("Comisión", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+            _p("Neto", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+        ]]
+        for f in filas_detalle_recibos:
+            rows_d.append([
+                _p(str(f.get("fecha", "")), size=7.5),
+                _p(str(f.get("propiedad", "")), size=7.5),
+                _p(str(f.get("periodo", "")), size=7.5),
+                _p(f"$ {float(f.get('alquiler', 0)):,.2f}", size=7.5, align=TA_RIGHT),
+                _p(f"$ {float(f.get('cochera', 0)):,.2f}", size=7.5, align=TA_RIGHT),
+                _p(f"$ {float(f.get('expensas', 0)):,.2f}", size=7.5, align=TA_RIGHT),
+                _p(f"$ {float(f.get('comision', 0)):,.2f}", size=7.5, align=TA_RIGHT),
+                _p(f"$ {float(f.get('neto', 0)):,.2f}", size=7.5, bold=True, align=TA_RIGHT),
+            ])
+        nd = len(rows_d)
+        dt2 = Table(rows_d, colWidths=[doc.width*0.13, doc.width*0.24, doc.width*0.14, doc.width*0.13,
+                                        doc.width*0.12, doc.width*0.12, doc.width*0.12, doc.width*0.13])
+        dt2.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0), AZUL_MED),
+            ("LINEBELOW",     (0,1),(-1,nd-1), 0.5, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING",    (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 5), ("RIGHTPADDING", (0,0),(-1,-1),5),
+            ("VALIGN",        (0,0),(-1,-1),"MIDDLE"),
+        ]))
+        story += [dt2, Spacer(1, 14)]
+
     # Totales del período
     story.append(_rl_seccion_titulo("Totales del Período", AZUL_MED, GRIS_BG, doc.width))
     story.append(Spacer(1, 6))
@@ -506,11 +547,73 @@ def generar_pdf_rendicion(
     ]))
     story += [tt, Spacer(1, 14)]
 
+    # Informativo: Servicios y Otros (no se descuentan del Neto a Rendir)
+    if total_servicios > 0.01 or total_otros > 0.01:
+        GRIS_INFO = colors.HexColor("#718096")
+        info_rows = [[
+            _p("Conceptos informativos (no afectan el Neto a Rendir)", size=9, color=GRIS_INFO),
+            _p("", size=9),
+        ]]
+        if total_servicios > 0.01:
+            info_rows.append([
+                _p("Servicios (Imp. Inmob. + EDESAL + Gas + Municip. + OO.SS.)", size=9, color=GRIS_INFO),
+                _p(f"$ {total_servicios:,.2f}", size=9, color=GRIS_INFO, align=TA_RIGHT),
+            ])
+        if total_otros > 0.01:
+            info_rows.append([
+                _p("Otros (Honorarios + Garantía)", size=9, color=GRIS_INFO),
+                _p(f"$ {total_otros:,.2f}", size=9, color=GRIS_INFO, align=TA_RIGHT),
+            ])
+        it2 = Table(info_rows, colWidths=[doc.width*0.72, doc.width*0.28])
+        it2.setStyle(TableStyle([
+            ("LINEBELOW",     (0,0),(-1,-2), 0.5, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING",    (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 8), ("RIGHTPADDING", (0,0),(-1,-1),8),
+        ]))
+        story += [it2, Spacer(1, 14)]
+
     # Liquidación (saldo anterior + monto liquidado + nuevo saldo)
     story.append(_rl_seccion_titulo("Liquidación", AZUL_MED, GRIS_BG, doc.width))
     story.append(Spacer(1, 6))
+
+    if filas_retencion_gastos:
+        story.append(_p(
+            "Gastos Extraordinarios pagados por la Inmobiliaria/Inquilino/Otro, retenidos de esta liquidación:",
+            size=8.5, color=GRIS_TEXT
+        ))
+        story.append(Spacer(1, 4))
+        rows_ret = [[
+            _p("Fecha", bold=True, color=BLANCO, size=8),
+            _p("Propiedad", bold=True, color=BLANCO, size=8),
+            _p("Categoría", bold=True, color=BLANCO, size=8),
+            _p("Descripción", bold=True, color=BLANCO, size=8),
+            _p("Pagado por", bold=True, color=BLANCO, size=8),
+            _p("Monto", bold=True, color=BLANCO, size=8, align=TA_RIGHT),
+        ]]
+        for g in filas_retencion_gastos:
+            rows_ret.append([
+                _p(str(g.get("fecha", "")), size=7.5),
+                _p(str(g.get("propiedad", "")), size=7.5),
+                _p(str(g.get("categoria", "")), size=7.5),
+                _p(str(g.get("descripcion", "")), size=7.5),
+                _p(str(g.get("pagado_por", "")), size=7.5),
+                _p(f"$ {float(g.get('monto', 0)):,.2f}", size=7.5, align=TA_RIGHT),
+            ])
+        nr = len(rows_ret)
+        rt = Table(rows_ret, colWidths=[doc.width*0.12, doc.width*0.20, doc.width*0.16,
+                                         doc.width*0.24, doc.width*0.14, doc.width*0.14])
+        rt.setStyle(TableStyle([
+            ("BACKGROUND",    (0,0),(-1,0), AZUL_MED),
+            ("LINEBELOW",     (0,1),(-1,nr-1), 0.5, colors.HexColor("#e2e8f0")),
+            ("TOPPADDING",    (0,0),(-1,-1), 5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ("LEFTPADDING",   (0,0),(-1,-1), 4), ("RIGHTPADDING", (0,0),(-1,-1),4),
+            ("VALIGN",        (0,0),(-1,-1),"MIDDLE"),
+        ]))
+        story += [rt, Spacer(1, 10)]
+
     liq_rows = [
         [_p("Saldo Pendiente de Período(s) Anterior(es)"), _p(f"$ {saldo_anterior:,.2f}", align=TA_RIGHT)],
+        [_p("Retención por Gastos (–)"), _p(f"$ {total_retencion_gastos:,.2f}", align=TA_RIGHT)],
         [_p("Monto Total a Liquidar", bold=True), _p(f"$ {monto_a_liquidar:,.2f}", bold=True, align=TA_RIGHT)],
     ]
     lt = Table(liq_rows, colWidths=[doc.width*0.72, doc.width*0.28])
@@ -585,13 +688,12 @@ def _safe_int(val, default=0):
         return default
 
 # 🚀 AGREGAR AQUÍ (Única llamada en todo el script)
-st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide")
+st.set_page_config(page_title="Gestión de Alquileres Pro", layout="wide", initial_sidebar_state="expanded")
 
 # 2. Inyección de CSS para ocultar elementos
 hide_streamlit_style = """
 <style>
 #MainMenu {visibility: hidden;}
-header {visibility: hidden;}
 footer {visibility: hidden;}
 </style>
 """
@@ -1093,6 +1195,26 @@ def _agregar_mes_calendario(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _generar_nro_comprobante(empresa_id: int) -> str:
+    """Genera un número de comprobante secuencial único global (todas las empresas comparten
+    la misma secuencia). Usa nextval() de PostgreSQL, que es atómico por definición.
+    Formato: RC-YYYY-NNNNN (ej: RC-2026-00042).
+    """
+    from datetime import datetime as _dt
+    _anio = _dt.now().year
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT nextval('seq_nro_recibo')")
+                row = cur.fetchone()
+                nro = list(row.values())[0] if row else 1
+            conn.commit()
+        return f"RC-{_anio}-{nro:05d}"
+    except Exception:
+        import time as _t
+        return f"RC-{_anio}-{int(_t.time()) % 100000}"
+
+
 def _obtener_liquidacion_existente(empresa_id: int, propietario: str, periodo: str):
     """Devuelve la liquidación ya registrada para este propietario+período, si existe."""
     try:
@@ -1123,6 +1245,47 @@ def _obtener_saldo_anterior_propietario(empresa_id: int, propietario: str, perio
                 return float(row["saldo_pendiente"]) if row else 0.0
     except Exception:
         return 0.0
+
+
+def _obtener_gastos_retencion_pendientes(empresa_id: int, propietario: str):
+    """Gastos Extraordinarios pagados por alguien que no sea el Propietario (Inmobiliaria,
+    Inquilino u Otro), todavía no descontados ('cobrado' = FALSE) — se retienen de la
+    próxima liquidación a ese propietario."""
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT gp.id, p.alias_propiedad AS propiedad, gp.fecha, gp.categoria,
+                           gp.descripcion, gp.monto, gp.pagado_por
+                    FROM gastos_propiedades gp
+                    JOIN propiedades p ON gp.propiedad_id = p.id AND p.empresa_id = gp.empresa_id
+                    WHERE gp.empresa_id = %s AND p.propietario = %s
+                      AND COALESCE(gp.tipo_gasto, 'Extraordinario') = 'Extraordinario'
+                      AND COALESCE(gp.pagado_por, '') != 'Propietario'
+                      AND COALESCE(gp.cobrado, FALSE) = FALSE
+                    ORDER BY gp.fecha
+                """, (empresa_id, propietario))
+                rows = cur.fetchall()
+                return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _marcar_gastos_como_cobrados(empresa_id: int, ids_gastos: list, periodo: str):
+    """Marca los gastos retenidos como 'cobrado' al registrar la liquidación,
+    para que no se vuelvan a descontar en un período futuro."""
+    if not ids_gastos:
+        return
+    try:
+        with _pg_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE gastos_propiedades SET cobrado = TRUE, periodo_cobrado = %s "
+                    "WHERE empresa_id = %s AND id = ANY(%s)",
+                    (periodo, empresa_id, ids_gastos)
+                )
+    except Exception:
+        pass
 
 
 @st.cache_data(ttl=30, show_spinner=False)
@@ -1197,7 +1360,9 @@ def _cached_historial_pagos(empresa_id: int, propietario_filtro: str = ""):
             ''                                          AS "_telefono",
             ph.periodo                                  AS "PERIODO",
             COALESCE(ph.monto_alquiler,0)               AS "ALQUILER ($)",
-            0                                           AS "SERVICIOS ($)",
+            COALESCE(ph.monto_imp_inmobiliario,0) + COALESCE(ph.monto_edesal,0)
+                + COALESCE(ph.monto_gas,0) + COALESCE(ph.monto_municipalidad,0)
+                + COALESCE(ph.monto_ooss,0)                AS "SERVICIOS ($)",
             COALESCE(ph.monto_abonado,0)               AS "TOTAL ($)",
             ph.fecha                                    AS "FECHA IMPACTO",
             COALESCE(ph.metodo_pago,'')                 AS "METODO",
@@ -1210,6 +1375,8 @@ def _cached_historial_pagos(empresa_id: int, propietario_filtro: str = ""):
             COALESCE(ph.monto_imp_inmobiliario,0)       AS "_imp_inmobiliario",
             COALESCE(ph.monto_honorarios,0)             AS "_honorarios",
             COALESCE(ph.monto_garantia,0)               AS "_garantia",
+            COALESCE(ph.monto_concepto_extra,0)         AS "_concepto_extra",
+            COALESCE(ph.concepto_extra_desc,'')         AS "_concepto_extra_desc",
             COALESCE(ph.monto_abonado,0)                AS "_abonado",
             COALESCE(ph.saldo_pendiente,0)              AS "_saldo_pendiente",
             COALESCE(ph.comentario,'')                 AS "_comentarios",
@@ -1263,11 +1430,15 @@ def _cached_gastos_historial(empresa_id: int, propietario_filtro: str = ""):
 
 @st.cache_data(ttl=30, show_spinner=False)
 def _cached_metricas_ingresos(empresa_id: int, propietario_filtro: str = ""):
-    """Métricas: ingresos crudos desde pagos_historial (sin procesar mes_calendario)."""
+    """Métricas / Rendición: ingresos crudos desde pagos_historial (sin procesar mes_calendario)."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
     _params = (empresa_id, propietario_filtro) if propietario_filtro else (empresa_id,)
     query = f"""
         SELECT
+            ph.id                                                               AS id_pago,
+            ph.fecha                                                            AS fecha,
+            COALESCE(ph.nro_comprobante, '')                                   AS nro_comprobante,
+            COALESCE(ph.inquilino, '')                                         AS inquilino,
             ph.propiedad                                                        AS propiedad,
             COALESCE(p.propietario, '')                                        AS propietario,
             COALESCE(p.grupo, '')                                              AS grupo,
@@ -1277,10 +1448,19 @@ def _cached_metricas_ingresos(empresa_id: int, propietario_filtro: str = ""):
             COALESCE(ph.monto_alquiler, 0)                                    AS alquiler,
             COALESCE(ph.monto_cochera, 0)                                     AS cochera,
             COALESCE(ph.monto_expensas, 0)                                    AS expensas,
+            COALESCE(ph.monto_imp_inmobiliario, 0)                            AS imp_inmobiliario,
+            COALESCE(ph.monto_edesal, 0)                                      AS edesal,
+            COALESCE(ph.monto_gas, 0)                                         AS gas,
+            COALESCE(ph.monto_municipalidad, 0)                               AS municipalidad,
+            COALESCE(ph.monto_ooss, 0)                                        AS ooss,
+            COALESCE(ph.monto_honorarios, 0)                                  AS honorarios,
+            COALESCE(ph.monto_garantia, 0)                                    AS garantia,
+            COALESCE(ph.monto_concepto_extra, 0)                              AS concepto_extra,
+            COALESCE(ph.concepto_extra_desc, '')                              AS concepto_extra_desc,
+            COALESCE(ph.monto_abonado, 0)                                     AS abonado,
             COALESCE(ph.monto_alquiler, 0) + COALESCE(ph.monto_cochera, 0)
                 + COALESCE(ph.monto_expensas, 0)                              AS total_ingreso,
             COALESCE(ph.monto_gasto_admin, 0)                                 AS gasto_admin,
-            COALESCE(ph.monto_imp_inmobiliario, 0)                            AS imp_inmobiliario,
             CASE WHEN COALESCE(ph.cotizacion_usd, 0) > 0
                  THEN ROUND((COALESCE(ph.monto_alquiler, 0) / ph.cotizacion_usd)::NUMERIC, 2)
                  ELSE 0 END                                                    AS alquiler_usd,
@@ -1685,17 +1865,17 @@ else:
 
 
 # =====================================================================
-# RENDERIZADO EFECTIVO: MENÚ LATERAL COLAPSABLE (ÍCONOS / ÍCONOS + TEXTO)
+# RENDERIZADO EFECTIVO: MENÚ LATERAL (ÍCONO + NOMBRE)
 # =====================================================================
+# El expandir/colapsar el sidebar completo lo maneja el control nativo de
+# Streamlit (la flecha «» arriba a la izquierda) — no hay forma de engancharle
+# código propio desde Python, así que el menú siempre se muestra con
+# ícono + nombre, sin un modo "solo ícono" aparte.
 
 def _separar_icono(nombre_completo):
     """Separa '📈 Tablero de Control' en ('📈', 'Tablero de Control')."""
     partes = nombre_completo.split(" ", 1)
     return (partes[0], partes[1]) if len(partes) == 2 else (nombre_completo, "")
-
-# Estado del menú: expandido (ícono + texto) o colapsado (solo ícono)
-if "menu_expandido" not in st.session_state:
-    st.session_state.menu_expandido = True
 
 # Pestaña activa. Si la guardada ya no es válida para este usuario
 # (cambiaron permisos, cambió de rol, etc.) se cae a la primera disponible.
@@ -1705,46 +1885,15 @@ if (
 ):
     st.session_state.pestana_activa = pestanas_visibles_claves[0] if pestanas_visibles_claves else None
 
-# Ancho del sidebar según el modo (angosto = solo íconos)
-if st.session_state.menu_expandido:
-    st.markdown(
-        """<style>
-        section[data-testid="stSidebar"], section[data-testid="stSidebar"] > div {
-            width: 260px !important; min-width: 260px !important;
-        }
-        </style>""",
-        unsafe_allow_html=True,
-    )
-else:
-    st.markdown(
-        """<style>
-        section[data-testid="stSidebar"], section[data-testid="stSidebar"] > div {
-            width: 64px !important; min-width: 64px !important;
-        }
-        section[data-testid="stSidebar"] button { padding-left: 0 !important; padding-right: 0 !important; }
-        section[data-testid="stSidebar"] button p { font-size: 1.2em !important; }
-        </style>""",
-        unsafe_allow_html=True,
-    )
-
 with st.sidebar:
-    _toggle_label = "◀ Colapsar" if st.session_state.menu_expandido else "▶"
-    if st.button(_toggle_label, key="btn_toggle_menu", help="Expandir / colapsar menú", use_container_width=True):
-        st.session_state.menu_expandido = not st.session_state.menu_expandido
-        st.rerun()
-
-    st.markdown("---")
-
     for _nombre_pest, _clave_pest in zip(pestanas_visibles_nombres, pestanas_visibles_claves):
         _icono_pest, _label_pest = _separar_icono(_nombre_pest)
         _es_activa = (st.session_state.pestana_activa == _clave_pest)
-        _texto_boton = _icono_pest if not st.session_state.menu_expandido else f"{_icono_pest}  {_label_pest}"
         if st.button(
-            _texto_boton,
+            f"{_icono_pest}  {_label_pest}",
             key=f"nav_{_clave_pest}",
             use_container_width=True,
             type="primary" if _es_activa else "secondary",
-            help=_nombre_pest if not st.session_state.menu_expandido else None,
         ):
             st.session_state.pestana_activa = _clave_pest
             st.rerun()
@@ -2652,9 +2801,10 @@ if tab_pagos:
                     _comentario_completo = comentarios_pago or ""
                     if _saldo_a_guardar > 0:
                         _comentario_completo += f" | Abonado: $ {monto_abonado:,.2f} | Saldo: $ {_saldo_a_guardar:,.2f}"
-                    # Generar número de comprobante único y guardarlo
-                    import time as _time
-                    _nro_comprobante_insert = f"RC-{c_datos['codigo']:04d}-{int(_time.time()) % 100000}"
+                    # Generar número de comprobante secuencial único (atómico, seguro ante concurrencia)
+                    _nro_comprobante_insert = _generar_nro_comprobante(
+                        st.session_state.get("empresa_id", 0)
+                    )
                     st.session_state["ultimo_nro_comprobante"] = _nro_comprobante_insert
                     _val_ooss_insert = _safe_float(c_datos.get('ooss'))
                     _val_imp_insert = _safe_float(c_datos.get('imp_inmobiliario')) if "[Imp.Inmob: Inquilino]" in str(c_datos.get('servicios','')) else 0.0
@@ -2676,6 +2826,10 @@ if tab_pagos:
                     _monto_coch_insert = monto_cochera if not _rows_existentes else 0.0
                     _monto_ooss_insert = _val_ooss_insert if not _rows_existentes else 0.0
                     _monto_imp_insert2 = _val_imp_insert if not _rows_existentes else 0.0
+                    # Concepto adicional libre: solo se guarda si se completaron los dos campos
+                    _extra_incluido = bool(_extra_desc.strip() and _extra_monto > 0)
+                    _concepto_extra_desc_insert  = _extra_desc.strip() if (_extra_incluido and not _rows_existentes) else ""
+                    _monto_concepto_extra_insert = _extra_monto if (_extra_incluido and not _rows_existentes) else 0.0
 
                     cursor.execute('''
                         INSERT INTO pagos_historial (
@@ -2685,9 +2839,10 @@ if tab_pagos:
                             monto_expensas, monto_edesal, monto_gas, monto_municipalidad,
                             monto_cochera, monto_ooss, monto_imp_inmobiliario,
                             monto_honorarios, monto_garantia, monto_gasto_admin,
+                            concepto_extra_desc, monto_concepto_extra,
                             monto_abonado, saldo_pendiente, saldos_anteriores,
                             cotizacion_usd, registrado_por, nro_comprobante
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ''', (
                         st.session_state.get("empresa_id", 0),
                         c_datos['codigo'], c_datos.get('alias_propiedad', ''), f"{c_datos.get('apellidos','')}, {c_datos.get('nombres','')}".strip(", "),
@@ -2696,6 +2851,7 @@ if tab_pagos:
                         _monto_exp_insert, _monto_ede_insert, _monto_gas_insert, _monto_mun_insert,
                         _monto_coch_insert, _monto_ooss_insert, _monto_imp_insert2,
                         monto_honorarios_pago, monto_garantia_pago, _ret_agencia,
+                        _concepto_extra_desc_insert, _monto_concepto_extra_insert,
                         monto_abonado, _saldo_a_guardar, _total_saldos_anteriores,
                         _tc_insert, st.session_state.get("username", ""), _nro_comprobante_insert
                     ))
@@ -2967,6 +3123,8 @@ if tab_historial_pagos:
                 "_cochera":          "COCHERA ($)",
                 "_honorarios":       "HONORARIOS ($)",
                 "_garantia":         "GARANTÍA ($)",
+                "_concepto_extra":      "CONCEPTO EXTRA ($)",
+                "_concepto_extra_desc": "DESCRIPCIÓN EXTRA",
                 "_abonado":          "ABONADO ($)",
                 "_saldo_pendiente":  "SALDO PEND. ($)",
             })
@@ -2979,6 +3137,7 @@ if tab_historial_pagos:
                 "IMP. INMOBILIARIO ($)", "IMP. INMOBILIARIO (USD)", "EXPENSAS ($)", "LUZ EDESAL ($)",
                 "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)",
                 "COCHERA ($)", "COCHERA (USD)", "HONORARIOS ($)", "GARANTÍA ($)",
+                "CONCEPTO EXTRA ($)", "DESCRIPCIÓN EXTRA",
                 "SERVICIOS ($)", "TOTAL ($)",
                 "ABONADO ($)", "RETENCIÓN AGENCIA ($)", "RETENCIÓN AGENCIA (USD)",
                 "SALDO PEND. ($)",
@@ -3039,8 +3198,10 @@ if tab_historial_pagos:
                     "FECHA IMPACTO", "PERIODO", "MES/AÑO", "ALIAS / UBICACIÓN", "INQUILINO",
                     "ALQUILER ($)", "EXPENSAS ($)", "COCHERA ($)",
                 ]
-                # Suma de servicios (todo excepto alquiler y cochera)
-                _servicios_cols = ["IMP. INMOBILIARIO ($)", "LUZ EDESAL ($)", "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)", "HONORARIOS ($)", "GARANTÍA ($)"]
+                # Suma de servicios — mismo criterio que en Rendición a Propietarios:
+                # Imp. Inmobiliario + EDESAL + Gas + Municipalidad + OO.SS.
+                # (Honorarios y Garantía quedan fuera; no son "servicios" de la propiedad)
+                _servicios_cols = ["IMP. INMOBILIARIO ($)", "LUZ EDESAL ($)", "GAS ($)", "MUNICIPALIDAD ($)", "OO.SS ($)"]
                 _cols_existentes_serv = [c for c in _servicios_cols if c in df_rep.columns]
                 df_rep["SERVICIOS ($)"] = df_rep[_cols_existentes_serv].sum(axis=1).round(2)
                 _cols_reporte += ["SERVICIOS ($)", "TOTAL ($)", "ABONADO ($)"]
@@ -5619,7 +5780,7 @@ if tab_gastos:
 
                 # Reordenar columnas para mostrar USD junto a pesos
                 _cols_gastos_vista = [
-                    "PROPIEDAD", "PROPIETARIO", "FECHA", "CATEGORÍA", "DESCRIPCIÓN",
+                    "PROPIEDAD", "PROPIETARIO", "FECHA", "CATEGORÍA", "TIPO", "DESCRIPCIÓN",
                     "MONTO ($)", "COTIZACIÓN USD", "MONTO (USD)",
                     "PROVEEDOR", "COMPROBANTE", "PAGADO POR", "OBSERVACIONES"
                 ]
@@ -6024,7 +6185,9 @@ if tab_rendicion:
         if _df_rend_base.empty:
             st.info("Todavía no hay cobros registrados para generar una rendición.")
         else:
-            for _col_rend in ["alquiler", "cochera", "expensas", "gasto_admin"]:
+            for _col_rend in ["alquiler", "cochera", "expensas", "gasto_admin",
+                               "imp_inmobiliario", "edesal", "gas", "municipalidad",
+                               "ooss", "honorarios", "garantia", "concepto_extra", "abonado"]:
                 _df_rend_base[_col_rend] = pd.to_numeric(_df_rend_base[_col_rend], errors="coerce").fillna(0.0)
 
             _df_rend_base = _agregar_mes_calendario(_df_rend_base)
@@ -6040,6 +6203,20 @@ if tab_rendicion:
             _periodos_rend = sorted({p for p in _df_rend_base["mes_calendario"].dropna().tolist() if str(p).strip()}, reverse=True)
             _idx_periodo_default = 1 if _periodos_rend else 0
             _periodo_sel_rend = _rc2.selectbox("📅 Período (mes calendario):", ["Todos"] + _periodos_rend, index=_idx_periodo_default, key="rend_periodo")
+
+            # El PDF solo se habilita después de registrar la liquidación, y se vuelve
+            # a deshabilitar si cambia el propietario o el período (mismo criterio que
+            # en Emitir Recibo con "pago_impactado").
+            if "liquidacion_registrada" not in st.session_state:
+                st.session_state.liquidacion_registrada = False
+            if "liquidacion_clave_registrada" not in st.session_state:
+                st.session_state.liquidacion_clave_registrada = None
+
+            _clave_filtro_rend = f"{_propietario_sel_rend}|{_periodo_sel_rend}"
+            if st.session_state.get("_ultima_clave_filtro_rend") != _clave_filtro_rend:
+                st.session_state["_ultima_clave_filtro_rend"] = _clave_filtro_rend
+                st.session_state.liquidacion_registrada = False
+                st.session_state.liquidacion_clave_registrada = None
 
             _df_rend = _df_rend_base.copy()
             if _propietario_sel_rend != "Todos":
@@ -6066,6 +6243,18 @@ if tab_rendicion:
                 _tot_comision = float(_agrupado["COMISION"].sum())
                 _tot_neto     = float(_agrupado["NETO A RENDIR"].sum())
 
+                # Informativos (NO se descuentan del Neto a Rendir):
+                # "Servicios" = Imp. Inmobiliario + EDESAL + Gas + Municipalidad + OO.SS.
+                # "Otros" = ítems restantes que entran en el cálculo de la comisión inmobiliaria
+                #           (Honorarios + Garantía + Concepto adicional libre del recibo).
+                _tot_servicios = float(
+                    _df_rend["imp_inmobiliario"].sum() + _df_rend["edesal"].sum()
+                    + _df_rend["gas"].sum() + _df_rend["municipalidad"].sum() + _df_rend["ooss"].sum()
+                )
+                _tot_otros = float(
+                    _df_rend["honorarios"].sum() + _df_rend["garantia"].sum() + _df_rend["concepto_extra"].sum()
+                )
+
                 st.markdown(f"**{len(_agrupado)} propiedad(es)** — Propietario: **{_propietario_sel_rend}** — Período: **{_periodo_sel_rend}**")
 
                 _km1, _km2, _km3, _km4 = st.columns(4)
@@ -6073,6 +6262,13 @@ if tab_rendicion:
                 _km2.metric("🏢 Comisión Adm. (–)", f"$ {_tot_comision:,.2f}")
                 _km3.metric("📤 Neto a Rendir",     f"$ {_tot_neto:,.2f}")
                 _km4.metric("🏠 Propiedades",       f"{len(_agrupado)}")
+
+                st.caption("Informativo — no forman parte del Neto a Rendir del propietario:")
+                _km5, _km6 = st.columns(2)
+                _km5.metric("🔧 Servicios", f"$ {_tot_servicios:,.2f}",
+                            help="Imp. Inmobiliario + EDESAL + Gas + Municipalidad + OO.SS.")
+                _km6.metric("📦 Otros", f"$ {_tot_otros:,.2f}",
+                            help="Honorarios + Garantía + Concepto adicional libre (ítems restantes del cálculo de la comisión inmobiliaria)")
 
                 _disp = _agrupado.rename(columns={
                     "propiedad": "PROPIEDAD",
@@ -6090,6 +6286,42 @@ if tab_rendicion:
                     f"Expensas: \\$ {_tot_exp:,.2f}  |  Total Cobrado: \\$ {_tot_cobrado:,.2f}  |  "
                     f"Comisión Adm.: \\$ {_tot_comision:,.2f}  |  **Neto a Rendir: \\$ {_tot_neto:,.2f}**"
                 )
+
+                # ── Detalle por recibo: incluye los demás ítems cobrados al inquilino ──
+                # (Imp. Inmobiliario, EDESAL, Gas, Municipalidad, OO.SS., Honorarios, Garantía).
+                # Son montos que pasan por el recibo pero NO se descuentan del "Neto a
+                # Rendir" del propietario — se muestran solo a modo informativo/trazabilidad.
+                st.markdown("---")
+                st.markdown("#### 📋 Detalle de Recibos Incluidos")
+                st.caption("Cada fila es un recibo emitido. Incluye, a modo informativo, los demás conceptos cobrados al inquilino que no forman parte del neto del propietario.")
+
+                _detalle_rend = _df_rend.copy().sort_values(["propiedad", "periodo"])
+                _detalle_rend["NETO"] = (
+                    _detalle_rend["alquiler"] + _detalle_rend["cochera"] + _detalle_rend["expensas"]
+                    - _detalle_rend["gasto_admin"]
+                )
+                _detalle_rend = _detalle_rend.rename(columns={
+                    "fecha": "FECHA", "propiedad": "PROPIEDAD", "inquilino": "INQUILINO",
+                    "periodo": "PERÍODO", "alquiler": "ALQUILER", "cochera": "COCHERA",
+                    "expensas": "EXPENSAS", "gasto_admin": "COMISIÓN (–)",
+                    "imp_inmobiliario": "IMP. INMOBILIARIO", "edesal": "LUZ (EDESAL)",
+                    "gas": "GAS", "municipalidad": "MUNICIPALIDAD", "ooss": "OO.SS.",
+                    "honorarios": "HONORARIOS", "garantia": "GARANTÍA",
+                    "concepto_extra": "CONCEPTO EXTRA", "concepto_extra_desc": "DESCRIPCIÓN EXTRA",
+                })
+                _cols_detalle = ["FECHA", "PROPIEDAD", "INQUILINO", "PERÍODO",
+                                  "ALQUILER", "COCHERA", "EXPENSAS", "COMISIÓN (–)", "NETO",
+                                  "IMP. INMOBILIARIO", "LUZ (EDESAL)", "GAS", "MUNICIPALIDAD",
+                                  "OO.SS.", "HONORARIOS", "GARANTÍA", "CONCEPTO EXTRA", "DESCRIPCIÓN EXTRA"]
+                _detalle_rend = _detalle_rend[_cols_detalle]
+
+                _detalle_fmt = _detalle_rend.copy()
+                for _col_money in ["ALQUILER", "COCHERA", "EXPENSAS", "COMISIÓN (–)", "NETO",
+                                    "IMP. INMOBILIARIO", "LUZ (EDESAL)", "GAS", "MUNICIPALIDAD",
+                                    "OO.SS.", "HONORARIOS", "GARANTÍA", "CONCEPTO EXTRA"]:
+                    _detalle_fmt[_col_money] = _detalle_fmt[_col_money].apply(lambda x: f"$ {x:,.2f}")
+
+                st.dataframe(_detalle_fmt, use_container_width=True, hide_index=True)
 
                 _csv_rend = _disp.to_csv(index=False).encode("utf-8-sig")
                 _nombre_prop_csv = str(_propietario_sel_rend).replace(" ", "_").replace(",", "")
@@ -6110,19 +6342,35 @@ if tab_rendicion:
                 else:
                     _liq_existente = _obtener_liquidacion_existente(_eid_rend, _propietario_sel_rend, _periodo_sel_rend)
                     _saldo_anterior = _obtener_saldo_anterior_propietario(_eid_rend, _propietario_sel_rend, _periodo_sel_rend)
-                    _monto_a_liquidar = _tot_neto + _saldo_anterior
+
+                    # ── Retención por gastos extraordinarios no pagados por el propietario ──
+                    _gastos_retencion = _obtener_gastos_retencion_pendientes(_eid_rend, _propietario_sel_rend)
+                    _tot_retencion_gastos = float(sum(float(g["monto"] or 0) for g in _gastos_retencion))
+
+                    _monto_a_liquidar = _tot_neto + _saldo_anterior - _tot_retencion_gastos
 
                     if _liq_existente:
                         st.caption(f"ℹ️ Ya hay una liquidación registrada para este período (el {_liq_existente.get('fecha_liquidacion','')}) — podés corregirla y volver a guardar.")
 
-                    _lc1, _lc2 = st.columns(2)
+                    if _gastos_retencion:
+                        st.warning(f"🧾 **{len(_gastos_retencion)} gasto(s) extraordinario(s)** pagados por la inmobiliaria/inquilino/otro, pendientes de retener: **$ {_tot_retencion_gastos:,.2f}**")
+                        _df_retencion = pd.DataFrame(_gastos_retencion).rename(columns={
+                            "propiedad": "PROPIEDAD", "fecha": "FECHA", "categoria": "CATEGORÍA",
+                            "descripcion": "DESCRIPCIÓN", "pagado_por": "PAGADO POR", "monto": "MONTO ($)",
+                        })[["FECHA", "PROPIEDAD", "CATEGORÍA", "DESCRIPCIÓN", "PAGADO POR", "MONTO ($)"]]
+                        _df_retencion["MONTO ($)"] = _df_retencion["MONTO ($)"].apply(lambda x: f"$ {float(x):,.2f}")
+                        st.dataframe(_df_retencion, use_container_width=True, hide_index=True)
+
+                    _lc1, _lc2, _lc3 = st.columns(3)
                     _lc1.metric("↩️ Saldo Pendiente Anterior", f"$ {_saldo_anterior:,.2f}")
-                    _lc2.metric("💵 Monto Total a Liquidar", f"$ {_monto_a_liquidar:,.2f}",
-                                help="Neto a Rendir de este período + saldo pendiente de períodos anteriores")
+                    _lc2.metric("🧾 Retención por Gastos (–)", f"$ {_tot_retencion_gastos:,.2f}",
+                                help="Gastos Extraordinarios pagados por la Inmobiliaria/Inquilino/Otro, pendientes de descontar al propietario.")
+                    _lc3.metric("💵 Monto Total a Liquidar", f"$ {_monto_a_liquidar:,.2f}",
+                                help="Neto a Rendir + saldo pendiente de períodos anteriores − retención por gastos")
 
                     _key_monto_liq = f"monto_liquidado_{_eid_rend}_{_propietario_sel_rend}_{_periodo_sel_rend}"
                     if _key_monto_liq not in st.session_state:
-                        st.session_state[_key_monto_liq] = float(_liq_existente["monto_liquidado"]) if _liq_existente else _monto_a_liquidar
+                        st.session_state[_key_monto_liq] = float(_liq_existente["monto_liquidado"]) if _liq_existente else max(0.0, _monto_a_liquidar)
 
                     monto_liquidado_input = st.number_input(
                         "✏️ Monto Liquidado al Propietario ($):",
@@ -6148,51 +6396,89 @@ if tab_rendicion:
                                     _cur_liq.execute("""
                                         INSERT INTO liquidaciones_propietarios
                                             (empresa_id, propietario, periodo, monto_calculado, saldo_anterior,
-                                             monto_a_liquidar, monto_liquidado, saldo_pendiente, fecha_liquidacion, registrado_por)
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                             monto_retencion_gastos, monto_a_liquidar, monto_liquidado,
+                                             saldo_pendiente, fecha_liquidacion, registrado_por)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                         ON CONFLICT (empresa_id, propietario, periodo) DO UPDATE SET
-                                            monto_calculado   = EXCLUDED.monto_calculado,
-                                            saldo_anterior     = EXCLUDED.saldo_anterior,
-                                            monto_a_liquidar   = EXCLUDED.monto_a_liquidar,
-                                            monto_liquidado    = EXCLUDED.monto_liquidado,
-                                            saldo_pendiente    = EXCLUDED.saldo_pendiente,
-                                            fecha_liquidacion  = EXCLUDED.fecha_liquidacion,
-                                            registrado_por     = EXCLUDED.registrado_por
+                                            monto_calculado        = EXCLUDED.monto_calculado,
+                                            saldo_anterior          = EXCLUDED.saldo_anterior,
+                                            monto_retencion_gastos  = EXCLUDED.monto_retencion_gastos,
+                                            monto_a_liquidar        = EXCLUDED.monto_a_liquidar,
+                                            monto_liquidado         = EXCLUDED.monto_liquidado,
+                                            saldo_pendiente         = EXCLUDED.saldo_pendiente,
+                                            fecha_liquidacion       = EXCLUDED.fecha_liquidacion,
+                                            registrado_por          = EXCLUDED.registrado_por
                                     """, (
                                         _eid_rend, _propietario_sel_rend, _periodo_sel_rend, _tot_neto, _saldo_anterior,
-                                        _monto_a_liquidar, monto_liquidado_input, _saldo_pendiente_nuevo,
+                                        _tot_retencion_gastos, _monto_a_liquidar, monto_liquidado_input, _saldo_pendiente_nuevo,
                                         datetime.now().strftime("%d/%m/%Y %H:%M"), st.session_state.get("username", "")
                                     ))
+                            _marcar_gastos_como_cobrados(_eid_rend, [g["id"] for g in _gastos_retencion], _periodo_sel_rend)
                             st.cache_data.clear()
+                            st.session_state.liquidacion_registrada = True
+                            st.session_state.liquidacion_clave_registrada = _clave_filtro_rend
                             st.success("✅ Liquidación registrada.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"Error al registrar la liquidación: {e}")
 
-                    _filas_pdf_rend = [{
-                        "propiedad": _r["propiedad"],
-                        "alquiler":  float(_r["ALQUILER"]),
-                        "cochera":   float(_r["COCHERA"]),
-                        "expensas":  float(_r["EXPENSAS"]),
-                        "comision":  float(_r["COMISION"]),
-                        "neto":      float(_r["NETO A RENDIR"]),
-                    } for _, _r in _agrupado.iterrows()]
+                    _pdf_habilitado = (
+                        st.session_state.liquidacion_registrada
+                        and st.session_state.liquidacion_clave_registrada == _clave_filtro_rend
+                    )
+                    if _pdf_habilitado:
+                        _filas_pdf_rend = [{
+                            "propiedad": _r["propiedad"],
+                            "alquiler":  float(_r["ALQUILER"]),
+                            "cochera":   float(_r["COCHERA"]),
+                            "expensas":  float(_r["EXPENSAS"]),
+                            "comision":  float(_r["COMISION"]),
+                            "neto":      float(_r["NETO A RENDIR"]),
+                        } for _, _r in _agrupado.iterrows()]
 
-                    _pdf_rend_bytes = generar_pdf_rendicion(
-                        propietario=_propietario_sel_rend,
-                        periodo=_periodo_sel_rend,
-                        fecha_emision=datetime.now().strftime("%d/%m/%Y"),
-                        nombre_empresa=st.session_state.get("nombre_empresa", "Mi Empresa"),
-                        filas_propiedades=_filas_pdf_rend,
-                        total_alquiler=_tot_alq, total_cochera=_tot_coch, total_expensas=_tot_exp,
-                        total_cobrado=_tot_cobrado, total_comision=_tot_comision, total_neto=_tot_neto,
-                        saldo_anterior=_saldo_anterior, monto_a_liquidar=_monto_a_liquidar,
-                        monto_liquidado=monto_liquidado_input, saldo_pendiente=_saldo_pendiente_nuevo,
-                    )
-                    _lb2.download_button(
-                        "📄 Descargar PDF de Rendición",
-                        data=_pdf_rend_bytes,
-                        file_name=f"rendicion_{_nombre_prop_csv}_{_periodo_sel_rend}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
+                        _filas_detalle_pdf = [{
+                            "fecha":             _r["FECHA"],
+                            "propiedad":         _r["PROPIEDAD"],
+                            "periodo":           _r["PERÍODO"],
+                            "alquiler":          float(_r["ALQUILER"]),
+                            "cochera":           float(_r["COCHERA"]),
+                            "expensas":          float(_r["EXPENSAS"]),
+                            "comision":          float(_r["COMISIÓN (–)"]),
+                            "neto":              float(_r["NETO"]),
+                            "imp_inmobiliario":  float(_r["IMP. INMOBILIARIO"]),
+                            "edesal":            float(_r["LUZ (EDESAL)"]),
+                            "gas":               float(_r["GAS"]),
+                            "municipalidad":     float(_r["MUNICIPALIDAD"]),
+                            "ooss":              float(_r["OO.SS."]),
+                            "honorarios":        float(_r["HONORARIOS"]),
+                            "garantia":          float(_r["GARANTÍA"]),
+                        } for _, _r in _detalle_rend.iterrows()]
+
+                        _pdf_rend_bytes = generar_pdf_rendicion(
+                            propietario=_propietario_sel_rend,
+                            periodo=_periodo_sel_rend,
+                            fecha_emision=datetime.now().strftime("%d/%m/%Y"),
+                            nombre_empresa=st.session_state.get("nombre_empresa", "Mi Empresa"),
+                            filas_propiedades=_filas_pdf_rend,
+                            total_alquiler=_tot_alq, total_cochera=_tot_coch, total_expensas=_tot_exp,
+                            total_cobrado=_tot_cobrado, total_comision=_tot_comision, total_neto=_tot_neto,
+                            saldo_anterior=_saldo_anterior, monto_a_liquidar=_monto_a_liquidar,
+                            monto_liquidado=monto_liquidado_input, saldo_pendiente=_saldo_pendiente_nuevo,
+                            filas_detalle_recibos=_filas_detalle_pdf,
+                            total_servicios=_tot_servicios, total_otros=_tot_otros,
+                            filas_retencion_gastos=_gastos_retencion, total_retencion_gastos=_tot_retencion_gastos,
+                        )
+                        _lb2.download_button(
+                            "📄 Descargar PDF de Rendición",
+                            data=_pdf_rend_bytes,
+                            file_name=f"rendicion_{_nombre_prop_csv}_{_periodo_sel_rend}.pdf",
+                            mime="application/pdf",
+                            use_container_width=True,
+                        )
+                    else:
+                        _lb2.button(
+                            "📄 Descargar PDF de Rendición",
+                            disabled=True,
+                            use_container_width=True,
+                            help="Primero registrá la liquidación con el botón de la izquierda.",
+                        )
