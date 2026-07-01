@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.052"
+APP_VERSION = "v1.053"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1368,6 +1368,58 @@ def _cached_pagos_totales(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propietario_filtro: str = ""):
+    """Planilla de cobranzas del mes: estado de pago de cada contrato activo."""
+    _where = "AND p.propietario = %s" if propietario_filtro else ""
+    _params = (empresa_id,) + ((propietario_filtro,) if propietario_filtro else ())
+    query = f"""
+        SELECT
+            p.id                                        AS propiedad_id,
+            p.alias_propiedad                           AS alias_propiedad,
+            (i.apellidos || ', ' || i.nombres)          AS inquilino,
+            c.codigo                                    AS codigo_contrato,
+            i.id                                        AS inquilino_id,
+            i.apellidos                                 AS apellidos,
+            i.nombres                                   AS nombres,
+            c.prox_actualizacion                        AS prox_actualizacion,
+            c.alquiler                                  AS ultimo_alquiler,
+            c.expensas                                  AS expensas,
+            c.cochera                                   AS cochera
+        FROM contratos c
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
+        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where}
+        ORDER BY p.id ASC
+    """
+    df_contratos = _query_df(query, _params)
+    if df_contratos.empty:
+        return df_contratos
+
+    # Buscar el último pago del mes actual por contrato
+    with _pg_conn() as _conn_pm:
+        with _conn_pm.cursor() as _cur_pm:
+            _cur_pm.execute(
+                """SELECT DISTINCT ON (codigo_contrato)
+                       codigo_contrato, monto_abonado, saldo_pendiente, fecha
+                   FROM pagos_historial
+                   WHERE empresa_id = %s
+                     AND EXTRACT(MONTH FROM TO_DATE(SPLIT_PART(fecha, ' ', 1), 'DD/MM/YYYY')) = %s
+                     AND EXTRACT(YEAR  FROM TO_DATE(SPLIT_PART(fecha, ' ', 1), 'DD/MM/YYYY')) = %s
+                   ORDER BY codigo_contrato, id DESC""",
+                (empresa_id, mes, anio)
+            )
+            _pagos = {r["codigo_contrato"]: r for r in _cur_pm.fetchall()}
+
+    df_contratos["pagado_mes"] = df_contratos["codigo_contrato"].apply(
+        lambda cod: (_pagos.get(cod, {}).get("saldo_pendiente") or 1) == 0 if cod in _pagos else False
+    )
+    df_contratos["_pago_fecha"] = df_contratos["codigo_contrato"].apply(
+        lambda cod: _pagos.get(cod, {}).get("fecha", "") if cod in _pagos else ""
+    )
+    return df_contratos
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def _cached_planilla_contratos(empresa_id: int, propietario_filtro: str = ""):
     """Planilla: listado general de contratos."""
@@ -2116,47 +2168,75 @@ if tab_dashboard:
 # =====================================================================
 if tab_planilla:
     with tab_planilla:
-        st.subheader("Historial y Estado de Contratos")
+        st.subheader("📋 Planilla de Cobranzas del Mes")
 
-        col_f1, col_f2 = st.columns([2, 1])
-        with col_f1:
-            busqueda = st.text_input("🔍 Buscar por Inquilino, Calle o Alias:", placeholder="Ej: Pérez o Mitre", key="buscar_planilla")
-        with col_f2:
-            filtro_estado = st.multiselect("Filtrar por Estado:", ["Activo", "Finalizado", "Cancelado", "Vencido"], default=["Activo"], key="filtro_estado_planilla")
-        
         _pf_plan = st.session_state.get("propietario_filtro", "")
         _pf_plan_activo = rol_actual == "propietario" and bool(_pf_plan)
         _eid_plan = st.session_state.get("empresa_id", 0)
+        _hoy_plan = datetime.now()
+        _mes_plan = _hoy_plan.month
+        _anio_plan = _hoy_plan.year
+        _nombre_mes = _hoy_plan.strftime("%B %Y").capitalize()
+
+        st.caption(f"Período: **{_nombre_mes}** — contratos activos con estado de pago del mes.")
 
         try:
-            df = _cached_planilla_contratos(_eid_plan, _pf_plan if _pf_plan_activo else "")
+            df_cob = _cached_planilla_cobranzas_mes(
+                _eid_plan, _mes_plan, _anio_plan,
+                _pf_plan if _pf_plan_activo else ""
+            )
 
-            # 2. AGREGA ESTAS LÍNEAS PARA VOLVER A PONER LAS BARRAS:
-            if not df.empty:
-                # Pasamos las fechas a texto y cambiamos guiones por las barras de tu CSV
-                df['INICIO_CONTRATO'] = df['INICIO_CONTRATO'].astype(str).str.replace('-', '/')
-                df['FIN_CONTRATO'] = df['FIN_CONTRATO'].astype(str).str.replace('-', '/')
-                if 'PROX_ACTUALIZACION' in df.columns:
-                    df['PROX_ACTUALIZACION'] = df['PROX_ACTUALIZACION'].astype(str).str.replace('-', '/')
-
-            # 3. Se muestra la tabla en la app ya corregida
-            st.dataframe(df, use_container_width=True, hide_index=True)
-
-            if not df.empty:
-                if busqueda:
-                    df = df[
-                        df['INQUILINO'].str.contains(busqueda, case=False, na=False) | 
-                        df['PROPIEDAD'].str.contains(busqueda, case=False, na=False) |
-                        df['ALIAS PROPIEDAD'].str.contains(busqueda, case=False, na=False)
-                    ]
-                if filtro_estado:
-                    df = df[df['ESTADO'].isin(filtro_estado)]
-                
-                st.dataframe(df, use_container_width=True, hide_index=True)
+            if df_cob.empty:
+                st.info("No hay contratos activos registrados.")
             else:
-                st.info("No se registran contratos en la base de datos bajo los criterios de búsqueda.")
+                _pagaron = df_cob[df_cob["pagado_mes"] == True]
+                _faltan  = df_cob[df_cob["pagado_mes"] == False]
+                st.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
+                st.markdown("---")
+
+                # Construir dict_activos para preseleccionar en Registrar/Emitir Recibo
+                # (mismo formato que key_desplegable en pestaña pagos)
+                def _ir_a_recibo(row):
+                    _key = f"Cod: {row['codigo_contrato']} | {row['alias_propiedad']} - Inquilino: Cod: {row['inquilino_id']} | {str(row['apellidos']).upper()}, {str(row['nombres']).title()}"
+                    st.session_state["sb_pago_activo"] = _key
+                    st.session_state.pestana_activa = "pagos"
+                    st.rerun()
+
+                # Renderizar tabla fila por fila
+                _cols_header = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1.5, 1])
+                _headers = ["Estado", "Propiedad", "Inquilino", "Próx. Actualiz.", "Últ. Alquiler", "Expensas", "Cochera", "Fecha pago", ""]
+                for _hc, _ht in zip(_cols_header, _headers):
+                    _hc.markdown(f"**{_ht}**")
+                st.markdown("---")
+
+                for _, _row in df_cob.iterrows():
+                    _rc = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1.5, 1])
+                    # Estado
+                    _rc[0].markdown("✅" if _row["pagado_mes"] else "⏳")
+                    # Propiedad
+                    _rc[1].markdown(f"**{_row['alias_propiedad']}**")
+                    # Inquilino
+                    _rc[2].markdown(_row["inquilino"])
+                    # Próxima actualización
+                    _prox = str(_row["prox_actualizacion"] or "").replace("-", "/")[:7] if _row["prox_actualizacion"] else "—"
+                    _rc[3].markdown(_prox)
+                    # Último alquiler
+                    _alq = f"$ {float(_row['ultimo_alquiler']):,.0f}" if _row["ultimo_alquiler"] else "—"
+                    _rc[4].markdown(_alq)
+                    # Expensas
+                    _exp = f"$ {float(_row['expensas']):,.0f}" if _row["expensas"] else "—"
+                    _rc[5].markdown(_exp)
+                    # Cochera
+                    _coch = f"$ {float(_row['cochera']):,.0f}" if _row["cochera"] else "—"
+                    _rc[6].markdown(_coch)
+                    # Fecha de pago
+                    _rc[7].markdown(_row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—")
+                    # Botón ir a recibo
+                    if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo"):
+                        _ir_a_recibo(_row)
+
         except Exception as e:
-            st.error(f"Error de lectura en la planilla general: {e}")
+            st.error(f"Error al cargar la planilla de cobranzas: {e}")
 
 
     # =====================================================================
