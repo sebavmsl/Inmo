@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.053"
+APP_VERSION = "v1.059"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1383,6 +1383,7 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
             i.apellidos                                 AS apellidos,
             i.nombres                                   AS nombres,
             c.prox_actualizacion                        AS prox_actualizacion,
+            c.fin_contrato                              AS fin_contrato,
             c.alquiler                                  AS ultimo_alquiler,
             c.expensas                                  AS expensas,
             c.cochera                                   AS cochera
@@ -2210,24 +2211,89 @@ if tab_planilla:
                 st.markdown("---")
 
                 for _, _row in df_cob.iterrows():
+                    # Determinar color de fila según próxima actualización
+                    _prox_raw = _row["prox_actualizacion"]
+                    _color_fila = None
+                    _label_fila = ""
+                    try:
+                        if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
+                            _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
+                            _mes_actual_dt  = datetime(_anio_plan, _mes_plan, 1)
+                            _mes_proximo_dt = (_mes_actual_dt + dateutil.relativedelta.relativedelta(months=1))
+                            if _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
+                                _color_fila = "#fff3cd"  # amarillo — igual a st.warning
+                                _label_fila = "📈 ESTE MES — Corresponde actualizar el alquiler"
+                            elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
+                                _color_fila = "#d0e8f7"  # azul claro — igual a st.info
+                                _label_fila = "📅 MES PRÓXIMO — Actualización inminente"
+                    except Exception:
+                        pass
+
                     _rc = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1.5, 1])
+                    if _color_fila:
+                        st.markdown(
+                            f"<div style='background:{_color_fila};border-radius:6px;padding:2px 8px;margin-bottom:2px;font-size:0.82em;'>"
+                            f"{_label_fila}</div>", unsafe_allow_html=True
+                        )
                     # Estado
                     _rc[0].markdown("✅" if _row["pagado_mes"] else "⏳")
                     # Propiedad
                     _rc[1].markdown(f"**{_row['alias_propiedad']}**")
                     # Inquilino
                     _rc[2].markdown(_row["inquilino"])
-                    # Próxima actualización
-                    _prox = str(_row["prox_actualizacion"] or "").replace("-", "/")[:7] if _row["prox_actualizacion"] else "—"
-                    _rc[3].markdown(_prox)
+                    # Próxima actualización — muestra RENOVAR si supera fin de contrato
+                    _prox_raw = _row["prox_actualizacion"]
+                    _fin_raw  = _row["fin_contrato"]
+                    _prox_str = "—"
+                    try:
+                        if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
+                            _prox_dt2 = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
+                            _fin_dt2  = datetime.strptime(str(_fin_raw)[:10],  "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
+                            if _fin_dt2 and _prox_dt2 > _fin_dt2:
+                                _prox_str = "🔄 RENOVAR"
+                            else:
+                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                    except Exception:
+                        _prox_str = "—"
+                    _rc[3].markdown(_prox_str)
                     # Último alquiler
-                    _alq = f"$ {float(_row['ultimo_alquiler']):,.0f}" if _row["ultimo_alquiler"] else "—"
+                    try:
+                        _alq = f"$ {float(_row['ultimo_alquiler']):,.0f}" if _row["ultimo_alquiler"] is not None and str(_row["ultimo_alquiler"]) not in ("", "None", "nan") else "—"
+                    except (ValueError, TypeError):
+                        _alq = "—"
                     _rc[4].markdown(_alq)
-                    # Expensas
-                    _exp = f"$ {float(_row['expensas']):,.0f}" if _row["expensas"] else "—"
-                    _rc[5].markdown(_exp)
+                    # Expensas — editable, guarda automáticamente al cambiar
+                    try:
+                        _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
+                    except (ValueError, TypeError):
+                        _exp_val = 0.0
+                    _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
+                    if _key_exp_plan not in st.session_state:
+                        st.session_state[_key_exp_plan] = _exp_val
+                    _exp_nuevo = _rc[5].number_input(
+                        "Expensas",
+                        min_value=0.0,
+                        step=500.0,
+                        key=_key_exp_plan,
+                        label_visibility="collapsed"
+                    )
+                    if _exp_nuevo != _exp_val:
+                        try:
+                            with _pg_conn() as _conn_exp:
+                                with _conn_exp.cursor() as _cur_exp:
+                                    _cur_exp.execute(
+                                        "UPDATE contratos SET expensas = %s WHERE codigo = %s AND empresa_id = %s",
+                                        (_exp_nuevo, int(_row["codigo_contrato"]), _eid_plan)
+                                    )
+                                _conn_exp.commit()
+                            _cached_planilla_cobranzas_mes.clear()
+                        except Exception as _e_exp:
+                            _rc[5].error(f"Error: {_e_exp}")
                     # Cochera
-                    _coch = f"$ {float(_row['cochera']):,.0f}" if _row["cochera"] else "—"
+                    try:
+                        _coch = f"$ {float(_row['cochera']):,.0f}" if _row["cochera"] is not None and str(_row["cochera"]) not in ("", "None", "nan") else "—"
+                    except (ValueError, TypeError):
+                        _coch = "—"
                     _rc[6].markdown(_coch)
                     # Fecha de pago
                     _rc[7].markdown(_row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—")
@@ -2395,13 +2461,13 @@ if tab_pagos:
 
             # 2. SECCIÓN DE COLUMNAS E INPUTS NUMÉRICOS (EDICIÓN DE MONTOS)
             st.markdown("#### 🔧 Ajustar montos para el período actual")
-            ed_col1, ed_col2, ed_col3, ed_col4, ed_col5 = st.columns(5)
-            
+
             val_base_expensas      = _safe_float(c_datos.get('expensas'))
             val_base_edesal        = _safe_float(c_datos.get('edesal'))
             val_base_gas           = _safe_float(c_datos.get('gas'))
             val_base_municipalidad = _safe_float(c_datos.get('municipalidad'))
             val_base_cochera       = _safe_float(c_datos.get('cochera'))
+            val_base_ooss          = _safe_float(c_datos.get('ooss'))
 
             _cod = c_datos['codigo']
             _key_expensas       = f"monto_expensas_{_cod}"
@@ -2409,18 +2475,22 @@ if tab_pagos:
             _key_gas            = f"monto_gas_{_cod}"
             _key_municipalidad  = f"monto_municipalidad_{_cod}"
             _key_cochera        = f"monto_cochera_{_cod}"
+            _key_ooss           = f"monto_ooss_{_cod}"
 
             if _key_expensas      not in st.session_state: st.session_state[_key_expensas]      = val_base_expensas
             if _key_edesal        not in st.session_state: st.session_state[_key_edesal]        = val_base_edesal
             if _key_gas           not in st.session_state: st.session_state[_key_gas]           = val_base_gas
             if _key_municipalidad not in st.session_state: st.session_state[_key_municipalidad] = val_base_municipalidad
             if _key_cochera       not in st.session_state: st.session_state[_key_cochera]       = val_base_cochera
+            if _key_ooss          not in st.session_state: st.session_state[_key_ooss]          = val_base_ooss
 
+            ed_col1, ed_col2, ed_col3, ed_col4, ed_col5, ed_col6 = st.columns(6)
             monto_expensas      = ed_col1.number_input("🏢 Expensas Consorcio ($):", min_value=0.0, step=500.0,  key=_key_expensas)
             monto_edesal        = ed_col2.number_input("⚡ Luz (EDESAL) ($):",       min_value=0.0, step=500.0,  key=_key_edesal)
             monto_gas           = ed_col3.number_input("🔥 Gas Natural ($):",        min_value=0.0, step=500.0,  key=_key_gas)
             monto_municipalidad = ed_col4.number_input("🏛️ Tasas Municipales ($):",  min_value=0.0, step=200.0,  key=_key_municipalidad)
             monto_cochera       = ed_col5.number_input("🚗 Alquiler Cochera ($):",   min_value=0.0, step=1000.0, key=_key_cochera)
+            monto_ooss          = ed_col6.number_input("💧 Monto OO.SS. ($):",       min_value=0.0, step=200.0,  key=_key_ooss)
 
             # --- CONCEPTOS ESPECIALES DE CONTRATO UNIFICADOS Y COMPORTAMIENTO IDÉNTICO ---
             st.markdown("#### 📑 Conceptos Especiales de Contrato")
@@ -2554,7 +2624,7 @@ if tab_pagos:
             # monto_serv_pago se calculará después del expander, desde _desglose_editado
             # Aquí solo definimos los auxiliares que se necesitan antes
             val_imp_inmob = _safe_float(c_datos.get('imp_inmobiliario')) if "[Imp.Inmob: Inquilino]" in str(c_datos['servicios']) else 0.0
-            val_ooss = _safe_float(c_datos.get('ooss'))
+            val_ooss = monto_ooss
             # Subtotal provisorio para el campo "Adicionales" (se reemplaza tras el expander)
             monto_serv_pago = val_imp_inmob + monto_expensas + monto_edesal + monto_gas + monto_municipalidad + val_ooss + monto_cochera + monto_honorarios_pago + monto_garantia_pago
 
@@ -3203,6 +3273,7 @@ if tab_pagos:
                         round(monto_alq_pago, 2),
                         round(monto_serv_pago, 2),
                         round(total_pago_real, 2),
+                        round(monto_ooss, 2),
                         round(st.session_state.get(f"extra_monto_{c_datos['codigo']}", 0.0), 2),
                         st.session_state.get(f"extra_desc_{c_datos['codigo']}", "").strip(),
                     )
@@ -3218,6 +3289,7 @@ if tab_pagos:
                 round(monto_alq_pago, 2),
                 round(monto_serv_pago, 2),
                 round(total_pago_real, 2),
+                round(monto_ooss, 2),
                 round(st.session_state.get(f"extra_monto_{c_datos['codigo']}", 0.0), 2),
                 st.session_state.get(f"extra_desc_{c_datos['codigo']}", "").strip(),
             )
