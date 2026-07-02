@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.059"
+APP_VERSION = "v1.060"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2040,6 +2040,21 @@ if _pestana_activa == "dashboard":
     tab_dashboard = st.container()
 if _pestana_activa == "planilla":
     tab_planilla = st.container()
+def _obtener_cotizacion_bna():
+    try:
+        import urllib.request, json
+        url = "https://api.bluelytics.com.ar/v2/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        oficial_venta = data.get("oficial", {}).get("value_sell")
+        if oficial_venta:
+            return float(oficial_venta)
+    except Exception:
+        pass
+    return None
+
+
 if _pestana_activa == "pagos":
     tab_pagos = st.container()
 if _pestana_activa == "historial_pagos":
@@ -2318,21 +2333,6 @@ if tab_pagos:
         st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
 
         # ── Cotización USD — autocargar BNA al abrir la pestaña ───────
-        @st.cache_data(ttl=1800)
-        def _obtener_cotizacion_bna():
-            try:
-                import urllib.request, json
-                url = "https://api.bluelytics.com.ar/v2/latest"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=5) as r:
-                    data = json.loads(r.read())
-                oficial_venta = data.get("oficial", {}).get("value_sell")
-                if oficial_venta:
-                    return float(oficial_venta)
-            except Exception:
-                pass
-            return None
-
         # Auto-cargar cotización BNA si no hay una guardada
         if not st.session_state.get("cotizacion_usd_hist") or st.session_state.get("cotizacion_usd_hist", 0) <= 1:
             _tc_auto = _obtener_cotizacion_bna()
