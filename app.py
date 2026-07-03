@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.071"
+APP_VERSION = "v1.072"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2294,30 +2294,22 @@ if tab_planilla:
                         _rc[1].markdown(f"<div style='{_bg};padding:5px 4px;border-bottom:1px solid #dee2e6;'><span style='background:{_estado_bg};color:{_estado_color};padding:1px 6px;border-radius:10px;font-size:0.8em;font-weight:600;'>{_estado}</span></div>", unsafe_allow_html=True)
 
                         # Propiedad
-                        _rc[2].markdown(_cel(f"<strong>{_row['alias_propiedad']}</strong>"))
+                        _rc[2].markdown(_cel(f"<strong>{_row['alias_propiedad']}</strong>"), unsafe_allow_html=True)
 
                         # Inquilino
-                        _rc[3].markdown(_cel(_row["inquilino"]))
+                        _rc[3].markdown(_cel(_row["inquilino"]), unsafe_allow_html=True)
 
                         # Próx. actualización
-                        _rc[4].markdown(_cel(_prox_str, align="center"))
+                        _rc[4].markdown(_cel(_prox_str, align="center"), unsafe_allow_html=True)
 
                         # Alquiler
-                        _rc[5].markdown(_cel(_fmt_num(_row["ultimo_alquiler"]), align="right"))
+                        _rc[5].markdown(_cel(_fmt_num(_row["ultimo_alquiler"]), align="right"), unsafe_allow_html=True)
 
                         # Cochera
-                        _rc[6].markdown(_cel(_fmt_num(_row["cochera"]), align="right"))
+                        _rc[6].markdown(_cel(_fmt_num(_row["cochera"]), align="right"), unsafe_allow_html=True)
 
                         # Fecha pago
-                        _rc[7].markdown(_cel(_fecha_pago, align="center"))
-
-                        # Expensas — valor
-                        try:
-                            _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
-                        except (ValueError, TypeError):
-                            _exp_val = 0.0
-                        _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
-                        if _key_exp_plan not in st.session_state: st.session_state[_key_exp_plan] = _exp_val
+                        _rc[7].markdown(_cel(_fecha_pago, align="center"), unsafe_allow_html=True)
 
                         # Expensas — number_input editable
                         try:
@@ -2337,9 +2329,6 @@ if tab_planilla:
                                 _cached_planilla_cobranzas_mes.clear()
                             except Exception as _e_exp:
                                 _rc[8].error(f"Error: {_e_exp}")
-
-                        # columna 9 vacía (antes era ✏️)
-                        _rc[9].markdown("")
 
                 # ── Separar en pendientes y pagados ──
                 df_pendientes = df_cob[df_cob["pagado_mes"] == False]
