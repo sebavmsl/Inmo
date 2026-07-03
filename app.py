@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.101"
+APP_VERSION = "v1.103"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1145,7 +1145,7 @@ if not st.session_state.autenticado:
 # =====================================================================
 # FUNCIONES AUXILIARES DE LÓGICA Y PARSEO
 # =====================================================================
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600)
 def obtener_datos_desplegables(empresa_id: int):
     """Cache correcto por empresa_id — evita que distintas empresas compartan el mismo cache."""
     try:
@@ -1343,7 +1343,7 @@ def _marcar_gastos_como_cobrados(empresa_id: int, ids_gastos: list, periodo: str
         pass
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_contratos_activos(empresa_id: int, propietario_filtro: str = ""):
     """Dashboard: contratos activos (para alertas de vencimiento/actualización)."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -1359,7 +1359,7 @@ def _cached_contratos_activos(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_pagos_totales(empresa_id: int, propietario_filtro: str = ""):
     """Dashboard: suma de cobros históricos."""
     _where = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if propietario_filtro else ""
@@ -1368,7 +1368,7 @@ def _cached_pagos_totales(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=60, show_spinner=False)
+@st.cache_data(ttl=120, show_spinner=False)
 def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propietario_filtro: str = ""):
     """Planilla de cobranzas del mes: estado de pago de cada contrato activo."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -1421,7 +1421,7 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
     return df_contratos
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_planilla_contratos(empresa_id: int, propietario_filtro: str = ""):
     """Planilla: listado general de contratos."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -1449,7 +1449,7 @@ def _cached_planilla_contratos(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_historial_pagos(empresa_id: int, propietario_filtro: str = ""):
     """Historial de Caja: listado completo de cobros registrados."""
     _where = "AND ph.propiedad IN (SELECT alias_propiedad FROM propiedades WHERE propietario = %s AND empresa_id = %s)" if propietario_filtro else ""
@@ -1511,7 +1511,7 @@ def _cached_historial_pagos(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_gastos_historial(empresa_id: int, propietario_filtro: str = ""):
     """Gastos: historial completo de gastos de propiedades."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -1536,7 +1536,7 @@ def _cached_gastos_historial(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_metricas_ingresos(empresa_id: int, propietario_filtro: str = ""):
     """Métricas / Rendición: ingresos crudos desde pagos_historial (sin procesar mes_calendario)."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -1597,7 +1597,7 @@ def _cached_metricas_ingresos(empresa_id: int, propietario_filtro: str = ""):
     return _query_df(query, _params)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def _cached_metricas_gastos(empresa_id: int, propietario_filtro: str = ""):
     """Métricas: gastos crudos agrupados por propiedad/período."""
     _where = "AND p.propietario = %s" if propietario_filtro else ""
@@ -2749,6 +2749,14 @@ if tab_pagos:
             # ── DEPÓSITO DE GARANTÍA (a cargo del inquilino) ────────────────
             _raw_garantia = c_datos.get('monto_garantia')
             val_teorico_garantia = _safe_float(_raw_garantia) if _raw_garantia is not None else _monto_inicial
+            # Valores por defecto para garantía — se sobreescriben en el bloque else si hay garantía pactada
+            pagado_garantia_inquilino = 0.0
+            cuotas_dep_pagadas        = 0
+            cuotas_dep_pactadas       = 1
+            cuotas_dep_pendientes     = 0
+            saldo_garantia_inquilino  = 0.0
+            valor_cuota_dep           = 0.0
+
             if val_teorico_garantia == 0.0:
                 # Sin garantía pactada — no usar monto_inicial como fallback
                 with ed_col_esp2:
