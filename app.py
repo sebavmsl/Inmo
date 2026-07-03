@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.103"
+APP_VERSION = "v1.105"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1626,8 +1626,7 @@ def _cached_metricas_gastos(empresa_id: int, propietario_filtro: str = ""):
 def _obtener_icl_bcra_xls(año: int) -> dict:
     """
     Descarga el XLS del ICL publicado por el BCRA para el año dado.
-    Columna 7 = fecha (formato 20260101), columna 8 = valor ICL.
-    Los datos reales arrancan en la fila 26 (las anteriores son encabezados).
+    Detecta automáticamente las columnas de fecha y valor.
     Retorna dict {"YYYY-MM-DD": valor_float}.
     Cache de 1 hora.
     """
@@ -1635,13 +1634,40 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
     try:
         resp = requests.get(url, timeout=15, verify=False)
         resp.raise_for_status()
-        df_raw = pd.read_excel(BytesIO(resp.content), header=None, engine="xlrd")
+        try:
+            df_raw = pd.read_excel(BytesIO(resp.content), header=None, engine="xlrd")
+        except Exception as e_xls:
+            logging.warning(f"[ICL] Error al leer XLS con xlrd: {e_xls}. Intentando con openpyxl...")
+            try:
+                df_raw = pd.read_excel(BytesIO(resp.content), header=None, engine="openpyxl")
+            except Exception as e_xls2:
+                logging.warning(f"[ICL] Error con openpyxl también: {e_xls2}")
+                raise e_xls2
+        logging.info(f"[ICL] XLS shape: {df_raw.shape}, columnas: {list(df_raw.columns)}")
+
         resultado = {}
+        # Buscar columnas de fecha (formato YYYYMMDD de 8 dígitos) y valor numérico
+        col_fecha = None
+        col_valor = None
+        for col_idx in range(min(15, len(df_raw.columns))):
+            col_data = df_raw.iloc[:, col_idx].astype(str)
+            fechas_validas = col_data.str.match(r'^\d{8}$').sum()
+            if fechas_validas > 5:
+                col_fecha = col_idx
+                # El valor suele estar en la columna siguiente
+                col_valor = col_idx + 1
+                logging.info(f"[ICL] Columna fecha detectada: {col_fecha}, valor: {col_valor}")
+                break
+
+        if col_fecha is None:
+            # Fallback: usar columnas 7 y 8 como antes
+            col_fecha, col_valor = 7, 8
+            logging.warning(f"[ICL] No se detectó columna fecha, usando col 7 y 8 por defecto")
+
         for _, row in df_raw.iterrows():
             try:
-                fecha_raw = str(row.iloc[7]).strip()
-                valor_raw = row.iloc[8]
-                # La celda de fecha tiene formato YYYYMMDD (ej: 20260101)
+                fecha_raw = str(row.iloc[col_fecha]).strip()
+                valor_raw = row.iloc[col_valor]
                 if len(fecha_raw) != 8 or not fecha_raw.isdigit():
                     continue
                 fecha = pd.to_datetime(fecha_raw, format="%Y%m%d")
@@ -1652,6 +1678,7 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
         if resultado:
             logging.info(f"[ICL] BCRA: {len(resultado)} registros obtenidos para {año}.")
             return resultado
+        logging.warning(f"[ICL] XLS descargado pero sin datos válidos. Primeras filas: {df_raw.head(30).to_string()}")
         raise ValueError("El XLS del BCRA no contenía datos válidos.")
     except Exception as e:
         logging.warning(f"[ICL] Fuente primaria BCRA falló para {año}: {e}")
