@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.075"
+APP_VERSION = "v1.078"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2269,6 +2269,9 @@ if tab_planilla:
                                 _mes_proximo_p = _mes_actual_p + dateutil.relativedelta.relativedelta(months=1)
                                 _prox_mes_p    = _prox_dt.replace(day=1)
 
+                                # Formatear fecha siempre desde el objeto parseado
+                                _prox_fmt = _prox_dt.strftime("%Y/%m")
+
                                 # RENOVAR — igual que tablero
                                 if _fin_dt and _prox_dt > _fin_dt:
                                     _dias_para_vencer = (_fin_dt - _fecha_hoy_plan).days
@@ -2280,20 +2283,20 @@ if tab_planilla:
 
                                 # ESTE MES — igual que tablero
                                 elif _prox_mes_p == _mes_actual_p:
-                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
+                                    _prox_str = _prox_fmt
                                     _bg = "background:#fff3cd"
                                     _leyenda = "📈 ESTE MES — Corresponde actualizar el alquiler"
                                     _ley_color, _ley_text_color, _ley_border = "#ffe082", "#7b4f00", "#f9a825"
 
                                 # MES PRÓXIMO — igual que tablero
                                 elif _prox_mes_p == _mes_proximo_p:
-                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
+                                    _prox_str = _prox_fmt
                                     _bg = "background:#d0e8f7"
                                     _leyenda = "📅 MES PRÓXIMO — Actualización inminente"
                                     _ley_color, _ley_text_color, _ley_border = "#90caf9", "#0d47a1", "#1565c0"
 
                                 else:
-                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
+                                    _prox_str = _prox_fmt
 
                         except Exception:
                             _prox_str = "—"
@@ -3282,6 +3285,12 @@ if tab_pagos:
                         nuevo_mes_vivo = _mes_actual_vivo + 1
                         cursor.execute("UPDATE contratos SET mes_contrato = %s WHERE codigo = %s", (nuevo_mes_vivo, c_datos['codigo']))
                         cursor.execute("UPDATE contratos SET alquiler = %s WHERE codigo = %s", (monto_alq_pago, c_datos['codigo']))
+                        # Actualizar prox_actualizacion en la BD con el valor calculado
+                        if not necesita_renovacion:
+                            cursor.execute(
+                                "UPDATE contratos SET prox_actualizacion = %s WHERE codigo = %s",
+                                (prox_actualizacion_calculada.strftime('%Y-%m-%d'), c_datos['codigo'])
+                            )
                     else:
                         nuevo_mes_vivo = _mes_actual_vivo
                         if not _es_periodo_actual:
@@ -4755,7 +4764,7 @@ if tab_carga:
                     
                 inicio_str = inicio_contrato.strftime('%d/%m/%Y')
                 fin_str = fin_contrato.strftime('%d/%m/%Y')
-                prox_act_str = prox_actualizacion_calculada.strftime('%d/%m/%Y')
+                prox_act_str = prox_actualizacion_calculada.strftime('%Y-%m-%d')
                 meses_atras_calculado = meses_atras
                     
                 conn = conectar_db()
