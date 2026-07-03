@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.066"
+APP_VERSION = "v1.067"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2328,30 +2328,44 @@ if tab_planilla:
                         if _rc[0].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
                             _ir_a_recibo(_row)
 
-                        # Expensas editable — columna 8
+                        # Expensas — botón ✏️ que abre el input al hacer clic
                         try:
                             _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
                         except (ValueError, TypeError):
                             _exp_val = 0.0
+                        _key_exp_open = f"exp_open_{_row['codigo_contrato']}"
                         _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
                         if _key_exp_plan not in st.session_state:
                             st.session_state[_key_exp_plan] = _exp_val
-                        _exp_nuevo = _rc[8].number_input(
-                            "Expensas", min_value=0.0, step=500.0,
-                            key=_key_exp_plan, label_visibility="collapsed"
-                        )
-                        if _exp_nuevo != _exp_val:
-                            try:
-                                with _pg_conn() as _conn_exp:
-                                    with _conn_exp.cursor() as _cur_exp:
-                                        _cur_exp.execute(
-                                            "UPDATE contratos SET expensas = %s WHERE codigo = %s AND empresa_id = %s",
-                                            (_exp_nuevo, int(_row["codigo_contrato"]), _eid_plan)
-                                        )
-                                    _conn_exp.commit()
-                                _cached_planilla_cobranzas_mes.clear()
-                            except Exception as _e_exp:
-                                _rc[8].error(f"Error: {_e_exp}")
+                        if _key_exp_open not in st.session_state:
+                            st.session_state[_key_exp_open] = False
+
+                        if not st.session_state[_key_exp_open]:
+                            if _rc[8].button(f"✏️", key=f"btn_exp_{_row['codigo_contrato']}", help=f"Editar expensas (actual: $ {_exp_val:,.0f})", use_container_width=True):
+                                st.session_state[_key_exp_open] = True
+                                st.rerun()
+                        else:
+                            _exp_nuevo = _rc[8].number_input(
+                                "Expensas", min_value=0.0, step=500.0,
+                                key=_key_exp_plan, label_visibility="collapsed"
+                            )
+                            if _exp_nuevo != _exp_val:
+                                try:
+                                    with _pg_conn() as _conn_exp:
+                                        with _conn_exp.cursor() as _cur_exp:
+                                            _cur_exp.execute(
+                                                "UPDATE contratos SET expensas = %s WHERE codigo = %s AND empresa_id = %s",
+                                                (_exp_nuevo, int(_row["codigo_contrato"]), _eid_plan)
+                                            )
+                                        _conn_exp.commit()
+                                    _cached_planilla_cobranzas_mes.clear()
+                                    st.session_state[_key_exp_open] = False
+                                    st.rerun()
+                                except Exception as _e_exp:
+                                    _rc[8].error(f"Error: {_e_exp}")
+                            if _rc[8].button("✖️", key=f"btn_exp_close_{_row['codigo_contrato']}", help="Cerrar", use_container_width=True):
+                                st.session_state[_key_exp_open] = False
+                                st.rerun()
 
                 if not df_pendientes.empty:
                     _render_filas(df_pendientes, f"⏳ Pendientes de pago — {len(df_pendientes)} contrato(s)")
