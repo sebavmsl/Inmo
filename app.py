@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.070"
+APP_VERSION = "v1.071"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2340,6 +2340,10 @@ if tab_planilla:
 
                         # columna 9 vacía (antes era ✏️)
                         _rc[9].markdown("")
+
+                # ── Separar en pendientes y pagados ──
+                df_pendientes = df_cob[df_cob["pagado_mes"] == False]
+                df_pagados    = df_cob[df_cob["pagado_mes"] == True]
 
                 if not df_pendientes.empty:
                     _render_filas(df_pendientes, f"⏳ Pendientes de pago — {len(df_pendientes)} contrato(s)")
