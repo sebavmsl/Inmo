@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.078"
+APP_VERSION = "v1.101"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -411,7 +411,7 @@ def generar_pdf_recibo(
 
     # Firma
     story.append(Spacer(1, 30))
-    ft = Table([["", _p(f"_________________________<br/><b>{nombre_empresa}</b>",
+    ft = Table([["", _p("_________________________",
                          size=11, color=GRIS_TEXT, align=TA_CENTER)]],
                colWidths=[doc.width*0.55, doc.width*0.45])
     story.append(ft)
@@ -707,7 +707,7 @@ def generar_pdf_rendicion(
 
     # Firma
     story.append(Spacer(1, 30))
-    ft = Table([["", _p(f"_________________________<br/><b>{nombre_empresa}</b>",
+    ft = Table([["", _p("_________________________",
                          size=11, color=GRIS_TEXT, align=TA_CENTER)]],
                colWidths=[doc.width*0.55, doc.width*0.45])
     story.append(ft)
@@ -1635,7 +1635,7 @@ def _obtener_icl_bcra_xls(año: int) -> dict:
     try:
         resp = requests.get(url, timeout=15, verify=False)
         resp.raise_for_status()
-        df_raw = pd.read_excel(BytesIO(resp.content), header=None)
+        df_raw = pd.read_excel(BytesIO(resp.content), header=None, engine="xlrd")
         resultado = {}
         for _, row in df_raw.iterrows():
             try:
@@ -2192,7 +2192,8 @@ if tab_planilla:
         _hoy_plan = datetime.now()
         _mes_plan = _hoy_plan.month
         _anio_plan = _hoy_plan.year
-        _nombre_mes = _hoy_plan.strftime("%B %Y").capitalize()
+        _meses_es = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"]
+        _nombre_mes = f"{_meses_es[_hoy_plan.month - 1]} {_hoy_plan.year}"
 
         st.caption(f"Período: **{_nombre_mes}** — contratos activos con estado de pago del mes.")
 
@@ -2207,7 +2208,152 @@ if tab_planilla:
             else:
                 _pagaron = df_cob[df_cob["pagado_mes"] == True]
                 _faltan  = df_cob[df_cob["pagado_mes"] == False]
-                st.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
+                _res_col1, _res_col2 = st.columns([4, 1])
+                _res_col1.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
+
+                # ── Botón imprimir: construye y muestra HTML solo al hacer clic ──
+                # ── Generar PDF de planilla para descargar ──
+                def _generar_pdf_planilla():
+                    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+                    from reportlab.lib.pagesizes import A4, landscape
+                    from reportlab.lib import colors
+                    from reportlab.lib.units import mm
+                    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+                    from io import BytesIO
+
+                    buf = BytesIO()
+                    doc = SimpleDocTemplate(buf, pagesize=landscape(A4),
+                                            leftMargin=15*mm, rightMargin=15*mm,
+                                            topMargin=15*mm, bottomMargin=15*mm)
+                    styles = getSampleStyleSheet()
+                    _st_titulo = ParagraphStyle("titulo", parent=styles["Heading2"], fontSize=11, spaceAfter=2)
+                    _st_sub    = ParagraphStyle("sub",    parent=styles["Normal"],   fontSize=7.5,  textColor=colors.grey)
+                    _st_cell   = ParagraphStyle("cell",   parent=styles["Normal"],   fontSize=7.5)
+                    _st_bold   = ParagraphStyle("bold",   parent=styles["Normal"],   fontSize=7.5,  fontName="Helvetica-Bold")
+
+                    story = []
+                    story.append(Paragraph(f"Planilla de Cobranzas — {_nombre_mes}", _st_titulo))
+                    story.append(Paragraph(
+                        f"✅ Pagaron: {len(_pagaron)}   ⏳ Faltan pagar: {len(_faltan)}   Total: {len(df_cob)}",
+                        _st_sub))
+                    story.append(Spacer(1, 3*mm))
+
+                    def _fn(val):
+                        try:
+                            return f"$ {float(val):,.0f}" if val is not None and str(val) not in ("","None","nan") else "—"
+                        except: return "—"
+
+                    _fh = datetime.now().date()
+
+                    # Encabezado
+                    _data = [["", "Propiedad", "Inquilino", "Próx.Act.", "Alquiler", "Cochera", "F.Pago", "Expensas"]]
+
+                    for _, _rp in df_cob.iterrows():
+                        _pr = _rp["prox_actualizacion"]
+                        _fi = _rp["fin_contrato"]
+                        _ps = "—"
+                        _row_color = None
+                        try:
+                            def _td(v):
+                                if v is None: return None
+                                import pandas as pd
+                                if pd.isna(v) if hasattr(pd,'isna') else False: return None
+                                s = str(v)[:10].strip()
+                                if s in ("","None","nan","NaT"): return None
+                                try: return datetime.strptime(s,"%Y-%m-%d").date()
+                                except:
+                                    try: return datetime.strptime(s,"%d/%m/%Y").date()
+                                    except: return None
+                            _fi_d = _td(_fi); _pr_d = _td(_pr)
+                            if _pr_d:
+                                _ma = _fh.replace(day=1)
+                                _mp = _ma + dateutil.relativedelta.relativedelta(months=1)
+                                if _fi_d and _pr_d > _fi_d:
+                                    _ps = "RENOVAR"
+                                    if (_fi_d - _fh).days <= 60: _row_color = colors.HexColor("#fde8e8")
+                                elif _pr_d.replace(day=1) == _ma:
+                                    _ps = _pr_d.strftime("%Y/%m"); _row_color = colors.HexColor("#fff3cd")
+                                elif _pr_d.replace(day=1) == _mp:
+                                    _ps = _pr_d.strftime("%Y/%m"); _row_color = colors.HexColor("#d0e8f7")
+                                else:
+                                    _ps = _pr_d.strftime("%Y/%m")
+                        except: pass
+
+                        _icono_color = colors.HexColor("#155724") if _rp["pagado_mes"] else colors.HexColor("#721c24")
+                        _icono = Paragraph(
+                            f"<font color='{'#155724' if _rp['pagado_mes'] else '#721c24'}'>"
+                            f"{'PAGADO' if _rp['pagado_mes'] else 'PEND.'}</font>",
+                            _st_cell
+                        )
+                        _fp = _rp["_pago_fecha"][:10] if _rp["_pago_fecha"] else "—"
+                        _data.append([
+                            _icono,
+                            Paragraph(f"<b>{_rp['alias_propiedad']}</b>", _st_bold),
+                            Paragraph(_rp["inquilino"], _st_cell),
+                            _ps,
+                            _fn(_rp["ultimo_alquiler"]),
+                            _fn(_rp["cochera"]),
+                            _fp,
+                            _fn(_rp["expensas"]),
+                        ])
+
+                    # Columnas distribuidas en los 267mm disponibles en landscape A4
+                    _col_widths = [18*mm, 33*mm, 70*mm, 22*mm, 32*mm, 28*mm, 22*mm, 32*mm]
+                    t = Table(_data, colWidths=_col_widths, repeatRows=1)
+                    _ts = [
+                        ("BACKGROUND",  (0,0), (-1,0),  colors.HexColor("#2c3e50")),
+                        ("TEXTCOLOR",   (0,0), (-1,0),  colors.white),
+                        ("FONTNAME",    (0,0), (-1,0),  "Helvetica-Bold"),
+                        ("FONTSIZE",    (0,0), (-1,-1), 7.5),
+                        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#f8f9fa")]),
+                        ("GRID",        (0,0), (-1,-1), 0.3, colors.HexColor("#dee2e6")),
+                        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+                        ("ALIGN",       (3,0), (3,-1),  "CENTER"),
+                        ("ALIGN",       (4,0), (7,-1),  "RIGHT"),
+                        ("TOPPADDING",  (0,0), (-1,-1), 2),
+                        ("BOTTOMPADDING",(0,0),(-1,-1), 2),
+                    ]
+                    # Colores por fila según actualización
+                    for _ri, _rp in enumerate(df_cob.itertuples(), start=1):
+                        _pr = getattr(_rp, "prox_actualizacion", None)
+                        _fi = getattr(_rp, "fin_contrato", None)
+                        try:
+                            def _td2(v):
+                                if v is None: return None
+                                import pandas as pd
+                                if pd.isna(v) if hasattr(pd,'isna') else False: return None
+                                s = str(v)[:10].strip()
+                                if s in ("","None","nan","NaT"): return None
+                                try: return datetime.strptime(s,"%Y-%m-%d").date()
+                                except:
+                                    try: return datetime.strptime(s,"%d/%m/%Y").date()
+                                    except: return None
+                            _fi_d2 = _td2(_fi); _pr_d2 = _td2(_pr)
+                            if _pr_d2:
+                                _ma2 = _fh.replace(day=1)
+                                _mp2 = _ma2 + dateutil.relativedelta.relativedelta(months=1)
+                                if _fi_d2 and _pr_d2 > _fi_d2 and (_fi_d2 - _fh).days <= 60:
+                                    _ts.append(("BACKGROUND", (0,_ri), (-1,_ri), colors.HexColor("#fde8e8")))
+                                elif _pr_d2.replace(day=1) == _ma2:
+                                    _ts.append(("BACKGROUND", (0,_ri), (-1,_ri), colors.HexColor("#fff3cd")))
+                                elif _pr_d2.replace(day=1) == _mp2:
+                                    _ts.append(("BACKGROUND", (0,_ri), (-1,_ri), colors.HexColor("#d0e8f7")))
+                        except: pass
+
+                    t.setStyle(TableStyle(_ts))
+                    story.append(t)
+                    doc.build(story)
+                    return buf.getvalue()
+
+                _pdf_bytes = _generar_pdf_planilla()
+                _res_col2.download_button(
+                    label="🖨️ Descargar PDF",
+                    data=_pdf_bytes,
+                    file_name=f"planilla_cobranzas_{_nombre_mes.replace(' ','_')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="btn_pdf_planilla"
+                )
                 st.markdown("---")
 
                 # ── Función de navegación a Registrar/Emitir Recibo ──
@@ -2227,8 +2373,8 @@ if tab_planilla:
                         return "—"
 
                 # ── Renderizado con st.columns (todo en la misma línea) ──
-                _COLS = [0.4, 0.6, 1.2, 2, 0.7, 1, 0.8, 0.9, 1]
-                _HEADERS = ["💰", "Estado", "Propiedad", "Inquilino", "Próx.Act.", "Alquiler", "Cochera", "F.Pago", "Expensas"]
+                _COLS = [0.4, 0.3, 1.2, 2, 0.7, 1, 0.8, 0.9, 1]
+                _HEADERS = ["💰", "", "Propiedad", "Inquilino", "Próx.Act.", "Alquiler", "Cochera", "F.Pago", "Expensas"]
 
                 def _render_filas(df_iter, grupo_label=None):
                     if grupo_label:
@@ -2321,8 +2467,9 @@ if tab_planilla:
                             if st.button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
                                 _ir_a_recibo(_row)
 
-                        # Estado
-                        _rc[1].markdown(f"<div style='{_bg};padding:5px 4px;border-bottom:1px solid #dee2e6;'><span style='background:{_estado_bg};color:{_estado_color};padding:1px 6px;border-radius:10px;font-size:0.8em;font-weight:600;'>{_estado}</span></div>", unsafe_allow_html=True)
+                        # Estado — ícono
+                        _icono_estado = "✅" if _row["pagado_mes"] else "⏳"
+                        _rc[1].markdown(_cel(_icono_estado, align="center"), unsafe_allow_html=True)
 
                         # Propiedad
                         _rc[2].markdown(_cel(f"<strong>{_row['alias_propiedad']}</strong>"), unsafe_allow_html=True)
@@ -2784,6 +2931,17 @@ if tab_pagos:
                         f"⚠️ No se pudo obtener el índice desde {fuente_r}. "
                         "Ingresá el valor manualmente o verificá en arquiler.com (↖).",
                     )
+                    # Mostrar detalle del error en un expander para diagnóstico
+                    with r_col2.expander("🔍 Ver detalle del error"):
+                        try:
+                            _url_test = f"https://www.bcra.gob.ar/pdfs/PublicacionesEstadisticas/icl{datetime.now().year}.xls"
+                            _r_test = requests.get(_url_test, timeout=8, verify=False)
+                            st.caption(f"URL: `{_url_test}`")
+                            st.caption(f"HTTP status: `{_r_test.status_code}`")
+                            st.caption(f"Content-Type: `{_r_test.headers.get('Content-Type', 'N/A')}`")
+                            st.caption(f"Tamaño respuesta: `{len(_r_test.content)} bytes`")
+                        except Exception as _e_test:
+                            st.caption(f"Error de conexión: `{_e_test}`")
                     if r_col2.button("🔄 Reintentar", key=f"retry_indice_recibo_{c_datos['codigo']}"):
                         _obtener_icl_bcra_xls.clear()
                         _obtener_ipc_indec.clear()
@@ -4054,6 +4212,7 @@ if tab_carga:
             # Detectar cambio de propiedad para forzar recarga de datos desde la BD
             if st.session_state.propiedad_activa != propiedad_id:
                 st.session_state.propiedad_activa = propiedad_id
+                st.session_state["_propiedad_cambio"] = True
                 u = cargar_datos_iniciales_contrato(propiedad_id)
                 st.session_state.datos_contrato = u
     
@@ -4182,32 +4341,31 @@ if tab_carga:
             u = st.session_state.datos_contrato
     
     
-            # 🔧 PASO 2: DETERMINAR ÍNDICE DEL INQUILINO PARA PRESELECCIONAR
-            if u and u.get('dni_inquilino'):
-                _dni_buscar = str(u['dni_inquilino']).strip()
-                _eid_busq = st.session_state.get("empresa_id", 0)
-                try:
-                    with _pg_conn() as _conn_bi:
-                        with _conn_bi.cursor() as _cur_bi:
-                            _cur_bi.execute(
-                                "SELECT apellidos, nombres FROM inquilinos WHERE dni = %s AND empresa_id = %s",
-                                (_dni_buscar, _eid_busq)
-                            )
-                            _inq_row = _cur_bi.fetchone()
-                    if _inq_row:
-                        _inq_nombre_buscar = f"{_inq_row['apellidos']}, {_inq_row['nombres']}"
-                        # Actualizar session_state para que el selectbox lo tome
-                        if st.session_state.get("inq_sel_main") != _inq_nombre_buscar:
+            # 🔧 PASO 2: PRESELECCIONAR INQUILINO SOLO AL CAMBIAR DE PROPIEDAD
+            # _propiedad_cambio se setea True en el bloque de detección de cambio de propiedad
+            _propiedad_cambio = st.session_state.get("_propiedad_cambio", False)
+            if _propiedad_cambio:
+                st.session_state["_propiedad_cambio"] = False
+                if u and u.get('dni_inquilino'):
+                    _dni_buscar = str(u['dni_inquilino']).strip()
+                    _eid_busq = st.session_state.get("empresa_id", 0)
+                    try:
+                        with _pg_conn() as _conn_bi:
+                            with _conn_bi.cursor() as _cur_bi:
+                                _cur_bi.execute(
+                                    "SELECT id, apellidos, nombres FROM inquilinos WHERE dni = %s AND empresa_id = %s",
+                                    (_dni_buscar, _eid_busq)
+                                )
+                                _inq_row = _cur_bi.fetchone()
+                        if _inq_row:
+                            _inq_nombre_buscar = f"Cod: {_inq_row['id']} | {_inq_row['apellidos']}, {_inq_row['nombres']}"
                             st.session_state["inq_sel_main"] = _inq_nombre_buscar
-                        idx_inq = next((i for i, n in enumerate(lista_inquilinos) if n == _inq_nombre_buscar), 0)
-                    else:
-                        idx_inq = 0
-                except Exception:
-                    idx_inq = 0
-            elif u and u.get('inquilino_id'):
-                idx_inq = buscar_inquilino_por_id(u['inquilino_id'], lista_inquilinos, dict_inquilinos)
-            else:
-                idx_inq = 0
+                    except Exception:
+                        pass
+                elif u and u.get('inquilino_id'):
+                    idx_inq = buscar_inquilino_por_id(u['inquilino_id'], lista_inquilinos, dict_inquilinos)
+                    if idx_inq < len(lista_inquilinos):
+                        st.session_state["inq_sel_main"] = lista_inquilinos[idx_inq]
     
             # 🔧 PASO 3: ÚNICO SELECTBOX DE INQUILINO (SIN DUPLICADOS)
             inquilino_seleccionada = c2.selectbox(
