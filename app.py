@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.061"
+APP_VERSION = "v1.062"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2210,74 +2210,107 @@ if tab_planilla:
                 st.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
                 st.markdown("---")
 
-                # Construir dict_activos para preseleccionar en Registrar/Emitir Recibo
-                # (mismo formato que key_desplegable en pestaña pagos)
+                # ── Función de navegación a Registrar/Emitir Recibo ──
                 def _ir_a_recibo(row):
                     _key = f"Cod: {row['codigo_contrato']} | {row['alias_propiedad']} - Inquilino: Cod: {row['inquilino_id']} | {str(row['apellidos']).upper()}, {str(row['nombres']).title()}"
                     st.session_state["sb_pago_activo"] = _key
                     st.session_state.pestana_activa = "pagos"
                     st.rerun()
 
-                # Renderizar tabla fila por fila
-                _cols_header = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1.5, 1])
-                _headers = ["Estado", "Propiedad", "Inquilino", "Próx. Actualiz.", "Últ. Alquiler", "Expensas", "Cochera", "Fecha pago", ""]
-                for _hc, _ht in zip(_cols_header, _headers):
-                    _hc.markdown(f"**{_ht}**")
-                st.markdown("---")
+                # ── Helpers ──
+                _mes_actual_dt  = datetime(_anio_plan, _mes_plan, 1)
+                _mes_proximo_dt = _mes_actual_dt + dateutil.relativedelta.relativedelta(months=1)
 
-                for _, _row in df_cob.iterrows():
-                    # Determinar color de fila según próxima actualización
-                    _prox_raw = _row["prox_actualizacion"]
-                    _color_fila = None
-                    _label_fila = ""
+                def _fmt_num(val):
                     try:
-                        if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
-                            _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
-                            _mes_actual_dt  = datetime(_anio_plan, _mes_plan, 1)
-                            _mes_proximo_dt = (_mes_actual_dt + dateutil.relativedelta.relativedelta(months=1))
-                            if _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
-                                _color_fila = "#fff3cd"  # amarillo — igual a st.warning
-                                _label_fila = "📈 ESTE MES — Corresponde actualizar el alquiler"
-                            elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
-                                _color_fila = "#d0e8f7"  # azul claro — igual a st.info
-                                _label_fila = "📅 MES PRÓXIMO — Actualización inminente"
-                    except Exception:
-                        pass
+                        return f"$ {float(val):,.0f}" if val is not None and str(val) not in ("", "None", "nan") else "—"
+                    except (ValueError, TypeError):
+                        return "—"
 
-                    _rc = st.columns([1, 2, 2, 2, 2, 1.5, 1.5, 1.5, 1])
-                    if _color_fila:
-                        st.markdown(
-                            f"<div style='background:{_color_fila};border-radius:6px;padding:2px 8px;margin-bottom:2px;font-size:0.82em;'>"
-                            f"{_label_fila}</div>", unsafe_allow_html=True
-                        )
-                    # Estado
-                    _rc[0].markdown("✅" if _row["pagado_mes"] else "⏳")
-                    # Propiedad
-                    _rc[1].markdown(f"**{_row['alias_propiedad']}**")
-                    # Inquilino
-                    _rc[2].markdown(_row["inquilino"])
-                    # Próxima actualización — muestra RENOVAR si supera fin de contrato
+                # ── CSS para tabla y print ──
+                st.markdown("""
+                <style>
+                @media print {
+                    .no-print { display: none !important; }
+                    .planilla-tabla { font-size: 9pt !important; }
+                    .planilla-tabla th { background: #2c3e50 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                    .row-amarillo td { background: #fff3cd !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                    .row-azul td { background: #d0e8f7 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                }
+                .planilla-tabla { width:100%; border-collapse:collapse; font-family:Arial,sans-serif; font-size:0.88em; margin-top:8px; }
+                .planilla-tabla th { background:#2c3e50; color:white; padding:8px 10px; text-align:left; font-weight:600; border:1px solid #1a252f; }
+                .planilla-tabla td { padding:6px 10px; border:1px solid #dee2e6; vertical-align:middle; }
+                .planilla-tabla tr:nth-child(even) td { background:#f8f9fa; }
+                .planilla-tabla tr:nth-child(odd)  td { background:#ffffff; }
+                .row-amarillo td { background:#fff3cd !important; }
+                .row-azul     td { background:#d0e8f7 !important; }
+                .badge-pago   { display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.85em; font-weight:600; }
+                .badge-ok     { background:#d4edda; color:#155724; }
+                .badge-pend   { background:#f8d7da; color:#721c24; }
+                .badge-renovar{ background:#f8d7da; color:#721c24; font-weight:700; }
+                .num          { text-align:right; }
+                </style>""", unsafe_allow_html=True)
+
+                # ── Construir filas HTML ──
+                _filas_html = ""
+                for _, _row in df_cob.iterrows():
                     _prox_raw = _row["prox_actualizacion"]
                     _fin_raw  = _row["fin_contrato"]
+                    _class_fila = ""
                     _prox_str = "—"
                     try:
                         if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
-                            _prox_dt2 = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
-                            _fin_dt2  = datetime.strptime(str(_fin_raw)[:10],  "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
-                            if _fin_dt2 and _prox_dt2 > _fin_dt2:
-                                _prox_str = "🔄 RENOVAR"
+                            _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
+                            _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
+                            if _fin_dt and _prox_dt > _fin_dt:
+                                _prox_str = "RENOVAR"
+                                _class_fila = "row-amarillo"
+                            elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
+                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                _class_fila = "row-amarillo"
+                            elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
+                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                _class_fila = "row-azul"
                             else:
                                 _prox_str = str(_prox_raw)[:7].replace("-", "/")
                     except Exception:
                         _prox_str = "—"
-                    _rc[3].markdown(_prox_str)
-                    # Último alquiler
-                    try:
-                        _alq = f"$ {float(_row['ultimo_alquiler']):,.0f}" if _row["ultimo_alquiler"] is not None and str(_row["ultimo_alquiler"]) not in ("", "None", "nan") else "—"
-                    except (ValueError, TypeError):
-                        _alq = "—"
-                    _rc[4].markdown(_alq)
-                    # Expensas — editable, guarda automáticamente al cambiar
+
+                    _estado_badge = '<span class="badge-pago badge-ok">✅ Pagado</span>' if _row["pagado_mes"] else '<span class="badge-pago badge-pend">⏳ Pendiente</span>'
+                    _prox_cell = '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>' if _prox_str == "RENOVAR" else _prox_str
+
+                    _filas_html += f"""
+                    <tr class="{_class_fila}">
+                        <td>{_estado_badge}</td>
+                        <td><strong>{_row['alias_propiedad']}</strong></td>
+                        <td>{_row['inquilino']}</td>
+                        <td style='text-align:center'>{_prox_cell}</td>
+                        <td class='num'>{_fmt_num(_row['ultimo_alquiler'])}</td>
+                        <td class='num'>{_fmt_num(_row['expensas'])}</td>
+                        <td class='num'>{_fmt_num(_row['cochera'])}</td>
+                        <td style='text-align:center'>{_row['_pago_fecha'][:10] if _row['_pago_fecha'] else '—'}</td>
+                    </tr>"""
+
+                st.markdown(f"""
+                <table class='planilla-tabla'>
+                    <thead><tr>
+                        <th>Estado</th><th>Propiedad</th><th>Inquilino</th>
+                        <th style='text-align:center'>Próx. Actualiz.</th>
+                        <th style='text-align:right'>Últ. Alquiler</th>
+                        <th style='text-align:right'>Expensas</th>
+                        <th style='text-align:right'>Cochera</th>
+                        <th style='text-align:center'>Fecha Pago</th>
+                    </tr></thead>
+                    <tbody>{_filas_html}</tbody>
+                </table>""", unsafe_allow_html=True)
+
+                # ── Expensas editables ──
+                st.markdown("---")
+                st.caption("✏️ Actualizá el valor de Expensas por contrato:")
+                for _, _row in df_cob.iterrows():
+                    _ec1, _ec2, _ec3 = st.columns([2, 2, 3])
+                    _ec1.markdown(f"**{_row['alias_propiedad']}**")
+                    _ec2.markdown(_row['inquilino'])
                     try:
                         _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
                     except (ValueError, TypeError):
@@ -2285,12 +2318,10 @@ if tab_planilla:
                     _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
                     if _key_exp_plan not in st.session_state:
                         st.session_state[_key_exp_plan] = _exp_val
-                    _exp_nuevo = _rc[5].number_input(
-                        "Expensas",
-                        min_value=0.0,
-                        step=500.0,
-                        key=_key_exp_plan,
-                        label_visibility="collapsed"
+                    _exp_nuevo = _ec3.number_input(
+                        f"Expensas {_row['alias_propiedad']}",
+                        min_value=0.0, step=500.0,
+                        key=_key_exp_plan, label_visibility="collapsed"
                     )
                     if _exp_nuevo != _exp_val:
                         try:
@@ -2303,17 +2334,18 @@ if tab_planilla:
                                 _conn_exp.commit()
                             _cached_planilla_cobranzas_mes.clear()
                         except Exception as _e_exp:
-                            _rc[5].error(f"Error: {_e_exp}")
-                    # Cochera
-                    try:
-                        _coch = f"$ {float(_row['cochera']):,.0f}" if _row["cochera"] is not None and str(_row["cochera"]) not in ("", "None", "nan") else "—"
-                    except (ValueError, TypeError):
-                        _coch = "—"
-                    _rc[6].markdown(_coch)
-                    # Fecha de pago
-                    _rc[7].markdown(_row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—")
-                    # Botón ir a recibo
-                    if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo"):
+                            _ec3.error(f"Error: {_e_exp}")
+
+                # ── Botones de navegación ──
+                st.markdown("---")
+                st.caption("💰 Ir a Registrar / Emitir Recibo:")
+                _btn_cols = st.columns(min(len(df_cob), 6))
+                for _bi, (_, _row) in enumerate(df_cob.iterrows()):
+                    if _btn_cols[_bi % min(len(df_cob), 6)].button(
+                        f"💰 {_row['alias_propiedad']}",
+                        key=f"btn_recibo_{_row['codigo_contrato']}",
+                        use_container_width=True
+                    ):
                         _ir_a_recibo(_row)
 
         except Exception as e:
