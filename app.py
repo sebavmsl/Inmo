@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.072"
+APP_VERSION = "v1.073"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2246,31 +2246,43 @@ if tab_planilla:
                         _bg = ""
                         _prox_str = "—"
                         _leyenda = ""
+                        _ley_color = ""
+                        _ley_text_color = ""
+                        _ley_border = ""
                         try:
                             if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
                                 _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
                                 _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
                                 if _fin_dt and _prox_dt > _fin_dt:
                                     _prox_str = "🔄 RENOVAR"
-                                    _bg = "background:#fff3cd"
-                                    _leyenda = "🔄 RENOVAR — Este contrato requiere renovación"
+                                    _dias_para_vencer = (_fin_dt - _hoy_plan.date()).days
+                                    if _dias_para_vencer <= 60:
+                                        _bg = "background:#fde8e8"  # rojo claro
+                                        _leyenda = f"🚨 RENOVAR — El contrato vence en {_dias_para_vencer} día(s)"
+                                        _ley_color = "#ffb3b3"
+                                        _ley_text_color = "#7b0000"
+                                        _ley_border = "#e53935"
+                    
                                 elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
                                     _prox_str = str(_prox_raw)[:7].replace("-", "/")
                                     _bg = "background:#fff3cd"
                                     _leyenda = "📈 ESTE MES — Corresponde actualizar el alquiler"
+                                    _ley_color = "#ffe082"
+                                    _ley_text_color = "#7b4f00"
+                                    _ley_border = "#f9a825"
                                 elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
                                     _prox_str = str(_prox_raw)[:7].replace("-", "/")
                                     _bg = "background:#d0e8f7"
                                     _leyenda = "📅 MES PRÓXIMO — Actualización inminente"
+                                    _ley_color = "#90caf9"
+                                    _ley_text_color = "#0d47a1"
+                                    _ley_border = "#1565c0"
                                 else:
                                     _prox_str = str(_prox_raw)[:7].replace("-", "/")
                         except Exception:
                             _prox_str = "—"
 
                         if _leyenda:
-                            _ley_color = "#ffe082" if "fff3cd" in _bg else "#90caf9"
-                            _ley_text_color = "#7b4f00" if "fff3cd" in _bg else "#0d47a1"
-                            _ley_border = "#f9a825" if "fff3cd" in _bg else "#1565c0"
                             st.markdown(f"<div style='background:{_ley_color};padding:2px 10px;font-size:0.76em;font-weight:600;color:{_ley_text_color};border-left:4px solid {_ley_border};border-radius:3px;margin-top:4px;'>{_leyenda}</div>", unsafe_allow_html=True)
 
                         _estado = "✅ Pagado" if _row["pagado_mes"] else "⏳ Pendiente"
