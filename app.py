@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.062"
+APP_VERSION = "v1.064"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2217,7 +2217,6 @@ if tab_planilla:
                     st.session_state.pestana_activa = "pagos"
                     st.rerun()
 
-                # ── Helpers ──
                 _mes_actual_dt  = datetime(_anio_plan, _mes_plan, 1)
                 _mes_proximo_dt = _mes_actual_dt + dateutil.relativedelta.relativedelta(months=1)
 
@@ -2227,32 +2226,43 @@ if tab_planilla:
                     except (ValueError, TypeError):
                         return "—"
 
-                # ── CSS para tabla y print ──
-                st.markdown("""
-                <style>
+                # ── CSS global ──
+                st.markdown("""<style>
                 @media print {
-                    .no-print { display: none !important; }
-                    .planilla-tabla { font-size: 9pt !important; }
-                    .planilla-tabla th { background: #2c3e50 !important; color: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                    .row-amarillo td { background: #fff3cd !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-                    .row-azul td { background: #d0e8f7 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+                    .no-print { display:none !important; }
+                    [data-testid="stNumberInput"] { display:none !important; }
+                    [data-testid="stButton"] { display:none !important; }
                 }
-                .planilla-tabla { width:100%; border-collapse:collapse; font-family:Arial,sans-serif; font-size:0.88em; margin-top:8px; }
-                .planilla-tabla th { background:#2c3e50; color:white; padding:8px 10px; text-align:left; font-weight:600; border:1px solid #1a252f; }
-                .planilla-tabla td { padding:6px 10px; border:1px solid #dee2e6; vertical-align:middle; }
-                .planilla-tabla tr:nth-child(even) td { background:#f8f9fa; }
-                .planilla-tabla tr:nth-child(odd)  td { background:#ffffff; }
-                .row-amarillo td { background:#fff3cd !important; }
-                .row-azul     td { background:#d0e8f7 !important; }
-                .badge-pago   { display:inline-block; padding:2px 8px; border-radius:12px; font-size:0.85em; font-weight:600; }
+                .plan-header {
+                    display:grid; grid-template-columns:90px 130px 1fr 90px 110px 110px 90px 110px 80px;
+                    background:#2c3e50; color:white; padding:7px 6px;
+                    font-weight:600; font-size:0.82em; border-radius:6px 6px 0 0;
+                    font-family:Arial,sans-serif;
+                }
+                .plan-row {
+                    display:grid; grid-template-columns:90px 130px 1fr 90px 110px 110px 90px 110px 80px;
+                    padding:4px 6px; font-size:0.82em; border-bottom:1px solid #dee2e6;
+                    align-items:center; font-family:Arial,sans-serif;
+                }
+                .plan-row:nth-child(even) { background:#f8f9fa; }
+                .plan-row:nth-child(odd)  { background:#ffffff; }
+                .row-amarillo { background:#fff3cd !important; }
+                .row-azul     { background:#d0e8f7 !important; }
+                .badge-pago   { display:inline-block; padding:1px 7px; border-radius:10px; font-size:0.85em; font-weight:600; }
                 .badge-ok     { background:#d4edda; color:#155724; }
                 .badge-pend   { background:#f8d7da; color:#721c24; }
-                .badge-renovar{ background:#f8d7da; color:#721c24; font-weight:700; }
-                .num          { text-align:right; }
+                .badge-renovar{ background:#f8d7da; color:#721c24; font-weight:700; font-size:0.8em; }
                 </style>""", unsafe_allow_html=True)
 
-                # ── Construir filas HTML ──
-                _filas_html = ""
+                # ── Encabezado ──
+                st.markdown("""<div class='plan-header'>
+                    <div>Estado</div><div>Propiedad</div><div>Inquilino</div>
+                    <div>Próx.Act.</div><div style='text-align:right'>Alquiler</div>
+                    <div>Expensas</div><div style='text-align:right'>Cochera</div>
+                    <div style='text-align:center'>F. Pago</div><div></div>
+                </div>""", unsafe_allow_html=True)
+
+                # ── Filas integradas ──
                 for _, _row in df_cob.iterrows():
                     _prox_raw = _row["prox_actualizacion"]
                     _fin_raw  = _row["fin_contrato"]
@@ -2263,7 +2273,7 @@ if tab_planilla:
                             _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
                             _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
                             if _fin_dt and _prox_dt > _fin_dt:
-                                _prox_str = "RENOVAR"
+                                _prox_str = '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>'
                                 _class_fila = "row-amarillo"
                             elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
                                 _prox_str = str(_prox_raw)[:7].replace("-", "/")
@@ -2277,40 +2287,42 @@ if tab_planilla:
                         _prox_str = "—"
 
                     _estado_badge = '<span class="badge-pago badge-ok">✅ Pagado</span>' if _row["pagado_mes"] else '<span class="badge-pago badge-pend">⏳ Pendiente</span>'
-                    _prox_cell = '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>' if _prox_str == "RENOVAR" else _prox_str
+                    _fecha_pago = _row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—"
 
-                    _filas_html += f"""
-                    <tr class="{_class_fila}">
-                        <td>{_estado_badge}</td>
-                        <td><strong>{_row['alias_propiedad']}</strong></td>
-                        <td>{_row['inquilino']}</td>
-                        <td style='text-align:center'>{_prox_cell}</td>
-                        <td class='num'>{_fmt_num(_row['ultimo_alquiler'])}</td>
-                        <td class='num'>{_fmt_num(_row['expensas'])}</td>
-                        <td class='num'>{_fmt_num(_row['cochera'])}</td>
-                        <td style='text-align:center'>{_row['_pago_fecha'][:10] if _row['_pago_fecha'] else '—'}</td>
-                    </tr>"""
+                    # Leyenda sobre la fila si corresponde actualizar
+                    _leyenda_html = ""
+                    if _class_fila == "row-amarillo":
+                        _es_renovar = _prox_str == '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>'
+                        _leyenda_txt = "🔄 RENOVAR — Este contrato requiere renovación" if _es_renovar else "📈 ESTE MES — Corresponde actualizar el alquiler"
+                        _leyenda_html = f"<div style='background:#ffe082;padding:3px 10px;font-size:0.78em;font-weight:600;color:#7b4f00;border-left:4px solid #f9a825;border-radius:4px 4px 0 0;'>{_leyenda_txt}</div>"
+                    elif _class_fila == "row-azul":
+                        _leyenda_html = "<div style='background:#90caf9;padding:3px 10px;font-size:0.78em;font-weight:600;color:#0d47a1;border-left:4px solid #1565c0;border-radius:4px 4px 0 0;'>📅 MES PRÓXIMO — Actualización inminente</div>"
 
-                st.markdown(f"""
-                <table class='planilla-tabla'>
-                    <thead><tr>
-                        <th>Estado</th><th>Propiedad</th><th>Inquilino</th>
-                        <th style='text-align:center'>Próx. Actualiz.</th>
-                        <th style='text-align:right'>Últ. Alquiler</th>
-                        <th style='text-align:right'>Expensas</th>
-                        <th style='text-align:right'>Cochera</th>
-                        <th style='text-align:center'>Fecha Pago</th>
-                    </tr></thead>
-                    <tbody>{_filas_html}</tbody>
-                </table>""", unsafe_allow_html=True)
+                    if _leyenda_html:
+                        st.markdown(_leyenda_html, unsafe_allow_html=True)
 
-                # ── Expensas editables ──
-                st.markdown("---")
-                st.caption("✏️ Actualizá el valor de Expensas por contrato:")
-                for _, _row in df_cob.iterrows():
-                    _ec1, _ec2, _ec3 = st.columns([2, 2, 3])
-                    _ec1.markdown(f"**{_row['alias_propiedad']}**")
-                    _ec2.markdown(_row['inquilino'])
+                    # Columnas Streamlit con fondo de color via CSS
+                    _bg = {"row-amarillo": "#fff3cd", "row-azul": "#d0e8f7", "": "transparent"}[_class_fila]
+                    st.markdown(f"<div class='plan-row {_class_fila}'>"
+                        f"<div>{_estado_badge}</div>"
+                        f"<div><strong>{_row['alias_propiedad']}</strong></div>"
+                        f"<div>{_row['inquilino']}</div>"
+                        f"<div style='text-align:center'>{_prox_str}</div>"
+                        f"<div style='text-align:right'>{_fmt_num(_row['ultimo_alquiler'])}</div>"
+                        f"<div></div>"  # placeholder para number_input
+                        f"<div style='text-align:right'>{_fmt_num(_row['cochera'])}</div>"
+                        f"<div style='text-align:center'>{_fecha_pago}</div>"
+                        f"<div></div>"  # placeholder para button
+                        f"</div>", unsafe_allow_html=True)
+
+                    # Widgets interactivos alineados con columnas proporcionales al grid
+                    _rc = st.columns([90, 130, 999, 90, 110, 110, 90, 110, 80])
+                    # Fondo de color en la fila de widgets
+                    if _bg != "transparent":
+                        for _rci in _rc:
+                            _rci.markdown(f"<style>div[data-testid='column']{{background:{_bg}}}</style>", unsafe_allow_html=True)
+
+                    # Expensas editable
                     try:
                         _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
                     except (ValueError, TypeError):
@@ -2318,9 +2330,8 @@ if tab_planilla:
                     _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
                     if _key_exp_plan not in st.session_state:
                         st.session_state[_key_exp_plan] = _exp_val
-                    _exp_nuevo = _ec3.number_input(
-                        f"Expensas {_row['alias_propiedad']}",
-                        min_value=0.0, step=500.0,
+                    _exp_nuevo = _rc[5].number_input(
+                        "Expensas", min_value=0.0, step=500.0,
                         key=_key_exp_plan, label_visibility="collapsed"
                     )
                     if _exp_nuevo != _exp_val:
@@ -2334,19 +2345,12 @@ if tab_planilla:
                                 _conn_exp.commit()
                             _cached_planilla_cobranzas_mes.clear()
                         except Exception as _e_exp:
-                            _ec3.error(f"Error: {_e_exp}")
+                            _rc[5].error(f"Error: {_e_exp}")
 
-                # ── Botones de navegación ──
-                st.markdown("---")
-                st.caption("💰 Ir a Registrar / Emitir Recibo:")
-                _btn_cols = st.columns(min(len(df_cob), 6))
-                for _bi, (_, _row) in enumerate(df_cob.iterrows()):
-                    if _btn_cols[_bi % min(len(df_cob), 6)].button(
-                        f"💰 {_row['alias_propiedad']}",
-                        key=f"btn_recibo_{_row['codigo_contrato']}",
-                        use_container_width=True
-                    ):
+                    # Botón navegación
+                    if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
                         _ir_a_recibo(_row)
+
 
         except Exception as e:
             st.error(f"Error al cargar la planilla de cobranzas: {e}")
