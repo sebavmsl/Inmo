@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.105"
+APP_VERSION = "v1.106"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -4955,8 +4955,8 @@ if tab_carga:
                 detalle_garantia_unificado = f"{_pag_str}|{_dep_str}"
                 registro_distribucion = f"[Alq.Actualizado: {alq_act_fmt} | Imp.Inmob: {cargo_inmobiliario}] {servicios_detalle}".strip()
                     
-                inicio_str = inicio_contrato.strftime('%d/%m/%Y')
-                fin_str = fin_contrato.strftime('%d/%m/%Y')
+                inicio_str = inicio_contrato.strftime('%Y-%m-%d')
+                fin_str = fin_contrato.strftime('%Y-%m-%d')
                 prox_act_str = prox_actualizacion_calculada.strftime('%Y-%m-%d')
                 meses_atras_calculado = meses_atras
                     
