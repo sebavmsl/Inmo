@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.106"
+APP_VERSION = "v1.107"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2579,10 +2579,12 @@ if tab_pagos:
             else:
                 st.warning("No se pudo obtener la cotización BNA. Ingresala manualmente.")
 
+        if "cotizacion_usd_pago_input" not in st.session_state:
+            st.session_state["cotizacion_usd_pago_input"] = float(st.session_state.get("cotizacion_usd_hist", 1300.0))
+
         _cotizacion_usd_pago = _usd_pago_col.number_input(
             "💵 Cotización USD al momento del cobro ($ ARS por 1 USD):",
             min_value=1.0,
-            value=float(st.session_state.get("cotizacion_usd_hist", 1300.0)),
             step=10.0,
             key="cotizacion_usd_pago_input",
             help="Presioná 🔄 BNA para autocompletar con la cotización oficial del día"
