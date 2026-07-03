@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.064"
+APP_VERSION = "v1.065"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2258,98 +2258,102 @@ if tab_planilla:
                 st.markdown("""<div class='plan-header'>
                     <div>Estado</div><div>Propiedad</div><div>Inquilino</div>
                     <div>Próx.Act.</div><div style='text-align:right'>Alquiler</div>
-                    <div>Expensas</div><div style='text-align:right'>Cochera</div>
-                    <div style='text-align:center'>F. Pago</div><div></div>
+                    <div style='text-align:right'>Cochera</div>
+                    <div style='text-align:center'>F. Pago</div>
+                    <div>Expensas</div><div></div>
                 </div>""", unsafe_allow_html=True)
 
-                # ── Filas integradas ──
-                for _, _row in df_cob.iterrows():
-                    _prox_raw = _row["prox_actualizacion"]
-                    _fin_raw  = _row["fin_contrato"]
-                    _class_fila = ""
-                    _prox_str = "—"
-                    try:
-                        if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
-                            _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
-                            _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
-                            if _fin_dt and _prox_dt > _fin_dt:
-                                _prox_str = '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>'
-                                _class_fila = "row-amarillo"
-                            elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
-                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
-                                _class_fila = "row-amarillo"
-                            elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
-                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
-                                _class_fila = "row-azul"
-                            else:
-                                _prox_str = str(_prox_raw)[:7].replace("-", "/")
-                    except Exception:
+                # ── Separar en pendientes y pagados ──
+                df_pendientes = df_cob[df_cob["pagado_mes"] == False]
+                df_pagados    = df_cob[df_cob["pagado_mes"] == True]
+
+                def _render_filas(df_iter, grupo_label=None):
+                    if grupo_label:
+                        st.markdown(f"<div style='background:#495057;color:white;padding:4px 10px;font-size:0.82em;font-weight:600;margin-top:6px;border-radius:4px;'>{grupo_label}</div>", unsafe_allow_html=True)
+                    for _, _row in df_iter.iterrows():
+                        _prox_raw = _row["prox_actualizacion"]
+                        _fin_raw  = _row["fin_contrato"]
+                        _class_fila = ""
                         _prox_str = "—"
-
-                    _estado_badge = '<span class="badge-pago badge-ok">✅ Pagado</span>' if _row["pagado_mes"] else '<span class="badge-pago badge-pend">⏳ Pendiente</span>'
-                    _fecha_pago = _row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—"
-
-                    # Leyenda sobre la fila si corresponde actualizar
-                    _leyenda_html = ""
-                    if _class_fila == "row-amarillo":
-                        _es_renovar = _prox_str == '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>'
-                        _leyenda_txt = "🔄 RENOVAR — Este contrato requiere renovación" if _es_renovar else "📈 ESTE MES — Corresponde actualizar el alquiler"
-                        _leyenda_html = f"<div style='background:#ffe082;padding:3px 10px;font-size:0.78em;font-weight:600;color:#7b4f00;border-left:4px solid #f9a825;border-radius:4px 4px 0 0;'>{_leyenda_txt}</div>"
-                    elif _class_fila == "row-azul":
-                        _leyenda_html = "<div style='background:#90caf9;padding:3px 10px;font-size:0.78em;font-weight:600;color:#0d47a1;border-left:4px solid #1565c0;border-radius:4px 4px 0 0;'>📅 MES PRÓXIMO — Actualización inminente</div>"
-
-                    if _leyenda_html:
-                        st.markdown(_leyenda_html, unsafe_allow_html=True)
-
-                    # Columnas Streamlit con fondo de color via CSS
-                    _bg = {"row-amarillo": "#fff3cd", "row-azul": "#d0e8f7", "": "transparent"}[_class_fila]
-                    st.markdown(f"<div class='plan-row {_class_fila}'>"
-                        f"<div>{_estado_badge}</div>"
-                        f"<div><strong>{_row['alias_propiedad']}</strong></div>"
-                        f"<div>{_row['inquilino']}</div>"
-                        f"<div style='text-align:center'>{_prox_str}</div>"
-                        f"<div style='text-align:right'>{_fmt_num(_row['ultimo_alquiler'])}</div>"
-                        f"<div></div>"  # placeholder para number_input
-                        f"<div style='text-align:right'>{_fmt_num(_row['cochera'])}</div>"
-                        f"<div style='text-align:center'>{_fecha_pago}</div>"
-                        f"<div></div>"  # placeholder para button
-                        f"</div>", unsafe_allow_html=True)
-
-                    # Widgets interactivos alineados con columnas proporcionales al grid
-                    _rc = st.columns([90, 130, 999, 90, 110, 110, 90, 110, 80])
-                    # Fondo de color en la fila de widgets
-                    if _bg != "transparent":
-                        for _rci in _rc:
-                            _rci.markdown(f"<style>div[data-testid='column']{{background:{_bg}}}</style>", unsafe_allow_html=True)
-
-                    # Expensas editable
-                    try:
-                        _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
-                    except (ValueError, TypeError):
-                        _exp_val = 0.0
-                    _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
-                    if _key_exp_plan not in st.session_state:
-                        st.session_state[_key_exp_plan] = _exp_val
-                    _exp_nuevo = _rc[5].number_input(
-                        "Expensas", min_value=0.0, step=500.0,
-                        key=_key_exp_plan, label_visibility="collapsed"
-                    )
-                    if _exp_nuevo != _exp_val:
                         try:
-                            with _pg_conn() as _conn_exp:
-                                with _conn_exp.cursor() as _cur_exp:
-                                    _cur_exp.execute(
-                                        "UPDATE contratos SET expensas = %s WHERE codigo = %s AND empresa_id = %s",
-                                        (_exp_nuevo, int(_row["codigo_contrato"]), _eid_plan)
-                                    )
-                                _conn_exp.commit()
-                            _cached_planilla_cobranzas_mes.clear()
-                        except Exception as _e_exp:
-                            _rc[5].error(f"Error: {_e_exp}")
+                            if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
+                                _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
+                                _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
+                                if _fin_dt and _prox_dt > _fin_dt:
+                                    _prox_str = '<span class="badge-pago badge-renovar">🔄 RENOVAR</span>'
+                                    _class_fila = "row-amarillo"
+                                elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
+                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                    _class_fila = "row-amarillo"
+                                elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
+                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                    _class_fila = "row-azul"
+                                else:
+                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                        except Exception:
+                            _prox_str = "—"
 
-                    # Botón navegación
-                    if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
-                        _ir_a_recibo(_row)
+                        _estado_badge = '<span class="badge-pago badge-ok">✅ Pagado</span>' if _row["pagado_mes"] else '<span class="badge-pago badge-pend">⏳ Pendiente</span>'
+                        _fecha_pago = _row["_pago_fecha"][:10] if _row["_pago_fecha"] else "—"
+
+                        # Leyenda sobre la fila si corresponde actualizar
+                        if _class_fila == "row-amarillo":
+                            _es_renovar = "RENOVAR" in _prox_str
+                            _leyenda_txt = "🔄 RENOVAR — Este contrato requiere renovación" if _es_renovar else "📈 ESTE MES — Corresponde actualizar el alquiler"
+                            st.markdown(f"<div style='background:#ffe082;padding:3px 10px;font-size:0.78em;font-weight:600;color:#7b4f00;border-left:4px solid #f9a825;border-radius:4px 4px 0 0;'>{_leyenda_txt}</div>", unsafe_allow_html=True)
+                        elif _class_fila == "row-azul":
+                            st.markdown("<div style='background:#90caf9;padding:3px 10px;font-size:0.78em;font-weight:600;color:#0d47a1;border-left:4px solid #1565c0;border-radius:4px 4px 0 0;'>📅 MES PRÓXIMO — Actualización inminente</div>", unsafe_allow_html=True)
+
+                        _bg = {"row-amarillo": "#fff3cd", "row-azul": "#d0e8f7", "": "transparent"}[_class_fila]
+                        # Fila visual HTML — expensas al final como placeholder
+                        st.markdown(f"<div class='plan-row {_class_fila}'>"
+                            f"<div>{_estado_badge}</div>"
+                            f"<div><strong>{_row['alias_propiedad']}</strong></div>"
+                            f"<div>{_row['inquilino']}</div>"
+                            f"<div style='text-align:center'>{_prox_str}</div>"
+                            f"<div style='text-align:right'>{_fmt_num(_row['ultimo_alquiler'])}</div>"
+                            f"<div style='text-align:right'>{_fmt_num(_row['cochera'])}</div>"
+                            f"<div style='text-align:center'>{_fecha_pago}</div>"
+                            f"<div></div>"  # placeholder expensas
+                            f"<div></div>"  # placeholder botón
+                            f"</div>", unsafe_allow_html=True)
+
+                        # Widgets interactivos — mismas proporciones que el grid
+                        _rc = st.columns([90, 130, 999, 90, 110, 90, 110, 110, 80])
+
+                        # Expensas editable — columna 7
+                        try:
+                            _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
+                        except (ValueError, TypeError):
+                            _exp_val = 0.0
+                        _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
+                        if _key_exp_plan not in st.session_state:
+                            st.session_state[_key_exp_plan] = _exp_val
+                        _exp_nuevo = _rc[7].number_input(
+                            "Expensas", min_value=0.0, step=500.0,
+                            key=_key_exp_plan, label_visibility="collapsed"
+                        )
+                        if _exp_nuevo != _exp_val:
+                            try:
+                                with _pg_conn() as _conn_exp:
+                                    with _conn_exp.cursor() as _cur_exp:
+                                        _cur_exp.execute(
+                                            "UPDATE contratos SET expensas = %s WHERE codigo = %s AND empresa_id = %s",
+                                            (_exp_nuevo, int(_row["codigo_contrato"]), _eid_plan)
+                                        )
+                                    _conn_exp.commit()
+                                _cached_planilla_cobranzas_mes.clear()
+                            except Exception as _e_exp:
+                                _rc[7].error(f"Error: {_e_exp}")
+
+                        # Botón navegación — columna 8
+                        if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
+                            _ir_a_recibo(_row)
+
+                if not df_pendientes.empty:
+                    _render_filas(df_pendientes, f"⏳ Pendientes de pago — {len(df_pendientes)} contrato(s)")
+                if not df_pagados.empty:
+                    _render_filas(df_pagados, f"✅ Pagados en {_nombre_mes} — {len(df_pagados)} contrato(s)")
 
 
         except Exception as e:
