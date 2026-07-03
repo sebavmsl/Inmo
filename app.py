@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.065"
+APP_VERSION = "v1.066"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2234,13 +2234,13 @@ if tab_planilla:
                     [data-testid="stButton"] { display:none !important; }
                 }
                 .plan-header {
-                    display:grid; grid-template-columns:90px 130px 1fr 90px 110px 110px 90px 110px 80px;
+                    display:grid; grid-template-columns:80px 90px 130px 1fr 90px 110px 90px 110px 110px;
                     background:#2c3e50; color:white; padding:7px 6px;
                     font-weight:600; font-size:0.82em; border-radius:6px 6px 0 0;
                     font-family:Arial,sans-serif;
                 }
                 .plan-row {
-                    display:grid; grid-template-columns:90px 130px 1fr 90px 110px 110px 90px 110px 80px;
+                    display:grid; grid-template-columns:80px 90px 130px 1fr 90px 110px 90px 110px 110px;
                     padding:4px 6px; font-size:0.82em; border-bottom:1px solid #dee2e6;
                     align-items:center; font-family:Arial,sans-serif;
                 }
@@ -2254,14 +2254,15 @@ if tab_planilla:
                 .badge-renovar{ background:#f8d7da; color:#721c24; font-weight:700; font-size:0.8em; }
                 </style>""", unsafe_allow_html=True)
 
-                # ── Encabezado ──
                 st.markdown("""<div class='plan-header'>
-                    <div>Estado</div><div>Propiedad</div><div>Inquilino</div>
+                    <div></div><div>Estado</div><div>Propiedad</div><div>Inquilino</div>
                     <div>Próx.Act.</div><div style='text-align:right'>Alquiler</div>
                     <div style='text-align:right'>Cochera</div>
-                    <div style='text-align:center'>F. Pago</div>
-                    <div>Expensas</div><div></div>
+                    <div style='text-align:center'>F. Pago</div><div>Expensas</div>
                 </div>""", unsafe_allow_html=True)
+
+                # También actualizar el CSS del grid para reflejar el nuevo orden
+                # 💰(80) | Estado(90) | Propiedad(130) | Inquilino(1fr) | Próx(90) | Alquiler(110) | Cochera(90) | F.Pago(110) | Expensas(110)
 
                 # ── Separar en pendientes y pagados ──
                 df_pendientes = df_cob[df_cob["pagado_mes"] == False]
@@ -2305,8 +2306,10 @@ if tab_planilla:
                             st.markdown("<div style='background:#90caf9;padding:3px 10px;font-size:0.78em;font-weight:600;color:#0d47a1;border-left:4px solid #1565c0;border-radius:4px 4px 0 0;'>📅 MES PRÓXIMO — Actualización inminente</div>", unsafe_allow_html=True)
 
                         _bg = {"row-amarillo": "#fff3cd", "row-azul": "#d0e8f7", "": "transparent"}[_class_fila]
-                        # Fila visual HTML — expensas al final como placeholder
+
+                        # Orden: 💰 | Estado | Propiedad | Inquilino | Próx.Act. | Alquiler | Cochera | F.Pago | Expensas
                         st.markdown(f"<div class='plan-row {_class_fila}'>"
+                            f"<div></div>"  # placeholder botón
                             f"<div>{_estado_badge}</div>"
                             f"<div><strong>{_row['alias_propiedad']}</strong></div>"
                             f"<div>{_row['inquilino']}</div>"
@@ -2315,13 +2318,17 @@ if tab_planilla:
                             f"<div style='text-align:right'>{_fmt_num(_row['cochera'])}</div>"
                             f"<div style='text-align:center'>{_fecha_pago}</div>"
                             f"<div></div>"  # placeholder expensas
-                            f"<div></div>"  # placeholder botón
                             f"</div>", unsafe_allow_html=True)
 
-                        # Widgets interactivos — mismas proporciones que el grid
-                        _rc = st.columns([90, 130, 999, 90, 110, 90, 110, 110, 80])
+                        # Widgets — mismas proporciones que el grid CSS
+                        # grid: 💰(80) | Estado(90) | Propiedad(130) | Inquilino(1fr≈999) | Próx(90) | Alquiler(110) | Cochera(90) | F.Pago(110) | Expensas(110)
+                        _rc = st.columns([80, 90, 130, 999, 90, 110, 90, 110, 110])
 
-                        # Expensas editable — columna 7
+                        # Botón — columna 0
+                        if _rc[0].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
+                            _ir_a_recibo(_row)
+
+                        # Expensas editable — columna 8
                         try:
                             _exp_val = float(_row["expensas"]) if _row["expensas"] is not None and str(_row["expensas"]) not in ("", "None", "nan") else 0.0
                         except (ValueError, TypeError):
@@ -2329,7 +2336,7 @@ if tab_planilla:
                         _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
                         if _key_exp_plan not in st.session_state:
                             st.session_state[_key_exp_plan] = _exp_val
-                        _exp_nuevo = _rc[7].number_input(
+                        _exp_nuevo = _rc[8].number_input(
                             "Expensas", min_value=0.0, step=500.0,
                             key=_key_exp_plan, label_visibility="collapsed"
                         )
@@ -2344,11 +2351,7 @@ if tab_planilla:
                                     _conn_exp.commit()
                                 _cached_planilla_cobranzas_mes.clear()
                             except Exception as _e_exp:
-                                _rc[7].error(f"Error: {_e_exp}")
-
-                        # Botón navegación — columna 8
-                        if _rc[8].button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
-                            _ir_a_recibo(_row)
+                                _rc[8].error(f"Error: {_e_exp}")
 
                 if not df_pendientes.empty:
                     _render_filas(df_pendientes, f"⏳ Pendientes de pago — {len(df_pendientes)} contrato(s)")
