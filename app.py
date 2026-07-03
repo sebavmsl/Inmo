@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.073"
+APP_VERSION = "v1.075"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2250,35 +2250,51 @@ if tab_planilla:
                         _ley_text_color = ""
                         _ley_border = ""
                         try:
-                            if _prox_raw is not None and str(_prox_raw) not in ("", "None", "nan"):
-                                _prox_dt = datetime.strptime(str(_prox_raw)[:10], "%Y-%m-%d")
-                                _fin_dt  = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d") if _fin_raw and str(_fin_raw) not in ("", "None", "nan") else None
+                            # Misma lógica que el tablero de control
+                            _fecha_hoy_plan = datetime.now().date()
+
+                            # Fin de contrato
+                            _fin_dt = None
+                            if _fin_raw and str(_fin_raw) not in ("", "None", "nan"):
+                                try: _fin_dt = datetime.strptime(str(_fin_raw)[:10], "%Y-%m-%d").date()
+                                except ValueError: _fin_dt = datetime.strptime(str(_fin_raw)[:10], "%d/%m/%Y").date()
+
+                            # Próxima actualización
+                            _prox_raw_str = str(_prox_raw or "").strip()
+                            if _prox_raw_str and _prox_raw_str not in ("None", "nan"):
+                                try: _prox_dt = datetime.strptime(_prox_raw_str[:10], "%Y-%m-%d").date()
+                                except ValueError: _prox_dt = datetime.strptime(_prox_raw_str[:10], "%d/%m/%Y").date()
+
+                                _mes_actual_p  = _fecha_hoy_plan.replace(day=1)
+                                _mes_proximo_p = _mes_actual_p + dateutil.relativedelta.relativedelta(months=1)
+                                _prox_mes_p    = _prox_dt.replace(day=1)
+
+                                # RENOVAR — igual que tablero
                                 if _fin_dt and _prox_dt > _fin_dt:
+                                    _dias_para_vencer = (_fin_dt - _fecha_hoy_plan).days
                                     _prox_str = "🔄 RENOVAR"
-                                    _dias_para_vencer = (_fin_dt - _hoy_plan.date()).days
                                     if _dias_para_vencer <= 60:
-                                        _bg = "background:#fde8e8"  # rojo claro
+                                        _bg = "background:#fde8e8"
                                         _leyenda = f"🚨 RENOVAR — El contrato vence en {_dias_para_vencer} día(s)"
-                                        _ley_color = "#ffb3b3"
-                                        _ley_text_color = "#7b0000"
-                                        _ley_border = "#e53935"
-                    
-                                elif _prox_dt.year == _mes_actual_dt.year and _prox_dt.month == _mes_actual_dt.month:
-                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                        _ley_color, _ley_text_color, _ley_border = "#ffb3b3", "#7b0000", "#e53935"
+
+                                # ESTE MES — igual que tablero
+                                elif _prox_mes_p == _mes_actual_p:
+                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
                                     _bg = "background:#fff3cd"
                                     _leyenda = "📈 ESTE MES — Corresponde actualizar el alquiler"
-                                    _ley_color = "#ffe082"
-                                    _ley_text_color = "#7b4f00"
-                                    _ley_border = "#f9a825"
-                                elif _prox_dt.year == _mes_proximo_dt.year and _prox_dt.month == _mes_proximo_dt.month:
-                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                    _ley_color, _ley_text_color, _ley_border = "#ffe082", "#7b4f00", "#f9a825"
+
+                                # MES PRÓXIMO — igual que tablero
+                                elif _prox_mes_p == _mes_proximo_p:
+                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
                                     _bg = "background:#d0e8f7"
                                     _leyenda = "📅 MES PRÓXIMO — Actualización inminente"
-                                    _ley_color = "#90caf9"
-                                    _ley_text_color = "#0d47a1"
-                                    _ley_border = "#1565c0"
+                                    _ley_color, _ley_text_color, _ley_border = "#90caf9", "#0d47a1", "#1565c0"
+
                                 else:
-                                    _prox_str = str(_prox_raw)[:7].replace("-", "/")
+                                    _prox_str = _prox_raw_str[:7].replace("-", "/")
+
                         except Exception:
                             _prox_str = "—"
 
