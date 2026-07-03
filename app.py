@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.060"
+APP_VERSION = "v1.061"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -2548,38 +2548,46 @@ if tab_pagos:
             _raw_garantia = c_datos.get('monto_garantia')
             val_teorico_garantia = _safe_float(_raw_garantia) if _raw_garantia is not None else _monto_inicial
             if val_teorico_garantia == 0.0:
-                val_teorico_garantia = _monto_inicial
-            cuotas_dep_pactadas     = _safe_int(c_datos.get('cuotas_deposito'), 1)
-            try:
-                pagado_garantia_inquilino = _safe_float(c_datos.get('garantia'))
-            except (ValueError, TypeError):
-                pagado_garantia_inquilino = 0.0
-            saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
-            cuotas_dep_pagadas       = _safe_int(c_datos.get('cuotas_deposito_pagadas'), 0)
-            cuotas_dep_pendientes    = max(0, cuotas_dep_pactadas - cuotas_dep_pagadas)
-
-            valor_cuota_dep = round(val_teorico_garantia / cuotas_dep_pactadas, 2) if cuotas_dep_pactadas > 0 else 0.0
-            default_dep = min(valor_cuota_dep, saldo_garantia_inquilino) if cuotas_dep_pendientes > 0 else 0.0
-
-            with ed_col_esp2:
-                if cuotas_dep_pendientes > 0:
-                    st.info(
-                        f"🛡️ Depósito: cuota {cuotas_dep_pagadas + 1} de {cuotas_dep_pactadas} — "
-                        f"valor cuota: **$ {valor_cuota_dep:,.2f}** — saldo total: $ {saldo_garantia_inquilino:,.2f}"
-                    )
-                else:
-                    st.success("🛡️ Depósito de Garantía: ✅ Completamente abonado.")
-            monto_garantia_pago = ed_col_esp2.number_input(
-                "🛡️ Respaldo con Monto Depositado (Garantía) ($):",
-                min_value=0.0,
-                value=default_dep,
-                step=1000.0,
-                help=(
-                    f"Total pactado: ${val_teorico_garantia:,.2f} en {cuotas_dep_pactadas} cuota(s). "
-                    f"Depositado: ${pagado_garantia_inquilino:,.2f} ({cuotas_dep_pagadas} cuota(s)). "
-                    f"Pendientes: {cuotas_dep_pendientes} cuota(s) — Saldo: ${saldo_garantia_inquilino:,.2f}"
+                # Sin garantía pactada — no usar monto_inicial como fallback
+                with ed_col_esp2:
+                    st.info("🛡️ Sin garantía pactada.")
+                monto_garantia_pago = ed_col_esp2.number_input(
+                    "🛡️ Respaldo con Monto Depositado (Garantía) ($):",
+                    min_value=0.0, value=0.0, step=1000.0,
+                    disabled=True
                 )
-            )
+            else:
+                cuotas_dep_pactadas     = _safe_int(c_datos.get('cuotas_deposito'), 1)
+                try:
+                    pagado_garantia_inquilino = _safe_float(c_datos.get('garantia'))
+                except (ValueError, TypeError):
+                    pagado_garantia_inquilino = 0.0
+                saldo_garantia_inquilino = max(0.0, val_teorico_garantia - pagado_garantia_inquilino)
+                cuotas_dep_pagadas       = _safe_int(c_datos.get('cuotas_deposito_pagadas'), 0)
+                cuotas_dep_pendientes    = max(0, cuotas_dep_pactadas - cuotas_dep_pagadas)
+
+                valor_cuota_dep = round(val_teorico_garantia / cuotas_dep_pactadas, 2) if cuotas_dep_pactadas > 0 else 0.0
+                default_dep = min(valor_cuota_dep, saldo_garantia_inquilino) if cuotas_dep_pendientes > 0 else 0.0
+
+                with ed_col_esp2:
+                    if cuotas_dep_pendientes > 0:
+                        st.info(
+                            f"🛡️ Depósito: cuota {cuotas_dep_pagadas + 1} de {cuotas_dep_pactadas} — "
+                            f"valor cuota: **$ {valor_cuota_dep:,.2f}** — saldo total: $ {saldo_garantia_inquilino:,.2f}"
+                        )
+                    else:
+                        st.success("🛡️ Depósito de Garantía: ✅ Completamente abonado.")
+                monto_garantia_pago = ed_col_esp2.number_input(
+                    "🛡️ Respaldo con Monto Depositado (Garantía) ($):",
+                    min_value=0.0,
+                    value=default_dep,
+                    step=1000.0,
+                    help=(
+                        f"Total pactado: ${val_teorico_garantia:,.2f} en {cuotas_dep_pactadas} cuota(s). "
+                        f"Depositado: ${pagado_garantia_inquilino:,.2f} ({cuotas_dep_pagadas} cuota(s)). "
+                        f"Pendientes: {cuotas_dep_pendientes} cuota(s) — Saldo: ${saldo_garantia_inquilino:,.2f}"
+                    )
+                )
 
             # Re-calculamos dinámicamente la lista de servicios basada en los nuevos inputs de pantalla
             detalles_recibo_servicios = []
