@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.107"
+APP_VERSION = "v1.127"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1385,6 +1385,9 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
             c.prox_actualizacion                        AS prox_actualizacion,
             c.fin_contrato                              AS fin_contrato,
             c.alquiler                                  AS ultimo_alquiler,
+            c.monto_inicial                             AS monto_inicial,
+            c.alquiler_calculado                        AS alquiler_calculado,
+            c.alquiler_calculado_fecha                  AS alquiler_calculado_fecha,
             c.expensas                                  AS expensas,
             c.cochera                                   AS cochera
         FROM contratos c
@@ -1413,7 +1416,7 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
             _pagos = {r["codigo_contrato"]: r for r in _cur_pm.fetchall()}
 
     df_contratos["pagado_mes"] = df_contratos["codigo_contrato"].apply(
-        lambda cod: (_pagos.get(cod, {}).get("saldo_pendiente") or 1) == 0 if cod in _pagos else False
+        lambda cod: float(_pagos.get(cod, {}).get("saldo_pendiente") or 0) == 0.0 if cod in _pagos else False
     )
     df_contratos["_pago_fecha"] = df_contratos["codigo_contrato"].apply(
         lambda cod: _pagos.get(cod, {}).get("fecha", "") if cod in _pagos else ""
@@ -2212,6 +2215,10 @@ if tab_dashboard:
 if tab_planilla:
     with tab_planilla:
         st.subheader("📋 Planilla de Cobranzas del Mes")
+        # Limpiar caché si se acaba de impactar un cobro
+        if st.session_state.get("_limpiar_planilla_cache", False):
+            _cached_planilla_cobranzas_mes.clear()
+            st.session_state["_limpiar_planilla_cache"] = False
 
         _pf_plan = st.session_state.get("propietario_filtro", "")
         _pf_plan_activo = rol_actual == "propietario" and bool(_pf_plan)
@@ -2235,8 +2242,74 @@ if tab_planilla:
             else:
                 _pagaron = df_cob[df_cob["pagado_mes"] == True]
                 _faltan  = df_cob[df_cob["pagado_mes"] == False]
-                _res_col1, _res_col2 = st.columns([4, 1])
+                _res_col1, _res_col2, _res_col3 = st.columns([4, 1, 1])
                 _res_col1.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
+
+                # Botón actualizar valores ICL/IPC del mes
+                if _res_col3.button("🔄 Actualizar índices", key="btn_actualizar_indices", use_container_width=True, help="Calcula y guarda alquiler_calculado para todos los contratos ICL/IPC con actualización en el mes actual"):
+                    _hoy_act = datetime.now().date()
+                    _mes_act = _hoy_act.replace(day=1)
+                    _ok_count = 0
+                    _err_count = 0
+                    with st.spinner("⏳ Calculando índices para contratos del mes..."):
+                        # Obtener contratos ICL/IPC con prox_actualizacion en el mes actual ya vencida
+                        try:
+                            with _pg_conn() as _conn_act:
+                                with _conn_act.cursor() as _cur_act:
+                                    _cur_act.execute("""
+                                        SELECT codigo, indice, inicio_contrato, monto_inicial,
+                                               prox_actualizacion, act_contrato
+                                        FROM contratos
+                                        WHERE empresa_id = %s AND estado = 'Activo'
+                                        AND indice IN ('ICL', 'IPC')
+                                        AND prox_actualizacion IS NOT NULL
+                                    """, (_eid_plan,))
+                                    _contratos_act = _cur_act.fetchall()
+
+                            _fecha_calc = datetime.now().strftime("%Y-%m-%d")
+                            for _c in _contratos_act:
+                                try:
+                                    _prox_d = datetime.strptime(str(_c["prox_actualizacion"])[:10], "%Y-%m-%d").date()
+                                    if _prox_d.replace(day=1) != _mes_act or _prox_d > _hoy_act:
+                                        continue  # No corresponde calcular este mes o aún no llegó la fecha
+                                    # Calcular meses desde inicio
+                                    _ini_str = str(_c["inicio_contrato"])[:10]
+                                    try: _ini_d = datetime.strptime(_ini_str, "%Y-%m-%d").date()
+                                    except: _ini_d = datetime.strptime(_ini_str, "%d/%m/%Y").date()
+                                    _meses_act = int(_c["act_contrato"] or 4)
+                                    _ultima_act = _prox_d - dateutil.relativedelta.relativedelta(months=_meses_act)
+                                    _delta = dateutil.relativedelta.relativedelta(_ultima_act, _ini_d)
+                                    _meses_calc = (_delta.years * 12) + _delta.months
+                                    if _meses_calc <= 0: _meses_calc = _meses_act
+                                    _ini_str_fmt = _ini_d.strftime("%Y-%m-%d")
+                                    _monto_ini = float(_c["monto_inicial"] or 0)
+                                    if _monto_ini <= 0: continue
+                                    if _c["indice"] == "ICL":
+                                        _val_calc = calcular_valor_actualizado_icl(_monto_ini, _ini_str_fmt, _meses_calc)
+                                    else:
+                                        _val_calc = calcular_valor_actualizado_ipc(_monto_ini, _ini_str_fmt, _meses_calc)
+                                    if _val_calc:
+                                        with _pg_conn() as _conn_upd:
+                                            with _conn_upd.cursor() as _cur_upd:
+                                                _cur_upd.execute(
+                                                    "UPDATE contratos SET alquiler_calculado = %s, alquiler_calculado_fecha = %s WHERE codigo = %s",
+                                                    (_val_calc, _fecha_calc, _c["codigo"])
+                                                )
+                                            _conn_upd.commit()
+                                        _ok_count += 1
+                                except Exception as _e_ci:
+                                    logging.warning(f"[actualizar_indices] Error en contrato {_c['codigo']}: {_e_ci}")
+                                    _err_count += 1
+                        except Exception as _e_act:
+                            st.error(f"Error al actualizar índices: {_e_act}")
+
+                    _cached_planilla_cobranzas_mes.clear()
+                    if _ok_count > 0:
+                        st.success(f"✅ {_ok_count} contrato(s) actualizados correctamente.")
+                    if _err_count > 0:
+                        st.warning(f"⚠️ {_err_count} contrato(s) no pudieron calcularse.")
+                    if _ok_count == 0 and _err_count == 0:
+                        st.info("ℹ️ No hay contratos ICL/IPC con actualización pendiente en el mes actual.")
 
                 # ── Botón imprimir: construye y muestra HTML solo al hacer clic ──
                 # ── Generar PDF de planilla para descargar ──
@@ -2265,10 +2338,61 @@ if tab_planilla:
                         _st_sub))
                     story.append(Spacer(1, 3*mm))
 
+                    # Leyenda de colores
+                    from reportlab.platypus import Table as _Table, TableStyle as _TableStyle
+                    _ley_data = [[
+                        Paragraph("<b>Referencias:</b>", _st_cell),
+                        Paragraph("  ", _st_cell),
+                        Paragraph("📈 Actualizar este mes", _st_cell),
+                        Paragraph("  ", _st_cell),
+                        Paragraph("📅 Actualizar mes próximo", _st_cell),
+                        Paragraph("  ", _st_cell),
+                        Paragraph("🔄 Renovar contrato", _st_cell),
+                    ]]
+                    _ley_tbl = _Table(_ley_data, colWidths=[30*mm, 4*mm, 55*mm, 4*mm, 58*mm, 4*mm, 45*mm])
+                    _ley_tbl.setStyle(_TableStyle([
+                        ("BACKGROUND", (2,0), (2,0), colors.HexColor("#fff3cd")),
+                        ("BACKGROUND", (4,0), (4,0), colors.HexColor("#d0e8f7")),
+                        ("BACKGROUND", (6,0), (6,0), colors.HexColor("#fde8e8")),
+                        ("FONTSIZE",   (0,0), (-1,-1), 7),
+                        ("VALIGN",     (0,0), (-1,-1), "MIDDLE"),
+                        ("TOPPADDING", (0,0), (-1,-1), 2),
+                        ("BOTTOMPADDING", (0,0), (-1,-1), 2),
+                        ("LEFTPADDING",   (0,0), (-1,-1), 4),
+                        ("GRID", (2,0), (2,0), 0.3, colors.HexColor("#f9a825")),
+                        ("GRID", (4,0), (4,0), 0.3, colors.HexColor("#1565c0")),
+                        ("GRID", (6,0), (6,0), 0.3, colors.HexColor("#e53935")),
+                    ]))
+                    story.append(_ley_tbl)
+                    story.append(Spacer(1, 3*mm))
+
                     def _fn(val):
                         try:
                             return f"$ {float(val):,.0f}" if val is not None and str(val) not in ("","None","nan") else "—"
                         except: return "—"
+
+                    def _fn_alq(rp):
+                        _hoy = datetime.now().date()
+                        _mes_actual = _hoy.replace(day=1)
+                        # 1. alquiler_calculado del mes actual
+                        try:
+                            _calc = float(rp["alquiler_calculado"]) if rp["alquiler_calculado"] is not None and str(rp["alquiler_calculado"]) not in ("","None","nan") else 0.0
+                            _cf = str(rp.get("alquiler_calculado_fecha") or "").strip()
+                            if _calc > 0 and _cf and _cf not in ("","None","nan"):
+                                if datetime.strptime(_cf[:10], "%Y-%m-%d").date().replace(day=1) == _mes_actual:
+                                    return _fn(_calc)
+                        except: pass
+                        # 2. alquiler vigente
+                        try:
+                            _alq = float(rp["ultimo_alquiler"]) if rp["ultimo_alquiler"] is not None and str(rp["ultimo_alquiler"]) not in ("","None","nan") else 0.0
+                            if _alq > 0: return _fn(_alq)
+                        except: pass
+                        # 3. monto_inicial
+                        try:
+                            _ini = float(rp["monto_inicial"]) if rp["monto_inicial"] is not None and str(rp["monto_inicial"]) not in ("","None","nan") else 0.0
+                            if _ini > 0: return _fn(_ini)
+                        except: pass
+                        return "—"
 
                     _fh = datetime.now().date()
 
@@ -2318,7 +2442,7 @@ if tab_planilla:
                             Paragraph(f"<b>{_rp['alias_propiedad']}</b>", _st_bold),
                             Paragraph(_rp["inquilino"], _st_cell),
                             _ps,
-                            _fn(_rp["ultimo_alquiler"]),
+                            _fn_alq(_rp),
                             _fn(_rp["cochera"]),
                             _fp,
                             _fn(_rp["expensas"]),
@@ -2398,6 +2522,64 @@ if tab_planilla:
                         return f"$ {float(val):,.0f}" if val is not None and str(val) not in ("", "None", "nan") else "—"
                     except (ValueError, TypeError):
                         return "—"
+
+                def _alquiler_display(row):
+                    """
+                    Prioridad:
+                    1. alquiler_calculado si fue calculado este mes
+                    2. alquiler (último cobrado)
+                    3. monto_inicial
+                    4. Alerta si prox_actualizacion ya pasó en este mes pero no hay valor calculado
+                    5. —
+                    """
+                    _hoy = datetime.now().date()
+                    _mes_actual = _hoy.replace(day=1)
+
+                    # 1. alquiler_calculado del mes actual
+                    try:
+                        _calc = float(row["alquiler_calculado"]) if row["alquiler_calculado"] is not None and str(row["alquiler_calculado"]) not in ("","None","nan") else 0.0
+                        _calc_fecha_str = str(row["alquiler_calculado_fecha"] or "").strip()
+                        if _calc > 0 and _calc_fecha_str and _calc_fecha_str not in ("","None","nan"):
+                            _calc_fecha = datetime.strptime(_calc_fecha_str[:10], "%Y-%m-%d").date()
+                            if _calc_fecha.replace(day=1) == _mes_actual:
+                                return _fmt_num(_calc)
+                    except: pass
+
+                    # 2. alquiler vigente (último cobrado)
+                    try:
+                        _alq = float(row["ultimo_alquiler"]) if row["ultimo_alquiler"] is not None and str(row["ultimo_alquiler"]) not in ("","None","nan") else 0.0
+                        if _alq > 0:
+                            return _fmt_num(_alq)
+                    except: pass
+
+                    # 3. monto_inicial
+                    try:
+                        _ini = float(row["monto_inicial"]) if row["monto_inicial"] is not None and str(row["monto_inicial"]) not in ("","None","nan") else 0.0
+                        if _ini > 0:
+                            return _fmt_num(_ini)
+                    except: pass
+
+                    return "—"
+
+                def _alquiler_alerta(row):
+                    """Devuelve alerta si prox_actualizacion ya pasó en este mes pero no hay valor calculado del mes."""
+                    _hoy = datetime.now().date()
+                    _mes_actual = _hoy.replace(day=1)
+                    try:
+                        _prox = row["prox_actualizacion"]
+                        if _prox and str(_prox) not in ("","None","nan"):
+                            _prox_d = datetime.strptime(str(_prox)[:10], "%Y-%m-%d").date()
+                            # La actualización corresponde a este mes y ya pasó
+                            if _prox_d.replace(day=1) == _mes_actual and _prox_d <= _hoy:
+                                # Verificar si tiene valor calculado del mes
+                                _calc_fecha_str = str(row.get("alquiler_calculado_fecha") or "").strip()
+                                if not _calc_fecha_str or _calc_fecha_str in ("","None","nan"):
+                                    return True
+                                _calc_fecha = datetime.strptime(_calc_fecha_str[:10], "%Y-%m-%d").date()
+                                if _calc_fecha.replace(day=1) != _mes_actual:
+                                    return True
+                    except: pass
+                    return False
 
                 # ── Renderizado con st.columns (todo en la misma línea) ──
                 _COLS = [0.4, 0.3, 1.2, 2, 0.7, 1, 0.8, 0.9, 1]
@@ -2507,8 +2689,18 @@ if tab_planilla:
                         # Próx. actualización
                         _rc[4].markdown(_cel(_prox_str, align="center"), unsafe_allow_html=True)
 
-                        # Alquiler
-                        _rc[5].markdown(_cel(_fmt_num(_row["ultimo_alquiler"]), align="right"), unsafe_allow_html=True)
+                        # Alquiler — con alerta si corresponde
+                        _alq_display = _alquiler_display(_row)
+                        _alq_alerta  = _alquiler_alerta(_row)
+                        if _alq_alerta:
+                            _rc[5].markdown(
+                                f"<div style='{_bg};font-size:0.75em;padding:5px 4px;border-bottom:1px solid #dee2e6;"
+                                f"color:#856404;background:#fff3cd;border-radius:3px;' title='Los valores no han sido cargados para generar un nuevo cálculo'>"
+                                f"⚠️ Sin calcular</div>",
+                                unsafe_allow_html=True
+                            )
+                        else:
+                            _rc[5].markdown(_cel(_alq_display, align="right"), unsafe_allow_html=True)
 
                         # Cochera
                         _rc[6].markdown(_cel(_fmt_num(_row["cochera"]), align="right"), unsafe_allow_html=True)
@@ -2560,6 +2752,11 @@ if tab_pagos:
         st.session_state.contrato_impactado_id = None
     with tab_pagos:
         st.subheader("💰 Registrar Cobro Mensual y Emitir Comprobantes")
+
+        # Mostrar mensajes del último impacto si los hay
+        if "_msgs_impacto" in st.session_state:
+            for _tipo_msg, _txt_msg in st.session_state.pop("_msgs_impacto"):
+                getattr(st, _tipo_msg)(_txt_msg)
 
         # ── Cotización USD — autocargar BNA al abrir la pestaña ───────
         # Auto-cargar cotización BNA si no hay una guardada
@@ -2666,19 +2863,21 @@ if tab_pagos:
                 meses_a_sumar = opciones_actualizacion.get(act_contrato_sel, 6)
                 
                 fecha_hoy = datetime.now().date()
-                prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                
-                while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
-                    prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                if meses_a_sumar == 0:
+                    prox_actualizacion_calculada = fin_contrato_dt + dateutil.relativedelta.relativedelta(days=1)
+                else:
+                    prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                    while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
+                        prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
                     
-                necesita_renovacion = prox_actualizacion_calculada > fin_contrato_dt
+                necesita_renovacion = False if meses_a_sumar == 0 else prox_actualizacion_calculada > fin_contrato_dt
                 
                 diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato_dt)
                 total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
                 if total_meses_transcurridos < 0: total_meses_transcurridos = 0
                 mes_actual_contrato_vivo = total_meses_transcurridos + 1
                 
-                es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
+                es_mes_de_actualizacion = False if meses_a_sumar == 0 else ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
                 
                 if necesita_renovacion:
                     st.error("🚨 Estado del Período: **RENOVAR** (La fecha de próxima actualización excede el fin del contrato)")
@@ -2898,11 +3097,15 @@ if tab_pagos:
             # Calcular la última fecha de actualización ya aplicada.
             # Ejemplo: inicio 1-ene-25, trimestral, hoy 10-jun-26 → prox = 1-jul-26 → última = 1-abr-26
             try:
-                _ultima_act_dt = prox_actualizacion_calculada - dateutil.relativedelta.relativedelta(months=int(meses_a_sumar))
-                _delta_ultima = dateutil.relativedelta.relativedelta(_ultima_act_dt, inicio_contrato_dt)
-                _meses_hasta_ultima_act = (_delta_ultima.years * 12) + _delta_ultima.months
-                if _meses_hasta_ultima_act <= 0:
-                    _meses_hasta_ultima_act = int(meses_a_sumar)
+                if meses_a_sumar == 0:
+                    _ultima_act_dt = inicio_contrato_dt
+                    _meses_hasta_ultima_act = 0
+                else:
+                    _ultima_act_dt = prox_actualizacion_calculada - dateutil.relativedelta.relativedelta(months=int(meses_a_sumar))
+                    _delta_ultima = dateutil.relativedelta.relativedelta(_ultima_act_dt, inicio_contrato_dt)
+                    _meses_hasta_ultima_act = (_delta_ultima.years * 12) + _delta_ultima.months
+                    if _meses_hasta_ultima_act <= 0:
+                        _meses_hasta_ultima_act = int(meses_a_sumar)
             except Exception:
                 _meses_hasta_ultima_act = int(meses_a_sumar)
 
@@ -2920,6 +3123,20 @@ if tab_pagos:
                         valor_auto_recibo = calcular_valor_actualizado_ipc(
                             val_monto_ini_recibo, inicio_contrato_recibo, _meses_hasta_ultima_act
                         )
+
+            # Guardar alquiler_calculado en la BD si se obtuvo un valor válido
+            if valor_auto_recibo is not None:
+                try:
+                    _fecha_calc_hoy = datetime.now().strftime("%Y-%m-%d")
+                    with _pg_conn() as _conn_calc:
+                        with _conn_calc.cursor() as _cur_calc:
+                            _cur_calc.execute(
+                                "UPDATE contratos SET alquiler_calculado = %s, alquiler_calculado_fecha = %s WHERE codigo = %s",
+                                (valor_auto_recibo, _fecha_calc_hoy, c_datos['codigo'])
+                            )
+                        _conn_calc.commit()
+                except Exception as _e_calc:
+                    logging.warning(f"[alquiler_calculado] No se pudo guardar: {_e_calc}")
 
             # Valor por defecto del campo editable:
             # - Activado: ICL/IPC calculado → alquiler vigente → monto inicial (se autocompleta)
@@ -3518,15 +3735,20 @@ if tab_pagos:
 
                     conn.commit()
                     st.cache_data.clear()
-                    st.success(f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")
+                    _cached_planilla_cobranzas_mes.clear()
+                    st.session_state["_limpiar_planilla_cache"] = True
+
+                    # Guardar mensajes en session_state para mostrarlos después del rerun
+                    _msgs_impacto = [("success", f"✔️ Cobro de {mes_periodo_texto} guardado. Abonado: $ {monto_abonado:,.2f} de $ {_total_a_cubrir:,.2f}. ¡Contrato avanzado al Mes {nuevo_mes_vivo}!")]
                     if saldo_pendiente > 0:
-                        st.warning(f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}")
+                        _msgs_impacto.append(("warning", f"⚠️ Saldo pendiente del inquilino: $ {saldo_pendiente:,.2f}"))
                     elif saldo_pendiente < 0:
-                        st.info(f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor).")
+                        _msgs_impacto.append(("info", f"✅ El inquilino pagó $ {abs(saldo_pendiente):,.2f} de más (a su favor)."))
                     if monto_honorarios_pago > 0:
-                        st.info(f"🔄 Honorarios: cuota {nuevas_cuotas_hon_pagadas} de {cuotas_hon_pactadas} cobrada. Acumulado: $ {nuevos_honorarios_acumulados:,.2f}")
+                        _msgs_impacto.append(("info", f"🔄 Honorarios: cuota {nuevas_cuotas_hon_pagadas} de {cuotas_hon_pactadas} cobrada. Acumulado: $ {nuevos_honorarios_acumulados:,.2f}"))
                     if monto_garantia_pago > 0:
-                        st.info(f"🛡️ Depósito Garantía: cuota {nuevas_cuotas_dep_pagadas} de {cuotas_dep_pactadas} cobrada. Acumulado: $ {nueva_garantia_acumulada:,.2f}")
+                        _msgs_impacto.append(("info", f"🛡️ Depósito Garantía: cuota {nuevas_cuotas_dep_pagadas} de {cuotas_dep_pactadas} cobrada. Acumulado: $ {nueva_garantia_acumulada:,.2f}"))
+                    st.session_state["_msgs_impacto"] = _msgs_impacto
 
                     # Activar flag para mostrar el PDF sin recargar la página
                     st.session_state.pago_impactado = True
@@ -3541,6 +3763,7 @@ if tab_pagos:
                         round(st.session_state.get(f"extra_monto_{c_datos['codigo']}", 0.0), 2),
                         st.session_state.get(f"extra_desc_{c_datos['codigo']}", "").strip(),
                     )
+                    st.rerun()
 
                 except Exception as e:
                     st.error(f"Error al procesar el impacto en caja: {e}")
@@ -4258,7 +4481,7 @@ if tab_carga:
                 # cada widget. Streamlit ignora value= en rerenders si la key
                 # ya existe — hay que sobrescribirla directamente.
                 # ══════════════════════════════════════════════════════════════
-                opciones_actualizacion_tmp = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+                opciones_actualizacion_tmp = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24, "Sin actualización": 0}
                 indices_disponibles_tmp = ["ICL", "IPC", "UVA", "Otro"]
     
                 if u:
@@ -4465,7 +4688,8 @@ if tab_carga:
             cf3, cf4, cf5 = st.columns([2, 1, 1])
             opciones_actualizacion = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
                 
-            _opciones_act_map = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24}
+            _opciones_act_map = {"Mensual": 1, "Bimensual": 2, "Trimestral": 3, "Cuatrimestral": 4, "Semestral": 6, "Anual": 12, "Bianual": 24, "Sin actualización": 0}
+            opciones_actualizacion["Sin actualización"] = 0
             act_contrato_seleccionado = cf3.selectbox(
                 "Actualización Contrato (Frecuencia):", 
                 list(opciones_actualizacion.keys()), 
@@ -4475,12 +4699,14 @@ if tab_carga:
             meses_a_sumar = opciones_actualizacion[act_contrato_seleccionado]
     
             fecha_hoy = datetime.now().date()
-            prox_actualizacion_calculada = inicio_contrato + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+            if meses_a_sumar == 0:
+                prox_actualizacion_calculada = fin_contrato + dateutil.relativedelta.relativedelta(days=1)
+            else:
+                prox_actualizacion_calculada = inicio_contrato + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
+                while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato:
+                    prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
     
-            while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato:
-                prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-    
-            necesita_renovacion = prox_actualizacion_calculada > fin_contrato
+            necesita_renovacion = False if meses_a_sumar == 0 else prox_actualizacion_calculada > fin_contrato
     
             diferencia_hoy = dateutil.relativedelta.relativedelta(fecha_hoy, inicio_contrato)
             total_meses_transcurridos = (diferencia_hoy.years * 12) + diferencia_hoy.months
@@ -4488,7 +4714,7 @@ if tab_carga:
                 total_meses_transcurridos = 0
             mes_actual_contrato_vivo = total_meses_transcurridos + 1
     
-            es_mes_de_actualizacion = ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
+            es_mes_de_actualizacion = False if meses_a_sumar == 0 else ((mes_actual_contrato_vivo - 1) % meses_a_sumar) == 0
     
             # Mostrar alertas de período
             if necesita_renovacion:
@@ -4522,8 +4748,8 @@ if tab_carga:
             cv1, cv2 = st.columns(2)
                 
             # Valores con fallback seguro
-            val_monto_ini = float(u['monto_inicial']) if u and u.get('monto_inicial') is not None else 80000.0
-            val_alq_ult = float(u['alquiler']) if u and u.get('alquiler') not in (None, 0, 0.0) else val_monto_ini
+            val_monto_ini = float(u['monto_inicial']) if u and u.get('monto_inicial') is not None else 0.0
+            val_alq_ult = float(u['alquiler']) if u and u.get('alquiler') not in (None, 0, 0.0) else 0.0
                 
             monto_inicial = cv1.number_input(
                 "Monto Inicial ($):", 
@@ -4551,13 +4777,17 @@ if tab_carga:
                 disabled=not permitir_edicion,
                 key="indice_sel_main"
             )
+            # Sincronizar automáticamente el intervalo con la frecuencia seleccionada
+            if meses_a_sumar > 0:
+                st.session_state["meses_atras_main"] = meses_a_sumar
             meses_atras = cv_meses.number_input(
                 "Intervalo de Meses para Ajustar:", 
                 min_value=1, 
                 max_value=24, 
-                value=int(st.session_state.get("meses_atras_main", meses_a_sumar)), 
-                disabled=not permitir_edicion,
-                key="meses_atras_main"
+                value=meses_a_sumar if meses_a_sumar > 0 else 1,
+                disabled=True,
+                key="meses_atras_main",
+                help="Se sincroniza automáticamente con la frecuencia seleccionada."
             )
                 
             indice_final = st.text_input(
@@ -4578,8 +4808,14 @@ if tab_carga:
             # ── AUTO-CÁLCULO ICL / IPC ────────────────────────────────────────────
             valor_auto = None
             indice_upper = indice_final.upper()
-    
-            if permitir_edicion and indice_upper in ("ICL", "IPC"):
+            _hoy_carga = datetime.now().date()
+            _mismo_mes_inicio = (
+                inicio_contrato.year == _hoy_carga.year and
+                inicio_contrato.month == _hoy_carga.month
+            )
+            logging.info(f"[carga_contrato] inicio={inicio_contrato}, hoy={_hoy_carga}, mismo_mes={_mismo_mes_inicio}, monto_ini={monto_inicial}")
+
+            if permitir_edicion and indice_upper in ("ICL", "IPC") and not _mismo_mes_inicio:
                 with st.spinner(f"⏳ Consultando {indice_upper}..."):
                     if indice_upper == "ICL":
                         valor_auto = calcular_valor_actualizado_icl(
@@ -4590,7 +4826,7 @@ if tab_carga:
                             monto_inicial, inicio_contrato, int(meses_atras)
                         )
     
-            if valor_auto is not None:
+            if valor_auto is not None and not _mismo_mes_inicio:
                 valor_auto_fmt = f"$ {valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
                 c_web2.metric(
                     label=f"📡 Auto {indice_upper} (oficial)",
@@ -4599,6 +4835,17 @@ if tab_carga:
                 )
                 valor_por_defecto_fmt = f"{valor_auto:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             else:
+                # Si el mes de inicio es el mes actual, usar monto_inicial como default
+                if _mismo_mes_inicio and monto_inicial > 0:
+                    _def_base = monto_inicial
+                    # Forzar session_state para pisar cualquier valor previo calculado
+                    _fmt_ini = f"{monto_inicial:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    st.session_state["alquiler_actualizado_main"] = _fmt_ini
+                    _def_base = monto_inicial
+                elif alquiler and alquiler > 0:
+                    _def_base = alquiler
+                else:
+                    _def_base = 0.0
                 if permitir_edicion and indice_upper in ("ICL", "IPC"):
                     fuente_c = "BCRA" if indice_upper == "ICL" else "INDEC"
                     c_web2.warning(
@@ -4609,7 +4856,8 @@ if tab_carga:
                         _obtener_icl_bcra_xls.clear()
                         _obtener_ipc_indec.clear()
                         st.rerun()
-                valor_por_defecto_fmt = f"{alquiler:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+                _def_val_act = _def_base
+                valor_por_defecto_fmt = f"{_def_val_act:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
             alquiler_actualizado_texto = c_web3.text_input(
                 "Valor Actualizado ($):",
