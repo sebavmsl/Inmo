@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.127"
+APP_VERSION = "v1.128"
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -4846,7 +4846,7 @@ if tab_carga:
                     _def_base = alquiler
                 else:
                     _def_base = 0.0
-                if permitir_edicion and indice_upper in ("ICL", "IPC"):
+                if permitir_edicion and indice_upper in ("ICL", "IPC") and not _mismo_mes_inicio:
                     fuente_c = "BCRA" if indice_upper == "ICL" else "INDEC"
                     c_web2.warning(
                         f"⚠️ No se pudo obtener el índice desde {fuente_c}. "
