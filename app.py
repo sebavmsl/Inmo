@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.141"
+APP_VERSION = "v1.142"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3220,8 +3220,9 @@ if tab_pagos:
                 desglose_pantalla_pdf.append({"Concepto": "💼 Honorarios Inmobiliaria (Comisión de Contrato)", "Monto": monto_honorarios_pago})
                 
             if monto_garantia_pago > 0:
-                detalles_recibo_servicios.append(f" - Respaldo Monto Depositado: $ {monto_garantia_pago:,.2f}")
-                desglose_pantalla_pdf.append({"Concepto": "🛡️ Respaldo con Monto Depositado (Depósito en Garantía)", "Monto": monto_garantia_pago})
+                _cuota_actual_gar = cuotas_dep_pagadas + 1
+                detalles_recibo_servicios.append(f" - Respaldo Monto Depositado (Cuota {_cuota_actual_gar}/{cuotas_dep_pactadas}): $ {monto_garantia_pago:,.2f}")
+                desglose_pantalla_pdf.append({"Concepto": f"🛡️ Respaldo con Monto Depositado (Depósito en Garantía) — Cuota {_cuota_actual_gar}/{cuotas_dep_pactadas}", "Monto": monto_garantia_pago})
 
             # monto_serv_pago se calculará después del expander, desde _desglose_editado
             # Aquí solo definimos los auxiliares que se necesitan antes
