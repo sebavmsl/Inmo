@@ -23,7 +23,91 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.128"
+APP_VERSION = "v1.140"
+
+TERMINOS_TEXTO = """
+## Términos y Condiciones de Uso
+### Sistema de Gestión Inmobiliaria — Versión 1.0
+
+---
+
+**1. Aceptación de los Términos**
+
+Al acceder y utilizar el Sistema de Gestión Inmobiliaria (en adelante, "el Sistema"), el usuario declara haber leído, comprendido y aceptado en su totalidad los presentes Términos y Condiciones. Si no está de acuerdo con alguno de estos términos, deberá abstenerse de utilizar el Sistema.
+
+---
+
+**2. Descripción del Servicio**
+
+El Sistema es una plataforma de software como servicio (SaaS) diseñada para la gestión de contratos de locación, registro de cobros, emisión de comprobantes y administración de propiedades e inquilinos. El acceso al Sistema se otorga mediante credenciales personales e intransferibles.
+
+---
+
+**3. Protección de Datos Personales**
+
+El Sistema almacena y procesa datos personales de terceros (inquilinos, propietarios y otros) en cumplimiento de la **Ley 25.326 de Protección de Datos Personales de la República Argentina** y su normativa complementaria.
+
+- **Responsable del tratamiento de datos:** La empresa u organización que contrata el uso del Sistema (en adelante, "el Operador") es responsable del tratamiento de los datos personales ingresados.
+- **El Desarrollador** actúa como encargado del tratamiento en su carácter de proveedor tecnológico, y no accede, comercializa ni cede los datos a terceros salvo requerimiento legal.
+- El Operador es responsable de obtener los consentimientos necesarios de los titulares de los datos personales conforme a la normativa vigente.
+- Los datos se almacenan en infraestructura cloud de terceros bajo estándares de seguridad internacionales, con cifrado en tránsito y en reposo, acceso restringido y políticas de respaldo periódico, conforme a las mejores prácticas de la industria tecnológica.
+- El Operador tiene derecho a solicitar la exportación o eliminación de sus datos en cualquier momento mediante comunicación formal al Desarrollador.
+
+---
+
+**4. Responsabilidad por Cálculos e Índices**
+
+El Sistema realiza cálculos automáticos basados en índices oficiales publicados por el BCRA (ICL) y el INDEC (IPC), obtenidos de fuentes públicas.
+
+- El Desarrollador **no garantiza** la exactitud, disponibilidad o actualización en tiempo real de dichos índices.
+- Los valores calculados son **orientativos** y no reemplazan la verificación con las fuentes oficiales.
+- El Operador es responsable de verificar los montos antes de emitir comprobantes o impactar cobros.
+- El Desarrollador no será responsable por pérdidas económicas derivadas de errores en los cálculos automáticos.
+
+---
+
+**5. Condiciones del Servicio SaaS**
+
+- El acceso al Sistema está sujeto al pago de la tarifa acordada entre el Operador y el Desarrollador.
+- El Desarrollador se reserva el derecho de suspender el acceso ante falta de pago o uso indebido del Sistema.
+- El Desarrollador podrá actualizar, modificar o interrumpir el Sistema con previo aviso de 15 días corridos.
+- El Desarrollador realiza todos los esfuerzos técnicos razonables para garantizar la máxima disponibilidad del Sistema, implementando medidas de monitoreo, redundancia y mantenimiento preventivo. No obstante, la disponibilidad puede verse afectada por factores ajenos al control del Desarrollador, tales como fallas en servicios de infraestructura de terceros, conectividad de red o causas de fuerza mayor.
+
+---
+
+**6. Uso Aceptable**
+
+El Operador y sus usuarios se comprometen a:
+
+- Utilizar el Sistema exclusivamente para los fines de gestión inmobiliaria para los que fue diseñado.
+- No intentar acceder a datos de otras organizaciones ni vulnerar la seguridad del Sistema.
+- No compartir credenciales de acceso con personas no autorizadas.
+- No utilizar el Sistema para actividades ilegales o contrarias a la normativa vigente.
+
+---
+
+**7. Confidencialidad**
+
+El Desarrollador se compromete a mantener la confidencialidad de toda la información del Operador y no divulgarla a terceros, salvo requerimiento judicial o legal expreso.
+
+---
+
+**8. Propiedad Intelectual**
+
+El Sistema, su código fuente, diseño y funcionalidades son propiedad exclusiva del Desarrollador. El contrato de SaaS otorga una licencia de uso no exclusiva e intransferible, sin que ello implique cesión de derechos sobre el software.
+
+---
+
+**9. Modificaciones a los Términos**
+
+El Desarrollador podrá modificar los presentes Términos con un preaviso de 15 días mediante notificación dentro del Sistema. El uso continuado del Sistema tras dicho período implica la aceptación de los nuevos términos.
+
+---
+
+**10. Jurisdicción**
+
+Para cualquier controversia derivada del uso del Sistema, las partes se someten a la jurisdicción de los Tribunales Ordinarios de la ciudad de Villa Mercedes, provincia de San Luis, República Argentina, renunciando a cualquier otro fuero que pudiera corresponder.
+"""
 
 # Configuración de logging — debe ir antes de cualquier código que loggee
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -1095,6 +1179,8 @@ if not st.session_state.autenticado:
                     st.session_state.rol = datos_sesion["rol"]
                     st.session_state.nombre_empresa = datos_sesion["nombre_empresa"]
                     st.session_state.empresa_db = datos_sesion["archivo_db"]
+                    st.session_state.pestana_activa = "dashboard"
+                    st.session_state.terminos_aceptados = None  # forzar reverificación desde BD
 
                     # Obtener empresa_id desde PostgreSQL
                     try:
@@ -1138,9 +1224,51 @@ if not st.session_state.autenticado:
         
         st.caption("Solicite su acceso a 'contacto@controlz.net.ar'.")
         st.caption(f"Versión {APP_VERSION}")
-    st.stop() # Frena por completo el renderizado del dashboard si no pasas el login
+    st.stop() # Frena el renderizado si no está autenticado
 
+# ── Verificar aceptación de términos (fuera del bloque de login) ──
+if st.session_state.autenticado and st.session_state.get('usuario_rol') != 'superadmin':
+    _username_tc = st.session_state.get('usuario_actual', '')
+    _terminos_ok = st.session_state.get('terminos_aceptados', None)
+    logging.info(f"[TyC] autenticado={st.session_state.autenticado}, rol={st.session_state.get('usuario_rol')}, username={_username_tc}, terminos_ok={_terminos_ok}")
 
+    if _terminos_ok is None:
+        try:
+            with _pg_conn() as _conn_tc:
+                with _conn_tc.cursor() as _cur_tc:
+                    _cur_tc.execute(
+                        'SELECT terminos_aceptados FROM usuarios_central WHERE username = %s',
+                        (_username_tc,)
+                    )
+                    _row_tc = _cur_tc.fetchone()
+                    _terminos_ok = bool(_row_tc['terminos_aceptados']) if _row_tc else False
+                    st.session_state['terminos_aceptados'] = _terminos_ok
+        except Exception:
+            _terminos_ok = False
+            st.session_state['terminos_aceptados'] = False
+
+    if not _terminos_ok:
+        st.markdown('## 📋 Términos y Condiciones de Uso')
+        st.markdown('Antes de continuar, por favor leé y aceptá los Términos y Condiciones del Sistema.')
+        with st.container(height=400):
+            st.markdown('\n## Términos y Condiciones de Uso\n### Sistema de Gestión Inmobiliaria — Versión 1.0\n\n---\n\n**1. Aceptación de los Términos**\n\nAl acceder y utilizar el Sistema de Gestión Inmobiliaria (en adelante, "el Sistema"), el usuario declara haber leído, comprendido y aceptado en su totalidad los presentes Términos y Condiciones. Si no está de acuerdo con alguno de estos términos, deberá abstenerse de utilizar el Sistema.\n\n---\n\n**2. Descripción del Servicio**\n\nEl Sistema es una plataforma de software como servicio (SaaS) diseñada para la gestión de contratos de locación, registro de cobros, emisión de comprobantes y administración de propiedades e inquilinos. El acceso al Sistema se otorga mediante credenciales personales e intransferibles.\n\n---\n\n**3. Protección de Datos Personales**\n\nEl Sistema almacena y procesa datos personales de terceros (inquilinos, propietarios y otros) en cumplimiento de la **Ley 25.326 de Protección de Datos Personales de la República Argentina** y su normativa complementaria.\n\n- **Responsable del tratamiento de datos:** La empresa u organización que contrata el uso del Sistema (en adelante, "el Operador") es responsable del tratamiento de los datos personales ingresados.\n- **El Desarrollador** actúa como encargado del tratamiento en su carácter de proveedor tecnológico, y no accede, comercializa ni cede los datos a terceros salvo requerimiento legal.\n- El Operador es responsable de obtener los consentimientos necesarios de los titulares de los datos personales conforme a la normativa vigente.\n- Los datos se almacenan en infraestructura cloud de terceros bajo estándares de seguridad internacionales, con cifrado en tránsito y en reposo, acceso restringido y políticas de respaldo periódico, conforme a las mejores prácticas de la industria tecnológica.\n- El Operador tiene derecho a solicitar la exportación o eliminación de sus datos en cualquier momento mediante comunicación formal al Desarrollador.\n\n---\n\n**4. Responsabilidad por Cálculos e Índices**\n\nEl Sistema realiza cálculos automáticos basados en índices oficiales publicados por el BCRA (ICL) y el INDEC (IPC), obtenidos de fuentes públicas.\n\n- El Desarrollador **no garantiza** la exactitud, disponibilidad o actualización en tiempo real de dichos índices.\n- Los valores calculados son **orientativos** y no reemplazan la verificación con las fuentes oficiales.\n- El Operador es responsable de verificar los montos antes de emitir comprobantes o impactar cobros.\n- El Desarrollador no será responsable por pérdidas económicas derivadas de errores en los cálculos automáticos.\n\n---\n\n**5. Condiciones del Servicio SaaS**\n\n- El acceso al Sistema está sujeto al pago de la tarifa acordada entre el Operador y el Desarrollador.\n- El Desarrollador se reserva el derecho de suspender el acceso ante falta de pago o uso indebido del Sistema.\n- El Desarrollador podrá actualizar, modificar o interrumpir el Sistema con previo aviso de 15 días corridos.\n- El Desarrollador realiza todos los esfuerzos técnicos razonables para garantizar la máxima disponibilidad del Sistema, implementando medidas de monitoreo, redundancia y mantenimiento preventivo. No obstante, la disponibilidad puede verse afectada por factores ajenos al control del Desarrollador, tales como fallas en servicios de infraestructura de terceros, conectividad de red o causas de fuerza mayor.\n\n---\n\n**6. Uso Aceptable**\n\nEl Operador y sus usuarios se comprometen a:\n\n- Utilizar el Sistema exclusivamente para los fines de gestión inmobiliaria para los que fue diseñado.\n- No intentar acceder a datos de otras organizaciones ni vulnerar la seguridad del Sistema.\n- No compartir credenciales de acceso con personas no autorizadas.\n- No utilizar el Sistema para actividades ilegales o contrarias a la normativa vigente.\n\n---\n\n**7. Confidencialidad**\n\nEl Desarrollador se compromete a mantener la confidencialidad de toda la información del Operador y no divulgarla a terceros, salvo requerimiento judicial o legal expreso.\n\n---\n\n**8. Propiedad Intelectual**\n\nEl Sistema, su código fuente, diseño y funcionalidades son propiedad exclusiva del Desarrollador. El contrato de SaaS otorga una licencia de uso no exclusiva e intransferible, sin que ello implique cesión de derechos sobre el software.\n\n---\n\n**9. Modificaciones a los Términos**\n\nEl Desarrollador podrá modificar los presentes Términos con un preaviso de 15 días mediante notificación dentro del Sistema. El uso continuado del Sistema tras dicho período implica la aceptación de los nuevos términos.\n\n---\n\n**10. Jurisdicción**\n\nPara cualquier controversia derivada del uso del Sistema, las partes se someten a la jurisdicción de los Tribunales Ordinarios de la ciudad de Villa Mercedes, provincia de San Luis, República Argentina, renunciando a cualquier otro fuero que pudiera corresponder.\n')
+        st.markdown('---')
+        _acepto = st.checkbox('✅ He leído y acepto los Términos y Condiciones de Uso')
+        if st.button('Continuar →', type='primary', disabled=not _acepto):
+            try:
+                with _pg_conn() as _conn_tc2:
+                    with _conn_tc2.cursor() as _cur_tc2:
+                        _cur_tc2.execute(
+                            'UPDATE usuarios_central SET terminos_aceptados = TRUE, terminos_fecha = %s WHERE username = %s',
+                            (datetime.now().strftime('%d/%m/%Y %H:%M'), _username_tc)
+                        )
+                    _conn_tc2.commit()
+                st.session_state['terminos_aceptados'] = True
+                st.session_state.pestana_activa = "dashboard"
+                st.rerun()
+            except Exception as _e_tc:
+                st.error(f'Error al guardar la aceptación: {_e_tc}')
+        st.stop()
 
 # =====================================================================
 # FUNCIONES AUXILIARES DE LÓGICA Y PARSEO
@@ -1977,8 +2105,8 @@ pestanas_maestras = {
 # son visibles para el usuario según su rol o permisos guardados en sesión.
 if rol_actual == "superadmin":
     # Superadmin: acceso total a todas las pestañas sin restricción
-    pestanas_visibles_nombres = list(pestanas_maestras.keys()) + ["⚙️ Panel de Gestión"]
-    pestanas_visibles_claves = list(pestanas_maestras.values()) + ["panel_gestion"]
+    pestanas_visibles_nombres = list(pestanas_maestras.keys()) + ["⚙️ Panel de Gestión", "📄 Términos y Condiciones"]
+    pestanas_visibles_claves = list(pestanas_maestras.values()) + ["panel_gestion", "terminos"]
 elif rol_actual == "admin":
     # Admin: recarga permisos desde BD en cada render (evita que queden desactualizados en sesión)
     _username_admin = st.session_state.get("username", "")
@@ -1997,11 +2125,15 @@ elif rol_actual == "admin":
     # Panel de Gestión siempre visible para admin
     pestanas_visibles_nombres.append("⚙️ Panel de Gestión")
     pestanas_visibles_claves.append("panel_gestion")
+    pestanas_visibles_nombres.append("📄 Términos y Condiciones")
+    pestanas_visibles_claves.append("terminos")
 elif rol_actual == "propietario":
     # Propietario: acceso de solo lectura a Dashboard, Planilla e Historial de Caja
     _pestanas_propietario = ["dashboard", "planilla", "historial_pagos", "gastos", "rendicion"]
     pestanas_visibles_nombres = [n for n, c in pestanas_maestras.items() if c in _pestanas_propietario]
     pestanas_visibles_claves = [c for c in pestanas_maestras.values() if c in _pestanas_propietario]
+    pestanas_visibles_nombres.append("📄 Términos y Condiciones")
+    pestanas_visibles_claves.append("terminos")
 else:
     # Lee de la sesión (donde los guardamos en el login)
     permisos_usuario = st.session_state.get("permisos_usuario", [])
@@ -2014,6 +2146,8 @@ else:
         if clave in permisos_usuario:
             pestanas_visibles_nombres.append(nombre)
             pestanas_visibles_claves.append(clave)
+    pestanas_visibles_nombres.append("📄 Términos y Condiciones")
+    pestanas_visibles_claves.append("terminos")
 
 
 # =====================================================================
@@ -2267,11 +2401,33 @@ if tab_planilla:
                                     _contratos_act = _cur_act.fetchall()
 
                             _fecha_calc = datetime.now().strftime("%Y-%m-%d")
+                            logging.info(f"[actualizar_indices] hoy={_hoy_act}, mes_act={_mes_act}, contratos encontrados={len(_contratos_act)}")
+
+                            # Obtener contratos ya pagados en el mes actual
+                            with _pg_conn() as _conn_pag:
+                                with _conn_pag.cursor() as _cur_pag:
+                                    _cur_pag.execute("""
+                                        SELECT DISTINCT ON (codigo_contrato) codigo_contrato
+                                        FROM pagos_historial
+                                        WHERE empresa_id = %s
+                                        AND EXTRACT(MONTH FROM TO_DATE(SPLIT_PART(fecha, ' ', 1), 'DD/MM/YYYY')) = %s
+                                        AND EXTRACT(YEAR  FROM TO_DATE(SPLIT_PART(fecha, ' ', 1), 'DD/MM/YYYY')) = %s
+                                        AND saldo_pendiente = 0
+                                        ORDER BY codigo_contrato, id DESC
+                                    """, (_eid_plan, _hoy_act.month, _hoy_act.year))
+                                    _ya_pagados = {r["codigo_contrato"] for r in _cur_pag.fetchall()}
+                            logging.info(f"[actualizar_indices] ya pagados este mes: {_ya_pagados}")
                             for _c in _contratos_act:
                                 try:
                                     _prox_d = datetime.strptime(str(_c["prox_actualizacion"])[:10], "%Y-%m-%d").date()
-                                    if _prox_d.replace(day=1) != _mes_act or _prox_d > _hoy_act:
-                                        continue  # No corresponde calcular este mes o aún no llegó la fecha
+                                    _prox_mes = _prox_d.replace(day=1)
+                                    logging.info(f"[actualizar_indices] contrato={_c['codigo']} prox={_prox_d} prox_mes={_prox_mes} mes_act={_mes_act} skip={_prox_mes != _mes_act or _prox_d > _hoy_act}")
+                                    if _prox_mes != _mes_act or _prox_d > _hoy_act:
+                                        continue
+                                    # Saltar si ya está pagado este mes
+                                    if _c["codigo"] in _ya_pagados:
+                                        logging.info(f"[actualizar_indices] contrato={_c['codigo']} ya pagado — omitido")
+                                        continue
                                     # Calcular meses desde inicio
                                     _ini_str = str(_c["inicio_contrato"])[:10]
                                     try: _ini_d = datetime.strptime(_ini_str, "%Y-%m-%d").date()
@@ -2281,7 +2437,7 @@ if tab_planilla:
                                     _delta = dateutil.relativedelta.relativedelta(_ultima_act, _ini_d)
                                     _meses_calc = (_delta.years * 12) + _delta.months
                                     if _meses_calc <= 0: _meses_calc = _meses_act
-                                    _ini_str_fmt = _ini_d.strftime("%Y-%m-%d")
+                                    _ini_str_fmt = _ini_d  # pasar objeto date, no string
                                     _monto_ini = float(_c["monto_inicial"] or 0)
                                     if _monto_ini <= 0: continue
                                     if _c["indice"] == "ICL":
@@ -5222,6 +5378,11 @@ if tab_carga:
                     _ir = cursor.fetchone()
                     _dni_inq = _ir["dni"] if _ir else ""
 
+                    # Validar que se haya seleccionado un inquilino válido
+                    if not _dni_inq or not _alias_prop:
+                        st.error("❌ Debés seleccionar una **Propiedad** y un **Inquilino** válidos antes de guardar el contrato.")
+                        st.stop()
+
                     if contrato_previo and "Actualizar" in modo_guardado:
                         cursor.execute('''
                             UPDATE contratos 
@@ -7477,3 +7638,26 @@ if tab_rendicion:
                             use_container_width=True,
                             help="Primero registrá la liquidación con el botón de la izquierda.",
                         )
+
+# =====================================================================
+# PESTAÑA: TÉRMINOS Y CONDICIONES
+# =====================================================================
+if _pestana_activa == "terminos":
+    st.subheader("📄 Términos y Condiciones de Uso")
+    _username_tc_view = st.session_state.get("usuario_actual", "")
+    try:
+        with _pg_conn() as _conn_tcv:
+            with _conn_tcv.cursor() as _cur_tcv:
+                _cur_tcv.execute(
+                    "SELECT terminos_aceptados, terminos_fecha FROM usuarios_central WHERE username = %s",
+                    (_username_tc_view,)
+                )
+                _row_tcv = _cur_tcv.fetchone()
+        if _row_tcv and _row_tcv["terminos_aceptados"]:
+            st.success(f"✅ Términos aceptados el {_row_tcv['terminos_fecha']}")
+        else:
+            st.warning("⚠️ Términos pendientes de aceptación.")
+    except Exception:
+        pass
+
+    st.markdown(globals().get("TERMINOS_TEXTO", "*(Texto de términos no disponible)*"))
