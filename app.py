@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.145"
+APP_VERSION = "v1.146"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -5043,7 +5043,7 @@ if tab_carga:
     
             alquiler_actualizado = limpiar_string_a_float(alquiler_actualizado_texto)
                 
-            valor_vacio = (alquiler_actualizado is None or alquiler_actualizado <= 0.0)
+            valor_vacio = (alquiler_actualizado is None or alquiler_actualizado <= 0.0) and es_mes_de_actualizacion
             alquiler_sin_cambios = (alquiler_actualizado == alquiler)
                 
             bloqueo_por_actualizacion = False
