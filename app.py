@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.142"
+APP_VERSION = "v1.145"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3270,7 +3270,14 @@ if tab_pagos:
             valor_auto_recibo = None
             _fallo_consulta_indice = False
             _sin_calculo_disponible = False
-            if indice_recibo in ("ICL", "IPC"):
+
+            # Si el mes de inicio del contrato es el mes actual, no hay período de actualización todavía
+            _mismo_mes_inicio_recibo = (
+                inicio_contrato_dt.year == datetime.now().year and
+                inicio_contrato_dt.month == datetime.now().month
+            )
+
+            if indice_recibo in ("ICL", "IPC") and not _mismo_mes_inicio_recibo and _meses_hasta_ultima_act > 0:
                 with st.spinner(f"⏳ Consultando {indice_recibo}..."):
                     if indice_recibo == "ICL":
                         valor_auto_recibo = calcular_valor_actualizado_icl(
@@ -3280,6 +3287,8 @@ if tab_pagos:
                         valor_auto_recibo = calcular_valor_actualizado_ipc(
                             val_monto_ini_recibo, inicio_contrato_recibo, _meses_hasta_ultima_act
                         )
+            elif _mismo_mes_inicio_recibo or _meses_hasta_ultima_act <= 0:
+                _sin_calculo_disponible = True
 
             # Guardar alquiler_calculado en la BD si se obtuvo un valor válido
             if valor_auto_recibo is not None:
@@ -3335,7 +3344,15 @@ if tab_pagos:
                         st.session_state[_key_alq_pago] = valor_auto_recibo
                         st.rerun()
             else:
-                if indice_recibo in ("ICL", "IPC"):
+                if meses_a_sumar == 0:
+                    _sin_calculo_disponible = True
+                elif _mismo_mes_inicio_recibo or _meses_hasta_ultima_act <= 0:
+                    r_col2.info(
+                        f"ℹ️ Aún no corresponde aplicar actualización por {indice_recibo}. "
+                        f"El primer ajuste corresponderá en {prox_actualizacion_calculada.strftime('%m/%Y')}. "
+                        "Ingresá el monto manualmente."
+                    )
+                elif indice_recibo in ("ICL", "IPC"):
                     fuente_r = "BCRA" if indice_recibo == "ICL" else "INDEC"
                     _fallo_consulta_indice = True
                     r_col2.warning(
