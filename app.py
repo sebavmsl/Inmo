@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.146"
+APP_VERSION = "v1.148"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3023,7 +3023,7 @@ if tab_pagos:
                     prox_actualizacion_calculada = fin_contrato_dt + dateutil.relativedelta.relativedelta(days=1)
                 else:
                     prox_actualizacion_calculada = inicio_contrato_dt + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                    while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato_dt:
+                    while prox_actualizacion_calculada < fecha_hoy:
                         prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
                     
                 necesita_renovacion = False if meses_a_sumar == 0 else prox_actualizacion_calculada > fin_contrato_dt
@@ -4877,7 +4877,7 @@ if tab_carga:
                 prox_actualizacion_calculada = fin_contrato + dateutil.relativedelta.relativedelta(days=1)
             else:
                 prox_actualizacion_calculada = inicio_contrato + dateutil.relativedelta.relativedelta(months=meses_a_sumar)
-                while prox_actualizacion_calculada < fecha_hoy and prox_actualizacion_calculada <= fin_contrato:
+                while prox_actualizacion_calculada < fecha_hoy:
                     prox_actualizacion_calculada += dateutil.relativedelta.relativedelta(months=meses_a_sumar)
     
             necesita_renovacion = False if meses_a_sumar == 0 else prox_actualizacion_calculada > fin_contrato
