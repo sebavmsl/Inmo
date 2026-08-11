@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.148"
+APP_VERSION = "v1.149"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -1297,7 +1297,7 @@ def obtener_datos_desplegables(empresa_id: int):
         dir_completa = f"{row['calle']} {row['numero']}"
         if isinstance(row['departamento'], str) and row['departamento'].strip():
             dir_completa += f", Depto: {row['departamento']}"
-        dict_propiedades[f"Cod: {row['id']} | {row['alias_propiedad']} ({dir_completa})"] = row['id']
+        dict_propiedades[f"ID: {row['id']} | {row['alias_propiedad']} ({dir_completa})"] = row['id']
         
     dict_inquilinos = {f"Cod: {row['id']} | {row['apellidos']}, {row['nombres']}": row['id'] for _, row in inquilinos.iterrows()}
     return dict_propiedades, dict_inquilinos
@@ -2665,7 +2665,7 @@ if tab_planilla:
 
                 # ── Función de navegación a Registrar/Emitir Recibo ──
                 def _ir_a_recibo(row):
-                    _key = f"Cod: {row['codigo_contrato']} | {row['alias_propiedad']} - Inquilino: Cod: {row['inquilino_id']} | {str(row['apellidos']).upper()}, {str(row['nombres']).title()}"
+                    _key = f"ID: {row['propiedad_id']} | {row['alias_propiedad']} - Inquilino: Cod: {row['inquilino_id']} | {str(row['apellidos']).upper()}, {str(row['nombres']).title()} | Contr: {row['codigo_contrato']}"
                     st.session_state["sb_pago_activo"] = _key
                     st.session_state.pestana_activa = "pagos"
                     st.rerun()
@@ -2984,7 +2984,7 @@ if tab_pagos:
                 if valor_actualizado_parseado > 0:
                     datos_dict['alquiler'] = valor_actualizado_parseado
                     
-            key_desplegable = f"Cod: {r['codigo']} | {r['alias_propiedad']} - Inquilino: Cod: {r['inquilino_id']} | {str(r['apellidos']).upper()}, {str(r['nombres']).title()}"
+            key_desplegable = f"ID: {r['propiedad_codigo']} | {r['alias_propiedad']} - Inquilino: Cod: {r['inquilino_id']} | {str(r['apellidos']).upper()}, {str(r['nombres']).title()} | Contr: {r['codigo']}"
             dict_activos[key_desplegable] = datos_dict
         
         if not dict_activos:
