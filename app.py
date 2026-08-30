@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.155"
+APP_VERSION = "v1.160"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -1517,7 +1517,10 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
             c.alquiler_calculado                        AS alquiler_calculado,
             c.alquiler_calculado_fecha                  AS alquiler_calculado_fecha,
             c.expensas                                  AS expensas,
-            c.cochera                                   AS cochera
+            c.cochera                                   AS cochera,
+            i.telefono                                  AS telefono,
+            p.calle                                     AS calle,
+            p.numero                                    AS numero
         FROM contratos c
         JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
         JOIN inquilinos i ON c.dni_inquilino = i.dni
@@ -2122,6 +2125,130 @@ if "usr_whatsapp_habilitado" not in st.session_state:
                 st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
     except Exception:
         st.session_state["usr_whatsapp_habilitado"] = False
+
+# ── Envío automático de recordatorios WhatsApp ─────────────────────────
+# Se ejecuta una vez por día por sesión si WhatsApp está habilitado
+_hoy_rec = datetime.now().date()
+_key_rec_hoy = f"recordatorios_enviados_{_hoy_rec}"
+if (
+    st.session_state.get("cfg_whatsapp_habilitado", False) and
+    not st.session_state.get(_key_rec_hoy, False)
+):
+    try:
+        _eid_rec = st.session_state.get("empresa_id", 0)
+        _dia_hoy = _hoy_rec.day
+
+        # Verificar si hoy hay recordatorios activos configurados
+        with _pg_conn() as _conn_rec_auto:
+            with _conn_rec_auto.cursor() as _cur_rec_auto:
+                _cur_rec_auto.execute(
+                    "SELECT tipo FROM whatsapp_recordatorios WHERE empresa_id = %s AND dia_del_mes = %s AND activo = TRUE",
+                    (_eid_rec, _dia_hoy)
+                )
+                _tipos_hoy = [r["tipo"] for r in _cur_rec_auto.fetchall()]
+
+        if _tipos_hoy:
+            _wa_creds_rec = _get_wa_credenciales(_eid_rec)
+
+            if _wa_creds_rec:
+                # Obtener contratos activos con datos necesarios
+                with _pg_conn() as _conn_c_rec:
+                    with _conn_c_rec.cursor() as _cur_c_rec:
+                        _cur_c_rec.execute("""
+                            SELECT c.codigo, c.fin_contrato, c.prox_actualizacion, c.indice,
+                                   i.nombres, i.apellidos, i.telefono,
+                                   p.calle, p.numero, p.departamento
+                            FROM contratos c
+                            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
+                            JOIN inquilinos i ON c.dni_inquilino = i.dni
+                            WHERE c.empresa_id = %s AND c.estado = 'Activo'
+                        """, (_eid_rec,))
+                        _contratos_rec = _cur_c_rec.fetchall()
+
+                _fecha_hoy_str = _hoy_rec.strftime("%d/%m/%Y")
+                _enviados = 0
+
+                for _cr in _contratos_rec:
+                    _tel = str(_cr["telefono"] or "").strip().replace(" ","").replace("-","")
+                    if not _tel:
+                        continue
+
+                    _nombre = f"{_cr['nombres']} {_cr['apellidos']}".strip()
+                    _dir = f"{_cr['calle']} {_cr['numero']}"
+                    if _cr.get("departamento"):
+                        _dir += f" Dto. {_cr['departamento']}"
+
+                    # Verificar si ya se envió hoy este recordatorio
+                    with _pg_conn() as _conn_log:
+                        with _conn_log.cursor() as _cur_log:
+                            _cur_log.execute(
+                                "SELECT id FROM whatsapp_recordatorios_log WHERE empresa_id = %s AND codigo_contrato = %s AND fecha_envio = %s",
+                                (_eid_rec, _cr["codigo"], _fecha_hoy_str)
+                            )
+                            _ya_enviado = _cur_log.fetchone()
+
+                    if _ya_enviado:
+                        continue
+
+                    _enviado_algo = False
+
+                    # Recordatorio vencimiento
+                    if "vencimiento" in _tipos_hoy and _cr["fin_contrato"]:
+                        try:
+                            _fin_d = datetime.strptime(str(_cr["fin_contrato"])[:10], "%Y-%m-%d").date()
+                            _fin_fmt = _fin_d.strftime("%d/%m/%Y")
+                            _ok = _enviar_mensaje_whatsapp(
+                                phone_id=_wa_creds_rec["phone_id"],
+                                token=_wa_creds_rec["token"],
+                                numero_destino=_tel,
+                                template_name="recordatorio_vencimiento_contrato",
+                                variables=[_nombre, _dir, _fin_fmt]
+                            )
+                            if _ok:
+                                _enviado_algo = True
+                                _enviados += 1
+                        except Exception as _e_rv:
+                            logging.warning(f"[WA Recordatorio vencimiento] contrato {_cr['codigo']}: {_e_rv}")
+
+                    # Recordatorio actualización
+                    if "actualizacion" in _tipos_hoy and _cr["prox_actualizacion"]:
+                        try:
+                            _prox_d = datetime.strptime(str(_cr["prox_actualizacion"])[:10], "%Y-%m-%d").date()
+                            _prox_fmt = _prox_d.strftime("%d/%m/%Y")
+                            _indice = str(_cr["indice"] or "ICL")
+                            _ok = _enviar_mensaje_whatsapp(
+                                phone_id=_wa_creds_rec["phone_id"],
+                                token=_wa_creds_rec["token"],
+                                numero_destino=_tel,
+                                template_name="recordatorio_actualizacion_alquiler",
+                                variables=[_nombre, _prox_fmt, _dir, _indice]
+                            )
+                            if _ok:
+                                _enviado_algo = True
+                                _enviados += 1
+                        except Exception as _e_ra:
+                            logging.warning(f"[WA Recordatorio actualizacion] contrato {_cr['codigo']}: {_e_ra}")
+
+                    # Registrar en el log si se envió algo
+                    if _enviado_algo:
+                        try:
+                            with _pg_conn() as _conn_log2:
+                                with _conn_log2.cursor() as _cur_log2:
+                                    _cur_log2.execute(
+                                        "INSERT INTO whatsapp_recordatorios_log (empresa_id, tipo, codigo_contrato, fecha_envio) VALUES (%s, %s, %s, %s)",
+                                        (_eid_rec, ",".join(_tipos_hoy), _cr["codigo"], _fecha_hoy_str)
+                                    )
+                                _conn_log2.commit()
+                        except Exception as _e_log:
+                            logging.warning(f"[WA Log] Error guardando log: {_e_log}")
+
+                if _enviados > 0:
+                    logging.info(f"[WA Recordatorios] {_enviados} mensajes enviados el {_fecha_hoy_str}")
+
+        st.session_state[_key_rec_hoy] = True
+
+    except Exception as _e_rec_auto:
+        logging.warning(f"[WA Recordatorios] Error general: {_e_rec_auto}")
 
 # 2. Definición maestra de pestañas
 pestanas_maestras = {
@@ -2976,11 +3103,19 @@ if tab_planilla:
 
                         _rc = st.columns(_COLS)
 
-                        # 💰 botón
+                        # 💰 botón — ir a Registrar/Emitir Recibo
                         with _rc[0]:
                             st.markdown(f"<div style='{_bg};padding:3px 0;border-bottom:1px solid #dee2e6;'></div>", unsafe_allow_html=True)
                             if st.button("💰", key=f"btn_recibo_{_row['codigo_contrato']}", help="Ir a Registrar / Emitir Recibo", use_container_width=True):
                                 _ir_a_recibo(_row)
+                            # Botón confirmar pago — solo para pendientes
+                            if not _row["pagado_mes"]:
+                                _key_cobro = f"cobro_open_{_row['codigo_contrato']}"
+                                if _key_cobro not in st.session_state:
+                                    st.session_state[_key_cobro] = False
+                                if st.button("✅", key=f"btn_cobro_{_row['codigo_contrato']}", help="Confirmar pago y enviar comprobante", use_container_width=True):
+                                    st.session_state[_key_cobro] = not st.session_state[_key_cobro]
+                                    st.rerun()
 
                         # Estado — ícono
                         _icono_estado = "✅" if _row["pagado_mes"] else "⏳"
@@ -3033,7 +3168,201 @@ if tab_planilla:
                             except Exception as _e_exp:
                                 _rc[8].error(f"Error: {_e_exp}")
 
-                # ── Separar en pendientes y pagados ──
+                        # ── Recibo Preliminar por WhatsApp ──
+                        # Solo para pendientes y si WhatsApp está habilitado
+                        _wa_plan_ok = (
+                            not _row["pagado_mes"] and
+                            st.session_state.get("cfg_whatsapp_habilitado", False) and
+                            st.session_state.get("usr_whatsapp_habilitado", False)
+                        )
+                        if _wa_plan_ok:
+                            _key_prelim = f"prelim_open_{_row['codigo_contrato']}"
+                            if _key_prelim not in st.session_state:
+                                st.session_state[_key_prelim] = False
+
+                            if st.button("📋 Preliminar", key=f"btn_prelim_{_row['codigo_contrato']}", help="Enviar recibo preliminar por WhatsApp", use_container_width=False):
+                                st.session_state[_key_prelim] = not st.session_state[_key_prelim]
+                                st.rerun()
+
+                            if st.session_state[_key_prelim]:
+                                with st.expander(f"📋 Recibo preliminar — {_row['alias_propiedad']}", expanded=True):
+                                    # Datos precargados
+                                    _p_col1, _p_col2 = st.columns(2)
+                                    _alq_pre = _p_col1.number_input(
+                                        "Alquiler ($):",
+                                        value=float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0,
+                                        min_value=0.0, step=1000.0,
+                                        key=f"pre_alq_{_row['codigo_contrato']}"
+                                    )
+                                    _coch_pre = _p_col1.number_input(
+                                        "Cochera ($):",
+                                        value=float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0,
+                                        min_value=0.0, step=500.0,
+                                        key=f"pre_coch_{_row['codigo_contrato']}"
+                                    )
+                                    _exp_pre = _p_col2.number_input(
+                                        "Expensas ($):",
+                                        value=st.session_state.get(_key_exp_plan, 0.0),
+                                        min_value=0.0, step=500.0,
+                                        key=f"pre_exp_{_row['codigo_contrato']}"
+                                    )
+                                    _fecha_limite = _p_col2.date_input(
+                                        "Fecha límite de pago:",
+                                        value=datetime.now().date().replace(day=10),
+                                        key=f"pre_fecha_{_row['codigo_contrato']}"
+                                    )
+                                    _adicionales_pre = _coch_pre + _exp_pre
+                                    _total_pre = _alq_pre + _adicionales_pre
+                                    st.markdown(f"**Total a abonar: $ {_total_pre:,.0f}**")
+
+                                    _verificado = st.checkbox(
+                                        "✅ Verifiqué los datos y están correctos",
+                                        key=f"pre_check_{_row['codigo_contrato']}"
+                                    )
+
+                                    _tel_pre = str(_row.get("telefono", "") or "").strip().replace(" ","").replace("-","")
+                                    if not _tel_pre:
+                                        st.warning("⚠️ El inquilino no tiene teléfono registrado.")
+                                    elif st.button(
+                                        "📲 Enviar preliminar",
+                                        key=f"btn_send_prelim_{_row['codigo_contrato']}",
+                                        disabled=not _verificado,
+                                        type="primary"
+                                    ):
+                                        _wa_creds_pre = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
+                                        if _wa_creds_pre:
+                                            _dir_pre = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
+                                            _nombre_pre = _row["inquilino"]
+                                            _ok_pre = _enviar_mensaje_whatsapp(
+                                                phone_id=_wa_creds_pre["phone_id"],
+                                                token=_wa_creds_pre["token"],
+                                                numero_destino=_tel_pre,
+                                                template_name="recibo_preliminar_alquiler",
+                                                variables=[
+                                                    _nombre_pre,
+                                                    _nombre_mes,
+                                                    _dir_pre,
+                                                    f"{_alq_pre:,.0f}",
+                                                    f"{_adicionales_pre:,.0f}",
+                                                    f"{_total_pre:,.0f}",
+                                                    _fecha_limite.strftime("%d/%m/%Y"),
+                                                ]
+                                            )
+                                            if _ok_pre:
+                                                st.success(f"✅ Recibo preliminar enviado a {_nombre_pre}.")
+                                                st.session_state[_key_prelim] = False
+                                                st.rerun()
+                                            else:
+                                                st.error("❌ No se pudo enviar. Verificá los logs.")
+                                        else:
+                                            st.error("❌ No se encontraron credenciales de WhatsApp.")
+
+                        # ── Confirmar Pago desde Planilla ──
+                        if not _row["pagado_mes"] and st.session_state.get(f"cobro_open_{_row['codigo_contrato']}", False):
+                            with st.expander(f"✅ Confirmar pago — {_row['alias_propiedad']}", expanded=True):
+                                _c_col1, _c_col2 = st.columns(2)
+
+                                # Alquiler
+                                _alq_cobro_val = float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0
+                                _alq_cobro = _c_col1.number_input("Alquiler ($):", value=_alq_cobro_val, min_value=0.0, step=1000.0, key=f"cobro_alq_{_row['codigo_contrato']}")
+
+                                # Expensas
+                                _exp_cobro = _c_col1.number_input("Expensas ($):", value=st.session_state.get(_key_exp_plan, 0.0), min_value=0.0, step=500.0, key=f"cobro_exp_{_row['codigo_contrato']}")
+
+                                # Cochera
+                                _coch_cobro_val = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
+                                _coch_cobro = _c_col2.number_input("Cochera ($):", value=_coch_cobro_val, min_value=0.0, step=500.0, key=f"cobro_coch_{_row['codigo_contrato']}")
+
+                                # Método de pago
+                                _metodo_cobro = _c_col2.selectbox("Método de pago:", ["Transferencia Bancaria", "Efectivo", "Cheque", "Otro"], key=f"cobro_metodo_{_row['codigo_contrato']}")
+
+                                # Total y monto abonado
+                                _total_cobro = _alq_cobro + _exp_cobro + _coch_cobro
+                                st.markdown(f"**Total: $ {_total_cobro:,.0f}**")
+                                _abonado_cobro = st.number_input("Monto abonado ($):", value=_total_cobro, min_value=0.0, step=1000.0, key=f"cobro_abonado_{_row['codigo_contrato']}")
+                                _comentario_cobro = st.text_input("Comentarios (opcional):", key=f"cobro_comentario_{_row['codigo_contrato']}")
+
+                                # WhatsApp opcional
+                                _wa_cobro_ok = st.session_state.get("cfg_whatsapp_habilitado", False) and st.session_state.get("usr_whatsapp_habilitado", False)
+                                _enviar_wa_cobro = False
+                                if _wa_cobro_ok:
+                                    _enviar_wa_cobro = st.checkbox("📲 Enviar comprobante por WhatsApp al confirmar", value=True, key=f"cobro_wa_{_row['codigo_contrato']}")
+
+                                _cc1, _cc2 = st.columns(2)
+                                if _cc1.button("✅ Confirmar e impactar", key=f"btn_confirmar_cobro_{_row['codigo_contrato']}", type="primary"):
+                                    try:
+                                        _eid_cobro = st.session_state.get("empresa_id", 0)
+                                        _saldo_cobro = max(0.0, _total_cobro - _abonado_cobro)
+                                        _periodo_cobro = _nombre_mes
+
+                                        # Buscar datos del contrato para el INSERT
+                                        with _pg_conn() as _conn_cobro:
+                                            with _conn_cobro.cursor() as _cur_cobro:
+                                                # Obtener nro comprobante
+                                                _cur_cobro.execute("SELECT COALESCE(MAX(CAST(nro_comprobante AS INTEGER)), 0) + 1 AS nro FROM pagos_historial WHERE empresa_id = %s", (_eid_cobro,))
+                                                _nro_cobro = str(_cur_cobro.fetchone()["nro"]).zfill(6)
+
+                                                # INSERT en pagos_historial
+                                                _cur_cobro.execute("""
+                                                    INSERT INTO pagos_historial (
+                                                        empresa_id, codigo_contrato, propiedad, inquilino,
+                                                        periodo, monto_alquiler, fecha, metodo_pago, comentario,
+                                                        monto_expensas, monto_cochera,
+                                                        monto_abonado, saldo_pendiente, saldos_anteriores,
+                                                        registrado_por, nro_comprobante, tipo_pago
+                                                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                                """, (
+                                                    _eid_cobro, _row["codigo_contrato"],
+                                                    _row["alias_propiedad"], _row["inquilino"],
+                                                    _periodo_cobro, _alq_cobro,
+                                                    datetime.now().strftime("%d/%m/%Y %H:%M"),
+                                                    _metodo_cobro, _comentario_cobro or "",
+                                                    _exp_cobro, _coch_cobro,
+                                                    _abonado_cobro, _saldo_cobro, 0.0,
+                                                    st.session_state.get("usuario_actual", ""),
+                                                    _nro_cobro, "Normal"
+                                                ))
+
+                                                # Avanzar mes del contrato
+                                                _cur_cobro.execute("SELECT mes_contrato FROM contratos WHERE codigo = %s", (_row["codigo_contrato"],))
+                                                _mes_act_cobro = (_cur_cobro.fetchone()["mes_contrato"] or 0) + 1
+                                                _cur_cobro.execute("UPDATE contratos SET mes_contrato = %s, alquiler = %s WHERE codigo = %s", (_mes_act_cobro, _alq_cobro, _row["codigo_contrato"]))
+
+                                            _conn_cobro.commit()
+
+                                        st.cache_data.clear()
+                                        _cached_planilla_cobranzas_mes.clear()
+                                        st.session_state[f"cobro_open_{_row['codigo_contrato']}"] = False
+                                        st.session_state["_limpiar_planilla_cache"] = True
+
+                                        # Enviar WhatsApp si corresponde
+                                        if _enviar_wa_cobro and _wa_cobro_ok:
+                                            _wa_creds_cobro = _get_wa_credenciales(_eid_cobro)
+                                            _tel_cobro = str(_row.get("telefono","") or "").strip().replace(" ","").replace("-","")
+                                            if _wa_creds_cobro and _tel_cobro:
+                                                _dir_cobro = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
+                                                _enviar_mensaje_whatsapp(
+                                                    phone_id=_wa_creds_cobro["phone_id"],
+                                                    token=_wa_creds_cobro["token"],
+                                                    numero_destino=_tel_cobro,
+                                                    template_name="comprobante_pago_alquiler",
+                                                    variables=[
+                                                        _row["inquilino"], _periodo_cobro, _dir_cobro,
+                                                        f"{_abonado_cobro:,.0f}",
+                                                        datetime.now().strftime("%d/%m/%Y"),
+                                                        _metodo_cobro,
+                                                    ]
+                                                )
+
+                                        st.success(f"✅ Cobro de {_row['alias_propiedad']} impactado correctamente.")
+                                        st.rerun()
+
+                                    except Exception as _e_cobro:
+                                        st.error(f"❌ Error al impactar: {_e_cobro}")
+
+                                if _cc2.button("✖️ Cancelar", key=f"btn_cancelar_cobro_{_row['codigo_contrato']}"):
+                                    st.session_state[f"cobro_open_{_row['codigo_contrato']}"] = False
+                                    st.rerun()
                 df_pendientes = df_cob[df_cob["pagado_mes"] == False]
                 df_pagados    = df_cob[df_cob["pagado_mes"] == True]
 
@@ -6950,7 +7279,117 @@ if tab_superadmin:
             else:
                 st.session_state["cfg_actualizar_alquiler_auto"] = _valor_actual_cfg
 
-            # ── WhatsApp Business ──────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 🔔 Recordatorios Automáticos por WhatsApp")
+
+            _wa_activo_rec = st.session_state.get("cfg_whatsapp_habilitado", False)
+            if not _wa_activo_rec:
+                st.caption("⚠️ Habilitá WhatsApp para configurar recordatorios.")
+            else:
+                # Cargar recordatorios existentes
+                try:
+                    with _pg_conn() as _conn_rec:
+                        with _conn_rec.cursor() as _cur_rec:
+                            _cur_rec.execute(
+                                "SELECT id, tipo, dia_del_mes, activo FROM whatsapp_recordatorios WHERE empresa_id = %s ORDER BY tipo, dia_del_mes",
+                                (_eid_cfg,)
+                            )
+                            _recordatorios = _cur_rec.fetchall()
+                except Exception as _e_rec:
+                    st.error(f"Error cargando recordatorios: {_e_rec}")
+                    _recordatorios = []
+
+                # Separar por tipo
+                _recs_venc = [r for r in _recordatorios if r["tipo"] == "vencimiento"]
+                _recs_act  = [r for r in _recordatorios if r["tipo"] == "actualizacion"]
+
+                # ── Vencimiento de contrato ──
+                st.markdown("**📅 Vencimiento de contrato**")
+                st.caption("Enviá recordatorios al inquilino cuando el contrato está por vencer.")
+
+                for _r in _recs_venc:
+                    _rv1, _rv2, _rv3 = st.columns([3, 1, 1])
+                    _rv1.markdown(f"{'✅' if _r['activo'] else '❌'} **{_r['dia_del_mes']}** de cada mes")
+                    if _rv2.button("🔄", key=f"toggle_rec_{_r['id']}", help="Activar/Desactivar"):
+                        try:
+                            with _pg_conn() as _conn_tr:
+                                with _conn_tr.cursor() as _cur_tr:
+                                    _cur_tr.execute("UPDATE whatsapp_recordatorios SET activo = NOT activo WHERE id = %s", (_r["id"],))
+                                _conn_tr.commit()
+                            st.rerun()
+                        except Exception as _e_tr:
+                            st.error(f"Error: {_e_tr}")
+                    if _rv3.button("🗑️", key=f"del_rec_{_r['id']}", help="Eliminar"):
+                        try:
+                            with _pg_conn() as _conn_dr:
+                                with _conn_dr.cursor() as _cur_dr:
+                                    _cur_dr.execute("DELETE FROM whatsapp_recordatorios WHERE id = %s", (_r["id"],))
+                                _conn_dr.commit()
+                            st.rerun()
+                        except Exception as _e_dr:
+                            st.error(f"Error: {_e_dr}")
+
+                with st.form("form_rec_venc"):
+                    _rv_dias = st.number_input("Agregar recordatorio X días antes:", min_value=1, max_value=365, value=30, step=1, key="rv_dias_input")
+                    if st.form_submit_button("➕ Agregar"):
+                        try:
+                            with _pg_conn() as _conn_arv:
+                                with _conn_arv.cursor() as _cur_arv:
+                                    _cur_arv.execute(
+                                        "INSERT INTO whatsapp_recordatorios (empresa_id, tipo, dia_del_mes) VALUES (%s, 'vencimiento', %s)",
+                                        (_eid_cfg, int(_rv_dias))
+                                    )
+                                _conn_arv.commit()
+                            st.success(f"✅ Recordatorio de {int(_rv_dias)} días agregado.")
+                            st.rerun()
+                        except Exception as _e_arv:
+                            st.error(f"Error: {_e_arv}")
+
+                st.markdown("---")
+
+                # ── Próxima actualización ──
+                st.markdown("**📈 Próxima actualización de alquiler**")
+                st.caption("Avisá al inquilino cuando se acerca la fecha de actualización del alquiler.")
+
+                for _r in _recs_act:
+                    _ra1, _ra2, _ra3 = st.columns([3, 1, 1])
+                    _ra1.markdown(f"{'✅' if _r['activo'] else '❌'} **{_r['dia_del_mes']}** de cada mes")
+                    if _ra2.button("🔄", key=f"toggle_rec_{_r['id']}", help="Activar/Desactivar"):
+                        try:
+                            with _pg_conn() as _conn_ta:
+                                with _conn_ta.cursor() as _cur_ta:
+                                    _cur_ta.execute("UPDATE whatsapp_recordatorios SET activo = NOT activo WHERE id = %s", (_r["id"],))
+                                _conn_ta.commit()
+                            st.rerun()
+                        except Exception as _e_ta:
+                            st.error(f"Error: {_e_ta}")
+                    if _ra3.button("🗑️", key=f"del_rec_{_r['id']}", help="Eliminar"):
+                        try:
+                            with _pg_conn() as _conn_da:
+                                with _conn_da.cursor() as _cur_da:
+                                    _cur_da.execute("DELETE FROM whatsapp_recordatorios WHERE id = %s", (_r["id"],))
+                                _conn_da.commit()
+                            st.rerun()
+                        except Exception as _e_da:
+                            st.error(f"Error: {_e_da}")
+
+                with st.form("form_rec_act"):
+                    _ra_dias = st.number_input("Agregar recordatorio X días antes:", min_value=1, max_value=28, value=15, step=1, key="ra_dias_input")
+                    if st.form_submit_button("➕ Agregar"):
+                        try:
+                            with _pg_conn() as _conn_ara:
+                                with _conn_ara.cursor() as _cur_ara:
+                                    _cur_ara.execute(
+                                        "INSERT INTO whatsapp_recordatorios (empresa_id, tipo, dia_del_mes) VALUES (%s, 'actualizacion', %s)",
+                                        (_eid_cfg, int(_ra_dias))
+                                    )
+                                _conn_ara.commit()
+                            st.success(f"✅ Recordatorio de {int(_ra_dias)} días agregado.")
+                            st.rerun()
+                        except Exception as _e_ara:
+                            st.error(f"Error: {_e_ara}")
+
+
             st.markdown("---")
             st.markdown("##### 📲 WhatsApp Business")
 
@@ -7100,6 +7539,80 @@ if tab_superadmin:
                     st.rerun()
                 except Exception as _e_wa3:
                     st.error(f"Error: {_e_wa3}")
+
+            # ── Configuración de Recordatorios Automáticos ──────────────────
+            if st.session_state.get("cfg_whatsapp_habilitado", False):
+                st.markdown("---")
+                st.markdown("##### ⏰ Recordatorios Automáticos")
+                st.caption("Configurá cuántos días antes se envía cada tipo de recordatorio. Podés agregar múltiples.")
+
+                # Cargar recordatorios existentes
+                try:
+                    with _pg_conn() as _conn_rec:
+                        with _conn_rec.cursor() as _cur_rec:
+                            _cur_rec.execute(
+                                "SELECT id, tipo, dia_del_mes, activo FROM whatsapp_recordatorios WHERE empresa_id = %s ORDER BY tipo, dia_del_mes",
+                                (_eid_cfg,)
+                            )
+                            _recordatorios = _cur_rec.fetchall()
+                except Exception as _e_rec:
+                    st.error(f"Error cargando recordatorios: {_e_rec}")
+                    _recordatorios = []
+
+                # Mostrar y gestionar recordatorios existentes
+                for _tipo_lbl, _tipo_key in [("📅 Vencimiento de contrato", "vencimiento"), ("📈 Próxima actualización", "actualizacion")]:
+                    st.markdown(f"**{_tipo_lbl}:**")
+                    _recs_tipo = [r for r in _recordatorios if r["tipo"] == _tipo_key]
+
+                    if _recs_tipo:
+                        for _rec in _recs_tipo:
+                            _r1, _r2, _r3 = st.columns([3, 1, 1])
+                            _r1.markdown(f"{'✅' if _rec['activo'] else '❌'} {_rec['dia_del_mes']}** de cada mes")
+
+                            if _r2.button("🔄", key=f"tog_rec_{_rec['id']}", help="Activar/Desactivar"):
+                                try:
+                                    with _pg_conn() as _conn_tr:
+                                        with _conn_tr.cursor() as _cur_tr:
+                                            _cur_tr.execute("UPDATE whatsapp_recordatorios SET activo = NOT activo WHERE id = %s", (_rec['id'],))
+                                        _conn_tr.commit()
+                                    st.rerun()
+                                except Exception as _e_tr:
+                                    st.error(f"Error: {_e_tr}")
+
+                            if _r3.button("🗑️", key=f"del_rec_{_rec['id']}", help="Eliminar"):
+                                try:
+                                    with _pg_conn() as _conn_dr:
+                                        with _conn_dr.cursor() as _cur_dr:
+                                            _cur_dr.execute("DELETE FROM whatsapp_recordatorios WHERE id = %s", (_rec['id'],))
+                                        _conn_dr.commit()
+                                    st.rerun()
+                                except Exception as _e_dr:
+                                    st.error(f"Error: {_e_dr}")
+                    else:
+                        st.caption("No hay recordatorios configurados.")
+
+                    # Agregar nuevo recordatorio para este tipo
+                    _nc1, _nc2 = st.columns([2, 1])
+                    _dia_nuevo = _nc1.number_input(
+                        f"Agregar recordatorio ({_tipo_key}):",
+                        min_value=1, max_value=28, value=15, step=1,
+                        key=f"dias_nuevo_{_tipo_key}",
+                        label_visibility="collapsed"
+                    )
+                    if _nc2.button(f"➕ Agregar", key=f"btn_add_rec_{_tipo_key}", use_container_width=True):
+                        try:
+                            with _pg_conn() as _conn_ar:
+                                with _conn_ar.cursor() as _cur_ar:
+                                    _cur_ar.execute(
+                                        "INSERT INTO whatsapp_recordatorios (empresa_id, tipo, dia_del_mes) VALUES (%s, %s, %s)",
+                                        (_eid_cfg, _tipo_key, int(_dia_nuevo))
+                                    )
+                                _conn_ar.commit()
+                            st.success(f"✅ Recordatorio del día {_dia_nuevo} agregado.")
+                            st.rerun()
+                        except Exception as _e_ar:
+                            st.error(f"Error: {_e_ar}")
+                    st.markdown("")
 
 
 # =====================================================================
