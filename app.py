@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.170"
+APP_VERSION = "v1.171"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3363,42 +3363,73 @@ if tab_planilla:
                         # ── Envío directo de recibo preliminar ──
                         if _wa_plan_ok:
                             _tel_pre = str(_row.get("telefono", "") or "").strip().replace(" ","").replace("-","")
-                            if st.button("📋", key=f"btn_prelim_{_row['codigo_contrato']}", help="Enviar recibo preliminar por WhatsApp", use_container_width=False):
-                                if not _tel_pre:
-                                    st.warning(f"⚠️ {_row['alias_propiedad']}: sin teléfono registrado.")
-                                else:
-                                    _wa_creds_pre = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
-                                    if _wa_creds_pre:
-                                        try:
-                                            _alq_pre = float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0
-                                        except: _alq_pre = 0.0
-                                        _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
-                                        _exp_pre  = st.session_state.get(_key_exp_plan, 0.0)
-                                        _adicionales_pre = _coch_pre + _exp_pre
-                                        _total_pre = _alq_pre + _adicionales_pre
-                                        _dir_pre = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
-                                        _ok_pre = _enviar_mensaje_whatsapp(
-                                            phone_id=_wa_creds_pre["phone_id"],
-                                            token=_wa_creds_pre["token"],
-                                            numero_destino=_tel_pre,
-                                            template_name="recibo_preliminar_alquiler",
-                                            variables=[
-                                                _row["inquilino"], _nombre_mes, _dir_pre,
-                                                f"{_alq_pre:,.0f}", f"{_adicionales_pre:,.0f}",
-                                                f"{_total_pre:,.0f}",
-                                                datetime.now().date().replace(day=10).strftime("%d/%m/%Y"),
-                                            ]
-                                        )
-                                        if _ok_pre:
-                                            st.session_state[f"_reset_ver_{_row['codigo_contrato']}"] = True
-                                            st.session_state[f"_msg_prelim_{_row['codigo_contrato']}"] = f"✅ Preliminar enviado a {_row['inquilino']}."
-                                            st.rerun()
-                                        else:
-                                            st.error("❌ No se pudo enviar.")
-                                    else:
-                                        st.error("❌ Sin credenciales de WhatsApp.")
+                            _key_prelim_open = f"prelim_open_{_row['codigo_contrato']}"
+                            if _key_prelim_open not in st.session_state:
+                                st.session_state[_key_prelim_open] = False
 
-                            # Mostrar mensaje de éxito si se envió en el rerun anterior
+                            if st.button("📋", key=f"btn_prelim_{_row['codigo_contrato']}", help="Ver y enviar recibo preliminar por WhatsApp", use_container_width=False):
+                                st.session_state[_key_prelim_open] = not st.session_state[_key_prelim_open]
+                                st.rerun()
+
+                            # Preview del mensaje
+                            if st.session_state.get(_key_prelim_open, False):
+                                try:
+                                    _alq_pre = float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0
+                                except: _alq_pre = 0.0
+                                _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
+                                _exp_pre  = st.session_state.get(_key_exp_plan, 0.0)
+                                _adic_pre = _coch_pre + _exp_pre
+                                _total_pre = _alq_pre + _adic_pre
+                                _dir_pre = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
+                                _nombre_pre = _row["inquilino"]
+                                _fecha_lim_pre = datetime.now().date().replace(day=10).strftime("%d/%m/%Y")
+
+                                _texto_preview = (
+                                    f"Hola *{_nombre_pre}*, le acercamos el detalle del recibo preliminar "
+                                    f"correspondiente al período *{_nombre_mes}* de la propiedad ubicada en *{_dir_pre}*.\n\n"
+                                    f"📋 Detalle:\n"
+                                    f"• Alquiler: ${_alq_pre:,.0f}\n"
+                                    f"• Conceptos adicionales: ${_adic_pre:,.0f}\n"
+                                    f"• *Total a abonar: ${_total_pre:,.0f}*\n\n"
+                                    f"Por favor verificá los datos y abonalo antes del {_fecha_lim_pre}. "
+                                    f"Ante cualquier consulta comunicate con nosotros. Muchas gracias."
+                                )
+
+                                with st.expander(f"📋 Vista previa — {_row['alias_propiedad']}", expanded=True):
+                                    st.info(_texto_preview)
+                                    if not _tel_pre:
+                                        st.warning("⚠️ El inquilino no tiene teléfono registrado.")
+                                    else:
+                                        st.caption(f"📱 Se enviará al: +{_tel_pre}")
+                                        _c1, _c2 = st.columns(2)
+                                        if _c1.button("📲 Confirmar envío", key=f"btn_confirmar_prelim_{_row['codigo_contrato']}", type="primary"):
+                                            _wa_creds_pre = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
+                                            if _wa_creds_pre:
+                                                _ok_pre = _enviar_mensaje_whatsapp(
+                                                    phone_id=_wa_creds_pre["phone_id"],
+                                                    token=_wa_creds_pre["token"],
+                                                    numero_destino=_tel_pre,
+                                                    template_name="recibo_preliminar_alquiler",
+                                                    variables=[
+                                                        _nombre_pre, _nombre_mes, _dir_pre,
+                                                        f"{_alq_pre:,.0f}", f"{_adic_pre:,.0f}",
+                                                        f"{_total_pre:,.0f}", _fecha_lim_pre,
+                                                    ]
+                                                )
+                                                if _ok_pre:
+                                                    st.session_state[_key_prelim_open] = False
+                                                    st.session_state[f"_reset_ver_{_row['codigo_contrato']}"] = True
+                                                    st.session_state[f"_msg_prelim_{_row['codigo_contrato']}"] = f"✅ Preliminar enviado a {_nombre_pre}."
+                                                    st.rerun()
+                                                else:
+                                                    st.error("❌ No se pudo enviar.")
+                                            else:
+                                                st.error("❌ Sin credenciales de WhatsApp.")
+                                        if _c2.button("✖️ Cancelar", key=f"btn_cancelar_prelim_{_row['codigo_contrato']}"):
+                                            st.session_state[_key_prelim_open] = False
+                                            st.rerun()
+
+                            # Toast si se envió en el rerun anterior
                             if st.session_state.pop(f"_reset_ver_{_row['codigo_contrato']}", False):
                                 if _key_verificado in st.session_state:
                                     del st.session_state[_key_verificado]
