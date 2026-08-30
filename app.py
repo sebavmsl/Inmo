@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.171"
+APP_VERSION = "v1.173"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3542,8 +3542,7 @@ if tab_planilla:
                                 if _cc2.button("✖️ Cancelar", key=f"btn_cancelar_cobro_{_row['codigo_contrato']}"):
                                     st.session_state[f"cobro_open_{_row['codigo_contrato']}"] = False
                                     st.rerun()
-                # DEBUG WhatsApp — remover después
-                st.caption(f"🔧 WA debug: empresa={st.session_state.get('cfg_whatsapp_habilitado')} | usuario={st.session_state.get('usr_whatsapp_habilitado')}")
+
 
                 df_pendientes = df_cob[df_cob["pagado_mes"] == False]
                 df_pagados    = df_cob[df_cob["pagado_mes"] == True]
@@ -4812,9 +4811,8 @@ if tab_pagos:
                                             f"{monto_abonado:,.0f}",
                                             datetime.now().strftime("%d/%m/%Y"),
                                             metodo_pago,
-                                        ],
-                                        documento_bytes=_pdf_bytes,
-                                        documento_nombre=f"comprobante_{c_datos['codigo']}_{mes_periodo_texto.replace(' ','_')}.pdf"
+                                        ]
+                                        # documento_bytes=_pdf_bytes — habilitar cuando comprobante_pago_con_pdf esté aprobada
                                     )
                                     if _ok_wa:
                                         st.success("✅ Comprobante enviado por WhatsApp.")
