@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.160"
+APP_VERSION = "v1.161"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2123,6 +2123,133 @@ if "usr_whatsapp_habilitado" not in st.session_state:
                 )
                 _row_wa_s = _cur_wa_s.fetchone()
                 st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
+    except Exception:
+        st.session_state["usr_whatsapp_habilitado"] = False
+
+# ── Envío automático de recordatorios WhatsApp ──────────────────────────
+_hoy_rec = datetime.now().date()
+_flag_rec = f"recordatorios_enviados_{_hoy_rec.strftime('%Y-%m-%d')}"
+
+if (
+    st.session_state.get("cfg_whatsapp_habilitado", False) and
+    not st.session_state.get(_flag_rec, False)
+):
+    try:
+        _eid_rec = st.session_state.get("empresa_id", 0)
+        _hoy_dia = _hoy_rec.day
+
+        # Verificar si hoy es un día de recordatorio configurado
+        with _pg_conn() as _conn_rec_auto:
+            with _conn_rec_auto.cursor() as _cur_rec_auto:
+                _cur_rec_auto.execute(
+                    "SELECT tipo, dia_del_mes FROM whatsapp_recordatorios WHERE empresa_id = %s AND activo = TRUE AND dia_del_mes = %s",
+                    (_eid_rec, _hoy_dia)
+                )
+                _recs_hoy = _cur_rec_auto.fetchall()
+
+        if _recs_hoy:
+            _wa_creds_rec = _get_wa_credenciales(_eid_rec)
+
+            if _wa_creds_rec:
+                # Obtener contratos activos con datos necesarios
+                with _pg_conn() as _conn_c_rec:
+                    with _conn_c_rec.cursor() as _cur_c_rec:
+                        _cur_c_rec.execute("""
+                            SELECT c.codigo, c.fin_contrato, c.prox_actualizacion,
+                                   c.indice, p.calle, p.numero, p.piso, p.departamento,
+                                   i.nombres, i.apellidos, i.telefono
+                            FROM contratos c
+                            JOIN propiedades p ON c.propiedad_id = p.id
+                            JOIN inquilinos i ON c.dni_inquilino = i.dni
+                            WHERE c.empresa_id = %s AND c.estado = 'Activo'
+                            AND i.telefono IS NOT NULL AND i.telefono != ''
+                        """, (_eid_rec,))
+                        _contratos_rec = _cur_c_rec.fetchall()
+
+                _fecha_hoy_str = _hoy_rec.strftime("%Y-%m-%d")
+                _enviados = 0
+
+                for _tipo_rec in _recs_hoy:
+                    _tipo = _tipo_rec["tipo"]
+
+                    for _c_rec in _contratos_rec:
+                        # Verificar si ya se envió hoy para este contrato y tipo
+                        with _pg_conn() as _conn_log:
+                            with _conn_log.cursor() as _cur_log:
+                                _cur_log.execute(
+                                    "SELECT id FROM whatsapp_recordatorios_log WHERE empresa_id = %s AND tipo = %s AND codigo_contrato = %s AND fecha_envio = %s",
+                                    (_eid_rec, _tipo, _c_rec["codigo"], _fecha_hoy_str)
+                                )
+                                if _cur_log.fetchone():
+                                    continue  # Ya enviado hoy
+
+                        # Armar dirección
+                        _dir_rec = f"{_c_rec.get('calle','')} {_c_rec.get('numero','')}".strip()
+                        if _c_rec.get("piso"):
+                            _dir_rec += f" Piso {_c_rec['piso']}"
+                        if _c_rec.get("departamento"):
+                            _dir_rec += f" Depto {_c_rec['departamento']}"
+                        _nombre_rec = f"{_c_rec.get('nombres','')} {_c_rec.get('apellidos','')}".strip()
+                        _tel_rec = str(_c_rec.get("telefono","") or "").strip().replace(" ","").replace("-","")
+
+                        _enviado_ok = False
+
+                        if _tipo == "vencimiento" and _c_rec.get("fin_contrato"):
+                            try:
+                                _fin_rec = datetime.strptime(str(_c_rec["fin_contrato"])[:10], "%Y-%m-%d").date()
+                                _enviado_ok = _enviar_mensaje_whatsapp(
+                                    phone_id=_wa_creds_rec["phone_id"],
+                                    token=_wa_creds_rec["token"],
+                                    numero_destino=_tel_rec,
+                                    template_name="recordatorio_vencimiento_contrato",
+                                    variables=[
+                                        _nombre_rec,
+                                        _dir_rec,
+                                        _fin_rec.strftime("%d/%m/%Y"),
+                                    ]
+                                )
+                            except Exception as _e_rv:
+                                logging.warning(f"[Recordatorio] Error vencimiento contrato {_c_rec['codigo']}: {_e_rv}")
+
+                        elif _tipo == "actualizacion" and _c_rec.get("prox_actualizacion"):
+                            try:
+                                _prox_rec = datetime.strptime(str(_c_rec["prox_actualizacion"])[:10], "%Y-%m-%d").date()
+                                _enviado_ok = _enviar_mensaje_whatsapp(
+                                    phone_id=_wa_creds_rec["phone_id"],
+                                    token=_wa_creds_rec["token"],
+                                    numero_destino=_tel_rec,
+                                    template_name="recordatorio_actualizacion_alquiler",
+                                    variables=[
+                                        _nombre_rec,
+                                        _prox_rec.strftime("%d/%m/%Y"),
+                                        _dir_rec,
+                                        _c_rec.get("indice", "ICL"),
+                                    ]
+                                )
+                            except Exception as _e_ra:
+                                logging.warning(f"[Recordatorio] Error actualización contrato {_c_rec['codigo']}: {_e_ra}")
+
+                        # Registrar en log
+                        if _enviado_ok:
+                            try:
+                                with _pg_conn() as _conn_log2:
+                                    with _conn_log2.cursor() as _cur_log2:
+                                        _cur_log2.execute(
+                                            "INSERT INTO whatsapp_recordatorios_log (empresa_id, tipo, codigo_contrato, fecha_envio, enviado) VALUES (%s, %s, %s, %s, TRUE)",
+                                            (_eid_rec, _tipo, _c_rec["codigo"], _fecha_hoy_str)
+                                        )
+                                    _conn_log2.commit()
+                                _enviados += 1
+                            except Exception as _e_log:
+                                logging.warning(f"[Recordatorio] Error guardando log: {_e_log}")
+
+                logging.info(f"[Recordatorio] {_enviados} mensajes enviados para el día {_hoy_dia}.")
+
+        # Marcar como procesado para hoy
+        st.session_state[_flag_rec] = True
+
+    except Exception as _e_rec_auto:
+        logging.warning(f"[Recordatorio] Error en proceso automático: {_e_rec_auto}")
     except Exception:
         st.session_state["usr_whatsapp_habilitado"] = False
 
@@ -7222,7 +7349,20 @@ if tab_superadmin:
             st.markdown("#### ⚙️ Configuraciones Generales")
             st.caption("Estas opciones afectan el comportamiento de la app para toda la empresa.")
 
-            _eid_cfg = st.session_state.get("empresa_id", 0)
+            # Superadmin puede seleccionar cualquier empresa
+            if rol_sesion == "superadmin":
+                try:
+                    with _pg_conn() as _conn_emps:
+                        with _conn_emps.cursor() as _cur_emps:
+                            _cur_emps.execute("SELECT id, nombre_empresa FROM empresas ORDER BY nombre_empresa")
+                            _emps = _cur_emps.fetchall()
+                    _dict_emps = {f"{e['nombre_empresa']} (ID: {e['id']})": e['id'] for e in _emps}
+                    _emp_sel = st.selectbox("Seleccioná la empresa a configurar:", list(_dict_emps.keys()), key="cfg_empresa_sel")
+                    _eid_cfg = _dict_emps[_emp_sel]
+                except Exception:
+                    _eid_cfg = st.session_state.get("empresa_id", 0)
+            else:
+                _eid_cfg = st.session_state.get("empresa_id", 0)
 
             # Cargar configuración actual desde la BD (o crear default si no existe)
             try:
