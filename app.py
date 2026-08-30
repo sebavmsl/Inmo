@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.166"
+APP_VERSION = "v1.167"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2781,8 +2781,59 @@ if tab_planilla:
             else:
                 _pagaron = df_cob[df_cob["pagado_mes"] == True]
                 _faltan  = df_cob[df_cob["pagado_mes"] == False]
-                _res_col1, _res_col2, _res_col3 = st.columns([4, 1, 1])
+                _res_col1, _res_col2, _res_col3, _res_col4 = st.columns([4, 1, 1, 1])
                 _res_col1.markdown(f"✅ **Pagaron:** {len(_pagaron)}  &nbsp;&nbsp;  ⏳ **Faltan pagar:** {len(_faltan)}  &nbsp;&nbsp;  **Total:** {len(df_cob)}")
+
+                # Botón envío masivo de recibos preliminares
+                _wa_masivo_ok = (
+                    st.session_state.get("cfg_whatsapp_habilitado", False) and
+                    st.session_state.get("usr_whatsapp_habilitado", False)
+                )
+                if _wa_masivo_ok:
+                    if _res_col4.button("📲 Enviar preliminares", key="btn_prelim_masivo", use_container_width=True, help="Enviar recibo preliminar a todos los contratos con ✓ marcado"):
+                        _wa_creds_masivo = _get_wa_credenciales(_eid_plan)
+                        if _wa_creds_masivo:
+                            _enviados_masivo = 0
+                            _errores_masivo = 0
+                            for _, _rm in df_pendientes.iterrows():
+                                _key_ver_m = f"datos_verificados_{_rm['codigo_contrato']}"
+                                if not st.session_state.get(_key_ver_m, False):
+                                    continue
+                                _tel_m = str(_rm.get("telefono","") or "").strip().replace(" ","").replace("-","")
+                                if not _tel_m:
+                                    continue
+                                try:
+                                    _alq_m = float(str(_alquiler_display(_rm)).replace("$ ","").replace(",","")) if _alquiler_display(_rm) != "—" else 0.0
+                                except: _alq_m = 0.0
+                                _coch_m = float(_rm["cochera"]) if _rm["cochera"] and str(_rm["cochera"]) not in ("","None","nan") else 0.0
+                                _exp_m  = st.session_state.get(f"plan_exp_{_rm['codigo_contrato']}", 0.0)
+                                _adic_m = _coch_m + _exp_m
+                                _total_m = _alq_m + _adic_m
+                                _dir_m = f"{_rm.get('calle','')} {_rm.get('numero','')}".strip()
+                                _ok_m = _enviar_mensaje_whatsapp(
+                                    phone_id=_wa_creds_masivo["phone_id"],
+                                    token=_wa_creds_masivo["token"],
+                                    numero_destino=_tel_m,
+                                    template_name="recibo_preliminar_alquiler",
+                                    variables=[
+                                        _rm["inquilino"], _nombre_mes, _dir_m,
+                                        f"{_alq_m:,.0f}", f"{_adic_m:,.0f}", f"{_total_m:,.0f}",
+                                        datetime.now().date().replace(day=10).strftime("%d/%m/%Y"),
+                                    ]
+                                )
+                                if _ok_m:
+                                    _enviados_masivo += 1
+                                    st.session_state[_key_ver_m] = False  # reset checkbox
+                                else:
+                                    _errores_masivo += 1
+                            if _enviados_masivo > 0:
+                                st.success(f"✅ {_enviados_masivo} recibo(s) preliminar(es) enviado(s).")
+                            if _errores_masivo > 0:
+                                st.warning(f"⚠️ {_errores_masivo} envío(s) fallaron.")
+                            if _enviados_masivo == 0 and _errores_masivo == 0:
+                                st.info("ℹ️ No hay contratos con ✓ marcado para enviar.")
+                        else:
+                            st.error("❌ Sin credenciales de WhatsApp configuradas.")
 
                 # Botón actualizar valores ICL/IPC del mes
                 if _res_col3.button("🔄 Actualizar índices", key="btn_actualizar_indices", use_container_width=True, help="Calcula y guarda alquiler_calculado para todos los contratos ICL/IPC con actualización en el mes actual"):
@@ -3143,8 +3194,8 @@ if tab_planilla:
                     return False
 
                 # ── Renderizado con st.columns (todo en la misma línea) ──
-                _COLS = [0.4, 0.3, 1.2, 2, 0.7, 1, 0.8, 0.9, 1]
-                _HEADERS = ["💰", "", "Propiedad", "Inquilino", "Próx.Act.", "Alquiler", "Cochera", "F.Pago", "Expensas"]
+                _COLS = [0.4, 0.3, 0.4, 1.2, 2, 0.7, 1, 0.8, 0.9, 1]
+                _HEADERS = ["💰", "", "✓", "Propiedad", "Inquilino", "Próx.Act.", "Alquiler", "Cochera", "F.Pago", "Expensas"]
 
                 def _render_filas(df_iter, grupo_label=None):
                     if grupo_label:
@@ -3249,33 +3300,46 @@ if tab_planilla:
                         _icono_estado = "✅" if _row["pagado_mes"] else "⏳"
                         _rc[1].markdown(_cel(_icono_estado, align="center"), unsafe_allow_html=True)
 
+                        # Checkbox "Datos verificados" — solo para pendientes con WhatsApp habilitado
+                        _wa_plan_ok = (
+                            not _row["pagado_mes"] and
+                            st.session_state.get("cfg_whatsapp_habilitado", False) and
+                            st.session_state.get("usr_whatsapp_habilitado", False)
+                        )
+                        _key_verificado = f"datos_verificados_{_row['codigo_contrato']}"
+                        if _wa_plan_ok:
+                            _rc[2].checkbox("", key=_key_verificado, label_visibility="collapsed",
+                                          help="Datos verificados — incluir en envío masivo de recibo preliminar")
+                        else:
+                            _rc[2].markdown(_cel("", align="center"), unsafe_allow_html=True)
+
                         # Propiedad
-                        _rc[2].markdown(_cel(f"<strong>{_row['alias_propiedad']}</strong>"), unsafe_allow_html=True)
+                        _rc[3].markdown(_cel(f"<strong>{_row['alias_propiedad']}</strong>"), unsafe_allow_html=True)
 
                         # Inquilino
-                        _rc[3].markdown(_cel(_row["inquilino"]), unsafe_allow_html=True)
+                        _rc[4].markdown(_cel(_row["inquilino"]), unsafe_allow_html=True)
 
                         # Próx. actualización
-                        _rc[4].markdown(_cel(_prox_str, align="center"), unsafe_allow_html=True)
+                        _rc[5].markdown(_cel(_prox_str, align="center"), unsafe_allow_html=True)
 
                         # Alquiler — con alerta si corresponde
                         _alq_display = _alquiler_display(_row)
                         _alq_alerta  = _alquiler_alerta(_row)
                         if _alq_alerta:
-                            _rc[5].markdown(
+                            _rc[6].markdown(
                                 f"<div style='{_bg};font-size:0.75em;padding:5px 4px;border-bottom:1px solid #dee2e6;"
                                 f"color:#856404;background:#fff3cd;border-radius:3px;' title='Los valores no han sido cargados para generar un nuevo cálculo'>"
                                 f"⚠️ Sin calcular</div>",
                                 unsafe_allow_html=True
                             )
                         else:
-                            _rc[5].markdown(_cel(_alq_display, align="right"), unsafe_allow_html=True)
+                            _rc[6].markdown(_cel(_alq_display, align="right"), unsafe_allow_html=True)
 
                         # Cochera
-                        _rc[6].markdown(_cel(_fmt_num(_row["cochera"]), align="right"), unsafe_allow_html=True)
+                        _rc[7].markdown(_cel(_fmt_num(_row["cochera"]), align="right"), unsafe_allow_html=True)
 
                         # Fecha pago
-                        _rc[7].markdown(_cel(_fecha_pago, align="center"), unsafe_allow_html=True)
+                        _rc[8].markdown(_cel(_fecha_pago, align="center"), unsafe_allow_html=True)
 
                         # Expensas — number_input editable
                         try:
@@ -3285,7 +3349,7 @@ if tab_planilla:
                         _key_exp_plan = f"plan_exp_{_row['codigo_contrato']}"
                         if _key_exp_plan not in st.session_state:
                             st.session_state[_key_exp_plan] = _exp_val
-                        _exp_nuevo = _rc[8].number_input("Expensas", min_value=0.0, step=500.0, key=_key_exp_plan, label_visibility="collapsed")
+                        _exp_nuevo = _rc[9].number_input("Expensas", min_value=0.0, step=500.0, key=_key_exp_plan, label_visibility="collapsed")
                         if _exp_nuevo != _exp_val:
                             try:
                                 with _pg_conn() as _conn_exp:
@@ -3294,98 +3358,45 @@ if tab_planilla:
                                     _conn_exp.commit()
                                 _cached_planilla_cobranzas_mes.clear()
                             except Exception as _e_exp:
-                                _rc[8].error(f"Error: {_e_exp}")
+                                _rc[9].error(f"Error: {_e_exp}")
 
-                        # ── Recibo Preliminar por WhatsApp ──
-                        # Solo para pendientes y si WhatsApp está habilitado
-                        _wa_plan_ok = (
-                            not _row["pagado_mes"] and
-                            st.session_state.get("cfg_whatsapp_habilitado", False) and
-                            st.session_state.get("usr_whatsapp_habilitado", False)
-                        )
+                        # ── Envío directo de recibo preliminar ──
                         if _wa_plan_ok:
-                            _key_prelim = f"prelim_open_{_row['codigo_contrato']}"
-                            if _key_prelim not in st.session_state:
-                                st.session_state[_key_prelim] = False
-
-                            if st.button("📋 Preliminar", key=f"btn_prelim_{_row['codigo_contrato']}", help="Enviar recibo preliminar por WhatsApp", use_container_width=False):
-                                st.session_state[_key_prelim] = not st.session_state[_key_prelim]
-                                st.rerun()
-
-                            if st.session_state[_key_prelim]:
-                                with st.expander(f"📋 Recibo preliminar — {_row['alias_propiedad']}", expanded=True):
-                                    # Datos precargados
-                                    _p_col1, _p_col2 = st.columns(2)
-                                    _alq_pre = _p_col1.number_input(
-                                        "Alquiler ($):",
-                                        value=float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0,
-                                        min_value=0.0, step=1000.0,
-                                        key=f"pre_alq_{_row['codigo_contrato']}"
-                                    )
-                                    _coch_pre = _p_col1.number_input(
-                                        "Cochera ($):",
-                                        value=float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0,
-                                        min_value=0.0, step=500.0,
-                                        key=f"pre_coch_{_row['codigo_contrato']}"
-                                    )
-                                    _exp_pre = _p_col2.number_input(
-                                        "Expensas ($):",
-                                        value=st.session_state.get(_key_exp_plan, 0.0),
-                                        min_value=0.0, step=500.0,
-                                        key=f"pre_exp_{_row['codigo_contrato']}"
-                                    )
-                                    _fecha_limite = _p_col2.date_input(
-                                        "Fecha límite de pago:",
-                                        value=datetime.now().date().replace(day=10),
-                                        key=f"pre_fecha_{_row['codigo_contrato']}"
-                                    )
-                                    _adicionales_pre = _coch_pre + _exp_pre
-                                    _total_pre = _alq_pre + _adicionales_pre
-                                    st.markdown(f"**Total a abonar: $ {_total_pre:,.0f}**")
-
-                                    _verificado = st.checkbox(
-                                        "✅ Verifiqué los datos y están correctos",
-                                        key=f"pre_check_{_row['codigo_contrato']}"
-                                    )
-
-                                    _tel_pre = str(_row.get("telefono", "") or "").strip().replace(" ","").replace("-","")
-                                    if not _tel_pre:
-                                        st.warning("⚠️ El inquilino no tiene teléfono registrado.")
-                                    elif st.button(
-                                        "📲 Enviar preliminar",
-                                        key=f"btn_send_prelim_{_row['codigo_contrato']}",
-                                        disabled=not _verificado,
-                                        type="primary"
-                                    ):
-                                        _wa_creds_pre = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
-                                        if _wa_creds_pre:
-                                            _dir_pre = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
-                                            _nombre_pre = _row["inquilino"]
-                                            _ok_pre = _enviar_mensaje_whatsapp(
-                                                phone_id=_wa_creds_pre["phone_id"],
-                                                token=_wa_creds_pre["token"],
-                                                numero_destino=_tel_pre,
-                                                template_name="recibo_preliminar_alquiler",
-                                                variables=[
-                                                    _nombre_pre,
-                                                    _nombre_mes,
-                                                    _dir_pre,
-                                                    f"{_alq_pre:,.0f}",
-                                                    f"{_adicionales_pre:,.0f}",
-                                                    f"{_total_pre:,.0f}",
-                                                    _fecha_limite.strftime("%d/%m/%Y"),
-                                                ]
-                                            )
-                                            if _ok_pre:
-                                                st.success(f"✅ Recibo preliminar enviado a {_nombre_pre}.")
-                                                st.session_state[_key_prelim] = False
-                                                st.rerun()
-                                            else:
-                                                st.error("❌ No se pudo enviar. Verificá los logs.")
+                            _tel_pre = str(_row.get("telefono", "") or "").strip().replace(" ","").replace("-","")
+                            if st.button("📋", key=f"btn_prelim_{_row['codigo_contrato']}", help="Enviar recibo preliminar por WhatsApp", use_container_width=False):
+                                if not _tel_pre:
+                                    st.warning(f"⚠️ {_row['alias_propiedad']}: sin teléfono registrado.")
+                                else:
+                                    _wa_creds_pre = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
+                                    if _wa_creds_pre:
+                                        try:
+                                            _alq_pre = float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0
+                                        except: _alq_pre = 0.0
+                                        _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
+                                        _exp_pre  = st.session_state.get(_key_exp_plan, 0.0)
+                                        _adicionales_pre = _coch_pre + _exp_pre
+                                        _total_pre = _alq_pre + _adicionales_pre
+                                        _dir_pre = f"{_row.get('calle','')} {_row.get('numero','')}".strip()
+                                        _ok_pre = _enviar_mensaje_whatsapp(
+                                            phone_id=_wa_creds_pre["phone_id"],
+                                            token=_wa_creds_pre["token"],
+                                            numero_destino=_tel_pre,
+                                            template_name="recibo_preliminar_alquiler",
+                                            variables=[
+                                                _row["inquilino"], _nombre_mes, _dir_pre,
+                                                f"{_alq_pre:,.0f}", f"{_adicionales_pre:,.0f}",
+                                                f"{_total_pre:,.0f}",
+                                                datetime.now().date().replace(day=10).strftime("%d/%m/%Y"),
+                                            ]
+                                        )
+                                        if _ok_pre:
+                                            st.success(f"✅ Preliminar enviado a {_row['inquilino']}.")
+                                            st.session_state[_key_verificado] = False
                                         else:
-                                            st.error("❌ No se encontraron credenciales de WhatsApp.")
+                                            st.error("❌ No se pudo enviar.")
+                                    else:
+                                        st.error("❌ Sin credenciales de WhatsApp.")
 
-                        # ── Confirmar Pago desde Planilla ──
                         if not _row["pagado_mes"] and st.session_state.get(f"cobro_open_{_row['codigo_contrato']}", False):
                             with st.expander(f"✅ Confirmar pago — {_row['alias_propiedad']}", expanded=True):
                                 _c_col1, _c_col2 = st.columns(2)
