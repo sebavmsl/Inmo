@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.168"
+APP_VERSION = "v1.170"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2827,11 +2827,11 @@ if tab_planilla:
                                 else:
                                     _errores_masivo += 1
                             if _enviados_masivo > 0:
-                                st.success(f"✅ {_enviados_masivo} recibo(s) preliminar(es) enviado(s).")
+                                st.toast(f"✅ {_enviados_masivo} recibo(s) preliminar(es) enviado(s).", icon="✅")
                             if _errores_masivo > 0:
-                                st.warning(f"⚠️ {_errores_masivo} envío(s) fallaron.")
+                                st.toast(f"⚠️ {_errores_masivo} envío(s) fallaron.", icon="⚠️")
                             if _enviados_masivo == 0 and _errores_masivo == 0:
-                                st.info("ℹ️ No hay contratos con ✓ marcado para enviar.")
+                                st.toast("ℹ️ No hay contratos con ✓ marcado para enviar.", icon="ℹ️")
                         else:
                             st.error("❌ Sin credenciales de WhatsApp configuradas.")
 
@@ -3390,18 +3390,21 @@ if tab_planilla:
                                             ]
                                         )
                                         if _ok_pre:
-                                            st.success(f"✅ Preliminar enviado a {_row['inquilino']}.")
                                             st.session_state[f"_reset_ver_{_row['codigo_contrato']}"] = True
+                                            st.session_state[f"_msg_prelim_{_row['codigo_contrato']}"] = f"✅ Preliminar enviado a {_row['inquilino']}."
                                             st.rerun()
                                         else:
                                             st.error("❌ No se pudo enviar.")
                                     else:
                                         st.error("❌ Sin credenciales de WhatsApp.")
 
-                            # Reset del checkbox si se envió en el rerun anterior
+                            # Mostrar mensaje de éxito si se envió en el rerun anterior
                             if st.session_state.pop(f"_reset_ver_{_row['codigo_contrato']}", False):
                                 if _key_verificado in st.session_state:
                                     del st.session_state[_key_verificado]
+                            _msg_prelim = st.session_state.pop(f"_msg_prelim_{_row['codigo_contrato']}", None)
+                            if _msg_prelim:
+                                st.toast(_msg_prelim, icon="✅")
 
                         if not _row["pagado_mes"] and st.session_state.get(f"cobro_open_{_row['codigo_contrato']}", False):
                             with st.expander(f"✅ Confirmar pago — {_row['alias_propiedad']}", expanded=True):
