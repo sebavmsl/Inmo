@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.154"
+APP_VERSION = "v1.155"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -4266,13 +4266,53 @@ if tab_pagos:
                         prox_actualizacion=_prox_act_pdf,
                         aviso_actualizacion_proximo=_aviso_prox_act,
                     )
-                    st.download_button(
+                    _btn_col1, _btn_col2 = st.columns([1, 1])
+                    _btn_col1.download_button(
                         label="📄 Descargar Comprobante PDF",
                         data=_pdf_bytes,
                         file_name=f"{c_datos['apellidos']}_{c_datos['codigo']}_{mes_periodo_texto.lower().replace(' ','_')}.pdf",
                         mime="application/pdf",
                         help="Descarga el comprobante como PDF listo para archivar o enviar.",
+                        use_container_width=True,
                     )
+
+                    # Botón WhatsApp — solo si está habilitado para empresa y usuario
+                    _wa_ok = (
+                        st.session_state.get("cfg_whatsapp_habilitado", False) and
+                        st.session_state.get("usr_whatsapp_habilitado", False)
+                    )
+                    if _wa_ok:
+                        _tel_inq = str(c_datos.get("telefono", "") or "").strip().replace(" ", "").replace("-", "")
+                        if _tel_inq:
+                            if _btn_col2.button("📲 Enviar por WhatsApp", key=f"btn_wa_recibo_{c_datos['codigo']}", use_container_width=True):
+                                _wa_creds = _get_wa_credenciales(st.session_state.get("empresa_id", 0))
+                                if _wa_creds:
+                                    _dir_prop = c_datos.get("propiedad_dir", "")
+                                    _nombre_inq = f"{c_datos.get('nombres', '')} {c_datos.get('apellidos', '')}".strip()
+                                    _ok_wa = _enviar_mensaje_whatsapp(
+                                        phone_id=_wa_creds["phone_id"],
+                                        token=_wa_creds["token"],
+                                        numero_destino=_tel_inq,
+                                        template_name="comprobante_pago_alquiler",
+                                        variables=[
+                                            _nombre_inq,
+                                            mes_periodo_texto,
+                                            _dir_prop,
+                                            f"{monto_abonado:,.0f}",
+                                            datetime.now().strftime("%d/%m/%Y"),
+                                            metodo_pago,
+                                        ],
+                                        documento_bytes=_pdf_bytes,
+                                        documento_nombre=f"comprobante_{c_datos['codigo']}_{mes_periodo_texto.replace(' ','_')}.pdf"
+                                    )
+                                    if _ok_wa:
+                                        st.success("✅ Comprobante enviado por WhatsApp.")
+                                    else:
+                                        st.error("❌ No se pudo enviar el comprobante. Verificá los logs.")
+                                else:
+                                    st.error("❌ No se encontraron credenciales de WhatsApp configuradas.")
+                        else:
+                            _btn_col2.warning("⚠️ El inquilino no tiene teléfono registrado.")
 
 
 # =====================================================================
