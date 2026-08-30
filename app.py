@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.149"
+APP_VERSION = "v1.153"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2080,13 +2080,48 @@ if "cfg_actualizar_alquiler_auto" not in st.session_state:
         with _pg_conn() as _conn_cfg0:
             with _conn_cfg0.cursor() as _cur_cfg0:
                 _cur_cfg0.execute(
-                    "SELECT actualizar_alquiler_auto FROM configuraciones_empresa WHERE empresa_id = %s",
+                    """SELECT ce.actualizar_alquiler_auto, ce.whatsapp_habilitado,
+                              ce.whatsapp_credenciales_propias,
+                              ce.whatsapp_token, ce.whatsapp_phone_id,
+                              wn.token AS pool_token, wn.phone_id AS pool_phone_id
+                       FROM configuraciones_empresa ce
+                       LEFT JOIN whatsapp_numeros wn ON ce.whatsapp_numero_id = wn.id
+                       WHERE ce.empresa_id = %s""",
                     (st.session_state.get("empresa_id", 0),)
                 )
                 _row_cfg0 = _cur_cfg0.fetchone()
                 st.session_state["cfg_actualizar_alquiler_auto"] = bool(_row_cfg0["actualizar_alquiler_auto"]) if _row_cfg0 else True
+                st.session_state["cfg_whatsapp_habilitado"]      = bool(_row_cfg0["whatsapp_habilitado"])      if _row_cfg0 else False
+                # Resolver credenciales: propias o del pool
+                if _row_cfg0:
+                    if _row_cfg0["whatsapp_credenciales_propias"]:
+                        st.session_state["cfg_whatsapp_token"]    = _row_cfg0["whatsapp_token"]    or ""
+                        st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["whatsapp_phone_id"] or ""
+                    else:
+                        st.session_state["cfg_whatsapp_token"]    = _row_cfg0["pool_token"]    or ""
+                        st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["pool_phone_id"] or ""
+                else:
+                    st.session_state["cfg_whatsapp_token"]    = ""
+                    st.session_state["cfg_whatsapp_phone_id"] = ""
     except Exception:
         st.session_state["cfg_actualizar_alquiler_auto"] = True
+        st.session_state["cfg_whatsapp_habilitado"]      = False
+        st.session_state["cfg_whatsapp_token"]           = ""
+        st.session_state["cfg_whatsapp_phone_id"]        = ""
+
+# Cargar permiso de WhatsApp del usuario actual
+if "usr_whatsapp_habilitado" not in st.session_state:
+    try:
+        with _pg_conn() as _conn_wa_s:
+            with _conn_wa_s.cursor() as _cur_wa_s:
+                _cur_wa_s.execute(
+                    "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
+                    (st.session_state.get("usuario_actual", ""),)
+                )
+                _row_wa_s = _cur_wa_s.fetchone()
+                st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
+    except Exception:
+        st.session_state["usr_whatsapp_habilitado"] = False
 
 # 2. Definición maestra de pestañas
 pestanas_maestras = {
@@ -2204,7 +2239,119 @@ if _pestana_activa == "dashboard":
     tab_dashboard = st.container()
 if _pestana_activa == "planilla":
     tab_planilla = st.container()
-def _obtener_cotizacion_bna():
+def _get_wa_credenciales(empresa_id: int) -> dict:
+    """
+    Obtiene el token y phone_id de WhatsApp para una empresa.
+    Resuelve el token desde Supabase Vault si corresponde.
+    Retorna {"token": str, "phone_id": str} o None si no está configurado.
+    """
+    try:
+        with _pg_conn() as _conn_wac:
+            with _conn_wac.cursor() as _cur_wac:
+                _cur_wac.execute("""
+                    SELECT ce.whatsapp_habilitado, ce.whatsapp_credenciales_propias,
+                           ce.whatsapp_phone_id, ce.whatsapp_token_secret_id,
+                           ce.whatsapp_numero_id,
+                           wn.phone_id AS pool_phone_id, wn.token_secret_id AS pool_secret_id
+                    FROM configuraciones_empresa ce
+                    LEFT JOIN whatsapp_numeros wn ON wn.id = ce.whatsapp_numero_id
+                    WHERE ce.empresa_id = %s
+                """, (empresa_id,))
+                _row = _cur_wac.fetchone()
+                if not _row or not _row["whatsapp_habilitado"]:
+                    return None
+
+                if _row["whatsapp_credenciales_propias"]:
+                    # Token propio de la empresa — leer desde Vault
+                    _secret_id = _row["whatsapp_token_secret_id"]
+                    _phone_id  = _row["whatsapp_phone_id"]
+                else:
+                    # Token del pool del superadmin
+                    _secret_id = _row["pool_secret_id"]
+                    _phone_id  = _row["pool_phone_id"]
+
+                if not _secret_id or not _phone_id:
+                    return None
+
+                # Leer token desde Vault
+                _cur_wac.execute("SELECT leer_token_whatsapp(%s) AS token", (_secret_id,))
+                _token_row = _cur_wac.fetchone()
+                _token = _token_row["token"] if _token_row else None
+
+                if not _token:
+                    return None
+
+                return {"token": _token, "phone_id": _phone_id}
+    except Exception as _e_wac:
+        logging.warning(f"[WhatsApp] Error obteniendo credenciales: {_e_wac}")
+        return None
+
+
+def _enviar_mensaje_whatsapp(phone_id: str, token: str, numero_destino: str,
+                              template_name: str, variables: list, documento_bytes: bytes = None,
+                              documento_nombre: str = "documento.pdf") -> bool:
+    """
+    Envía un mensaje de WhatsApp usando la API de Meta.
+    Soporta plantillas con variables y documentos adjuntos.
+    """
+    import requests as _req
+    _headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    _url = f"https://graph.facebook.com/v19.0/{phone_id}/messages"
+
+    # Si hay documento, subirlo primero
+    _media_id = None
+    if documento_bytes:
+        try:
+            _upload_url = f"https://graph.facebook.com/v19.0/{phone_id}/media"
+            _upload_resp = _req.post(
+                _upload_url,
+                headers={"Authorization": f"Bearer {token}"},
+                files={"file": (documento_nombre, documento_bytes, "application/pdf")},
+                data={"messaging_product": "whatsapp"}
+            )
+            _media_id = _upload_resp.json().get("id")
+        except Exception as _e_upload:
+            logging.warning(f"[WhatsApp] Error subiendo documento: {_e_upload}")
+
+    # Armar componentes del template
+    _components = []
+    if _media_id:
+        _components.append({
+            "type": "header",
+            "parameters": [{"type": "document", "document": {"id": _media_id, "filename": documento_nombre}}]
+        })
+    if variables:
+        _components.append({
+            "type": "body",
+            "parameters": [{"type": "text", "text": str(v)} for v in variables]
+        })
+
+    _payload = {
+        "messaging_product": "whatsapp",
+        "to": numero_destino,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": "es"},
+            "components": _components
+        }
+    }
+
+    try:
+        _resp = _req.post(_url, headers=_headers, json=_payload, timeout=15)
+        _data = _resp.json()
+        if _resp.status_code == 200 and "messages" in _data:
+            logging.info(f"[WhatsApp] Mensaje enviado a {numero_destino} — template: {template_name}")
+            return True
+        else:
+            logging.warning(f"[WhatsApp] Error enviando a {numero_destino}: {_data}")
+            return False
+    except Exception as _e_send:
+        logging.warning(f"[WhatsApp] Excepción enviando: {_e_send}")
+        return False
     try:
         import urllib.request, json
         url = "https://api.bluelytics.com.ar/v2/latest"
@@ -5924,6 +6071,31 @@ if tab_superadmin:
                         p_aux   = st.checkbox("⚙️ Cargar Inquilinos / Propiedades",  value=("auxiliares"      in permisos_actuales))
                         p_gastos= st.checkbox("🔧 Gastos de Propiedades",            value=("gastos"          in permisos_actuales))
                         p_rend  = st.checkbox("📑 Rendición a Propietarios",         value=("rendicion"       in permisos_actuales))
+
+                        # WhatsApp — solo habilitado si la empresa tiene WhatsApp activo
+                        st.markdown("---")
+                        st.markdown("#### 📲 WhatsApp Business")
+                        _wa_empresa_ok = st.session_state.get("cfg_whatsapp_habilitado", False)
+                        if not _wa_empresa_ok:
+                            st.caption("Solicitá la funcionalidad de 📲 WhatsApp a tu administrador.")
+                        try:
+                            with _pg_conn() as _conn_wa_u:
+                                with _conn_wa_u.cursor() as _cur_wa_u:
+                                    _cur_wa_u.execute(
+                                        "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
+                                        (user_seleccionado,)
+                                    )
+                                    _row_wa_u = _cur_wa_u.fetchone()
+                                    _wa_user_actual = bool(_row_wa_u["whatsapp_habilitado"]) if _row_wa_u else False
+                        except Exception:
+                            _wa_user_actual = False
+                        _wa_user_nuevo = st.toggle(
+                            "Habilitar envío de mensajes por WhatsApp",
+                            value=_wa_user_actual,
+                            disabled=not _wa_empresa_ok,
+                            key=f"wa_user_{user_seleccionado}",
+                            help="Solo disponible si WhatsApp está habilitado para la empresa."
+                        )
     
                     btn_guardar_cambios = st.form_submit_button("💾 Guardar Cambios", type="primary")
     
@@ -5969,6 +6141,12 @@ if tab_superadmin:
                                     
                                 for p in nuevas_pestanas:
                                     cursor_emp.execute("INSERT INTO permisos_usuario (username, pestana) VALUES (%s, %s) ON CONFLICT (username, pestana) DO NOTHING", (user_seleccionado, p))
+
+                                # Guardar permiso de WhatsApp por usuario
+                                cursor_emp.execute(
+                                    "UPDATE permisos_usuario SET whatsapp_habilitado = %s WHERE username = %s",
+                                    (_wa_user_nuevo, user_seleccionado)
+                                )
                                     
                                 conn_emp.commit()
                                 conn_emp.close()
@@ -6728,6 +6906,157 @@ if tab_superadmin:
                     st.error(f"Error al guardar configuración: {_e_cfg2}")
             else:
                 st.session_state["cfg_actualizar_alquiler_auto"] = _valor_actual_cfg
+
+            # ── WhatsApp Business ──────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 📲 WhatsApp Business")
+
+            _es_superadmin_cfg = (rol_sesion == "superadmin")
+
+            try:
+                with _pg_conn() as _conn_wa:
+                    with _conn_wa.cursor() as _cur_wa:
+                        _cur_wa.execute(
+                            "SELECT whatsapp_habilitado, whatsapp_token, whatsapp_phone_id, whatsapp_credenciales_propias, whatsapp_numero_id FROM configuraciones_empresa WHERE empresa_id = %s",
+                            (_eid_cfg,)
+                        )
+                        _row_wa = _cur_wa.fetchone()
+                        _wa_habilitado      = bool(_row_wa["whatsapp_habilitado"])        if _row_wa else False
+                        _wa_token           = _row_wa["whatsapp_token"]        or ""      if _row_wa else ""
+                        _wa_phone_id        = _row_wa["whatsapp_phone_id"]     or ""      if _row_wa else ""
+                        _wa_cred_propias    = bool(_row_wa["whatsapp_credenciales_propias"]) if _row_wa else False
+                        _wa_numero_id       = _row_wa["whatsapp_numero_id"]               if _row_wa else None
+            except Exception as _e_wa:
+                st.error(f"Error al cargar configuración de WhatsApp: {_e_wa}")
+                _wa_habilitado, _wa_token, _wa_phone_id, _wa_cred_propias, _wa_numero_id = False, "", "", False, None
+
+            _wa_nuevo = st.toggle(
+                "Habilitar WhatsApp Business para esta empresa",
+                value=_wa_habilitado,
+                key="toggle_whatsapp_habilitado",
+                disabled=not _es_superadmin_cfg,
+                help="Solo el superadmin puede habilitar/deshabilitar este módulo."
+            )
+
+            if _wa_nuevo:
+                st.markdown("**¿Cómo se gestionan las credenciales?**")
+                _cred_modo = st.radio(
+                    "Modo de credenciales:",
+                    ["Usar número del pool (administrado por superadmin)", "La empresa gestiona sus propias credenciales"],
+                    index=1 if _wa_cred_propias else 0,
+                    key="wa_cred_modo",
+                    disabled=not _es_superadmin_cfg
+                )
+                _nueva_cred_propias = (_cred_modo == "La empresa gestiona sus propias credenciales")
+
+                if not _nueva_cred_propias:
+                    # ── Pool de números del superadmin ──
+                    st.markdown("**Asignar número del pool:**")
+                    if _es_superadmin_cfg:
+                        # Gestión del pool
+                        with st.expander("➕ Administrar pool de números"):
+                            with st.form("form_nuevo_numero_wa"):
+                                _nn_nombre   = st.text_input("Nombre/descripción del número:")
+                                _nn_phone_id = st.text_input("Phone Number ID:")
+                                _nn_token    = st.text_input("Token de acceso:", type="password")
+                                if st.form_submit_button("Agregar número"):
+                                    if _nn_nombre and _nn_phone_id and _nn_token:
+                                        try:
+                                            with _pg_conn() as _conn_nn:
+                                                with _conn_nn.cursor() as _cur_nn:
+                                                    # Guardar token en Vault y obtener secret_id
+                                                    _cur_nn.execute(
+                                                        "SELECT guardar_token_whatsapp(%s, %s) AS secret_id",
+                                                        (f"wa_num_{_nn_nombre.strip()}", _nn_token.strip())
+                                                    )
+                                                    _secret_id = _cur_nn.fetchone()["secret_id"]
+                                                    # Guardar número con secret_id (sin token en claro)
+                                                    _cur_nn.execute(
+                                                        "INSERT INTO whatsapp_numeros (nombre, phone_id, token_secret_id) VALUES (%s, %s, %s)",
+                                                        (_nn_nombre.strip(), _nn_phone_id.strip(), _secret_id)
+                                                    )
+                                                _conn_nn.commit()
+                                            st.success("✅ Número agregado con token encriptado en Vault.")
+                                            st.rerun()
+                                        except Exception as _e_nn:
+                                            st.error(f"Error: {_e_nn}")
+                                    else:
+                                        st.warning("Completá todos los campos.")
+
+                    # Selector de número del pool
+                    try:
+                        with _pg_conn() as _conn_pool:
+                            with _conn_pool.cursor() as _cur_pool:
+                                _cur_pool.execute("SELECT id, nombre, phone_id, activo FROM whatsapp_numeros ORDER BY id")
+                                _numeros_pool = _cur_pool.fetchall()
+                    except Exception:
+                        _numeros_pool = []
+
+                    if _numeros_pool:
+                        _dict_numeros = {f"{r['nombre']} ({r['phone_id']}){'  ⛔' if not r['activo'] else ''}": r['id'] for r in _numeros_pool}
+                        _num_actual_label = next((k for k, v in _dict_numeros.items() if v == _wa_numero_id), list(_dict_numeros.keys())[0])
+                        _num_sel_label = st.selectbox("Número asignado:", list(_dict_numeros.keys()), index=list(_dict_numeros.keys()).index(_num_actual_label), disabled=not _es_superadmin_cfg)
+                        _nuevo_numero_id = _dict_numeros[_num_sel_label]
+                    else:
+                        st.info("No hay números en el pool. Agregá uno con el botón de arriba.")
+                        _nuevo_numero_id = None
+                    _nuevo_token_empresa    = _wa_token
+                    _nuevo_phone_id_empresa = _wa_phone_id
+
+                else:
+                    # ── Credenciales propias de la empresa ──
+                    st.markdown("**Credenciales propias de la empresa:**")
+                    _nuevo_token_empresa    = st.text_input("Token de acceso:", value=_wa_token, type="password", key="wa_token_empresa")
+                    _nuevo_phone_id_empresa = st.text_input("Phone Number ID:", value=_wa_phone_id, key="wa_phone_id_empresa")
+                    _nuevo_numero_id        = _wa_numero_id
+
+                if _es_superadmin_cfg:
+                    if st.button("💾 Guardar configuración de WhatsApp", key="btn_guardar_wa"):
+                        try:
+                            with _pg_conn() as _conn_wa2:
+                                with _conn_wa2.cursor() as _cur_wa2:
+                                    _token_secret_id_guardar = None
+                                    if _nueva_cred_propias and _nuevo_token_empresa.strip():
+                                        # Guardar token en Vault
+                                        _cur_wa2.execute(
+                                            "SELECT guardar_token_whatsapp(%s, %s) AS secret_id",
+                                            (f"wa_empresa_{_eid_cfg}", _nuevo_token_empresa.strip())
+                                        )
+                                        _token_secret_id_guardar = _cur_wa2.fetchone()["secret_id"]
+                                    _cur_wa2.execute(
+                                        """UPDATE configuraciones_empresa SET
+                                            whatsapp_habilitado = %s,
+                                            whatsapp_credenciales_propias = %s,
+                                            whatsapp_numero_id = %s,
+                                            whatsapp_token = NULL,
+                                            whatsapp_phone_id = %s,
+                                            whatsapp_token_secret_id = %s
+                                        WHERE empresa_id = %s""",
+                                        (_wa_nuevo, _nueva_cred_propias, _nuevo_numero_id,
+                                         _nuevo_phone_id_empresa, _token_secret_id_guardar, _eid_cfg)
+                                    )
+                                _conn_wa2.commit()
+                            st.session_state["cfg_whatsapp_habilitado"]   = _wa_nuevo
+                            st.session_state["cfg_whatsapp_phone_id"]     = _nuevo_phone_id_empresa
+                            st.success("✅ Configuración de WhatsApp guardada con token encriptado en Vault.")
+                            st.rerun()
+                        except Exception as _e_wa2:
+                            st.error(f"Error al guardar: {_e_wa2}")
+
+            elif _wa_habilitado != _wa_nuevo and _es_superadmin_cfg:
+                try:
+                    with _pg_conn() as _conn_wa3:
+                        with _conn_wa3.cursor() as _cur_wa3:
+                            _cur_wa3.execute(
+                                "UPDATE configuraciones_empresa SET whatsapp_habilitado = %s WHERE empresa_id = %s",
+                                (_wa_nuevo, _eid_cfg)
+                            )
+                        _conn_wa3.commit()
+                    st.session_state["cfg_whatsapp_habilitado"] = _wa_nuevo
+                    st.success("✅ WhatsApp deshabilitado.")
+                    st.rerun()
+                except Exception as _e_wa3:
+                    st.error(f"Error: {_e_wa3}")
 
 
 # =====================================================================
