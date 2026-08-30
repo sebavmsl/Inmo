@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.165"
+APP_VERSION = "v1.166"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2590,7 +2590,7 @@ def _enviar_mensaje_whatsapp(phone_id: str, token: str, numero_destino: str,
         "type": "template",
         "template": {
             "name": template_name,
-            "language": {"code": "es"},
+            "language": {"code": "es_AR"},
             "components": _components
         }
     }
