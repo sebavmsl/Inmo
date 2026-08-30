@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.167"
+APP_VERSION = "v1.168"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2823,7 +2823,7 @@ if tab_planilla:
                                 )
                                 if _ok_m:
                                     _enviados_masivo += 1
-                                    st.session_state[_key_ver_m] = False  # reset checkbox
+                                    st.session_state[f"_reset_ver_{_rm['codigo_contrato']}"] = True
                                 else:
                                     _errores_masivo += 1
                             if _enviados_masivo > 0:
@@ -3391,11 +3391,17 @@ if tab_planilla:
                                         )
                                         if _ok_pre:
                                             st.success(f"✅ Preliminar enviado a {_row['inquilino']}.")
-                                            st.session_state[_key_verificado] = False
+                                            st.session_state[f"_reset_ver_{_row['codigo_contrato']}"] = True
+                                            st.rerun()
                                         else:
                                             st.error("❌ No se pudo enviar.")
                                     else:
                                         st.error("❌ Sin credenciales de WhatsApp.")
+
+                            # Reset del checkbox si se envió en el rerun anterior
+                            if st.session_state.pop(f"_reset_ver_{_row['codigo_contrato']}", False):
+                                if _key_verificado in st.session_state:
+                                    del st.session_state[_key_verificado]
 
                         if not _row["pagado_mes"] and st.session_state.get(f"cobro_open_{_row['codigo_contrato']}", False):
                             with st.expander(f"✅ Confirmar pago — {_row['alias_propiedad']}", expanded=True):
