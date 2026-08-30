@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.163"
+APP_VERSION = "v1.165"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2077,53 +2077,55 @@ with top_col2:
 # 1. Definición del rol actual
 rol_actual = st.session_state.get("usuario_rol", "user")
 
-# Cargar configuración de empresa (cacheada por sesión, se actualiza al guardar en Panel de Gestión)
-if "cfg_actualizar_alquiler_auto" not in st.session_state:
-    try:
-        with _pg_conn() as _conn_cfg0:
-            with _conn_cfg0.cursor() as _cur_cfg0:
-                _cur_cfg0.execute(
-                    """SELECT ce.actualizar_alquiler_auto, ce.whatsapp_habilitado,
-                              ce.whatsapp_credenciales_propias,
-                              ce.whatsapp_token, ce.whatsapp_phone_id,
-                              wn.token AS pool_token, wn.phone_id AS pool_phone_id
-                       FROM configuraciones_empresa ce
-                       LEFT JOIN whatsapp_numeros wn ON ce.whatsapp_numero_id = wn.id
-                       WHERE ce.empresa_id = %s""",
-                    (st.session_state.get("empresa_id", 0),)
-                )
-                _row_cfg0 = _cur_cfg0.fetchone()
-                st.session_state["cfg_actualizar_alquiler_auto"] = bool(_row_cfg0["actualizar_alquiler_auto"]) if _row_cfg0 else True
-                st.session_state["cfg_whatsapp_habilitado"]      = bool(_row_cfg0["whatsapp_habilitado"])      if _row_cfg0 else False
-                # Resolver credenciales: propias o del pool
-                if _row_cfg0:
-                    if _row_cfg0["whatsapp_credenciales_propias"]:
-                        st.session_state["cfg_whatsapp_token"]    = _row_cfg0["whatsapp_token"]    or ""
-                        st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["whatsapp_phone_id"] or ""
-                    else:
-                        st.session_state["cfg_whatsapp_token"]    = _row_cfg0["pool_token"]    or ""
-                        st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["pool_phone_id"] or ""
+# Cargar configuración de empresa — siempre desde BD
+try:
+    with _pg_conn() as _conn_cfg0:
+        with _conn_cfg0.cursor() as _cur_cfg0:
+            _cur_cfg0.execute(
+                """SELECT ce.actualizar_alquiler_auto, ce.whatsapp_habilitado,
+                          ce.whatsapp_credenciales_propias,
+                          ce.whatsapp_token, ce.whatsapp_phone_id,
+                          wn.phone_id AS pool_phone_id
+                   FROM configuraciones_empresa ce
+                   LEFT JOIN whatsapp_numeros wn ON ce.whatsapp_numero_id = wn.id
+                   WHERE ce.empresa_id = %s""",
+                (st.session_state.get("empresa_id", 0),)
+            )
+            _row_cfg0 = _cur_cfg0.fetchone()
+            st.session_state["cfg_actualizar_alquiler_auto"] = bool(_row_cfg0["actualizar_alquiler_auto"]) if _row_cfg0 else True
+            st.session_state["cfg_whatsapp_habilitado"]      = bool(_row_cfg0["whatsapp_habilitado"])      if _row_cfg0 else False
+            if _row_cfg0:
+                if _row_cfg0["whatsapp_credenciales_propias"]:
+                    st.session_state["cfg_whatsapp_token"]    = _row_cfg0["whatsapp_token"]    or ""
+                    st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["whatsapp_phone_id"] or ""
                 else:
-                    st.session_state["cfg_whatsapp_token"]    = ""
-                    st.session_state["cfg_whatsapp_phone_id"] = ""
-    except Exception:
-        st.session_state["cfg_actualizar_alquiler_auto"] = True
-        st.session_state["cfg_whatsapp_habilitado"]      = False
-        st.session_state["cfg_whatsapp_token"]           = ""
-        st.session_state["cfg_whatsapp_phone_id"]        = ""
+                    st.session_state["cfg_whatsapp_phone_id"] = _row_cfg0["pool_phone_id"] or ""
+                    st.session_state["cfg_whatsapp_token"]    = ""  # se lee desde Vault al enviar
+            else:
+                st.session_state["cfg_whatsapp_token"]    = ""
+                st.session_state["cfg_whatsapp_phone_id"] = ""
+except Exception:
+    st.session_state["cfg_actualizar_alquiler_auto"] = True
+    st.session_state["cfg_whatsapp_habilitado"]      = False
+    st.session_state["cfg_whatsapp_token"]           = ""
+    st.session_state["cfg_whatsapp_phone_id"]        = ""
 
 # Cargar permiso de WhatsApp del usuario actual — siempre desde BD
-try:
-    with _pg_conn() as _conn_wa_s:
-        with _conn_wa_s.cursor() as _cur_wa_s:
-            _cur_wa_s.execute(
-                "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
-                (st.session_state.get("usuario_actual", ""),)
-            )
-            _row_wa_s = _cur_wa_s.fetchone()
-            st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
-except Exception:
-    st.session_state["usr_whatsapp_habilitado"] = False
+# Superadmin siempre tiene WhatsApp habilitado
+if st.session_state.get("usuario_rol") == "superadmin":
+    st.session_state["usr_whatsapp_habilitado"] = True
+else:
+    try:
+        with _pg_conn() as _conn_wa_s:
+            with _conn_wa_s.cursor() as _cur_wa_s:
+                _cur_wa_s.execute(
+                    "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
+                    (st.session_state.get("usuario_actual", ""),)
+                )
+                _row_wa_s = _cur_wa_s.fetchone()
+                st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
+    except Exception:
+        st.session_state["usr_whatsapp_habilitado"] = False
 
 # ── Envío automático de recordatorios WhatsApp ──────────────────────────
 _hoy_rec = datetime.now().date()
