@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.162"
+APP_VERSION = "v1.163"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2112,19 +2112,18 @@ if "cfg_actualizar_alquiler_auto" not in st.session_state:
         st.session_state["cfg_whatsapp_token"]           = ""
         st.session_state["cfg_whatsapp_phone_id"]        = ""
 
-# Cargar permiso de WhatsApp del usuario actual
-if "usr_whatsapp_habilitado" not in st.session_state:
-    try:
-        with _pg_conn() as _conn_wa_s:
-            with _conn_wa_s.cursor() as _cur_wa_s:
-                _cur_wa_s.execute(
-                    "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
-                    (st.session_state.get("usuario_actual", ""),)
-                )
-                _row_wa_s = _cur_wa_s.fetchone()
-                st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
-    except Exception:
-        st.session_state["usr_whatsapp_habilitado"] = False
+# Cargar permiso de WhatsApp del usuario actual — siempre desde BD
+try:
+    with _pg_conn() as _conn_wa_s:
+        with _conn_wa_s.cursor() as _cur_wa_s:
+            _cur_wa_s.execute(
+                "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
+                (st.session_state.get("usuario_actual", ""),)
+            )
+            _row_wa_s = _cur_wa_s.fetchone()
+            st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
+except Exception:
+    st.session_state["usr_whatsapp_habilitado"] = False
 
 # ── Envío automático de recordatorios WhatsApp ──────────────────────────
 _hoy_rec = datetime.now().date()
