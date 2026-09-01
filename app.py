@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.174"
+APP_VERSION = "v1.176"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -5444,8 +5444,8 @@ if tab_carga:
                     # Sin contrato previo: resetear todo a defaults
                     st.session_state["estado_sel_main"]           = "Activo"
                     hoy = datetime.now().replace(day=1).date()
-                    st.session_state["inicio_contrato_main"]      = hoy
-                    st.session_state["fin_contrato_main"]         = hoy + dateutil.relativedelta.relativedelta(years=2)
+                    st.session_state["inicio_contrato_main"] = fecha_primer_dia_actual
+                    st.session_state["fin_contrato_main"]    = fecha_primer_dia_actual + dateutil.relativedelta.relativedelta(years=2, days=-1)
                     st.session_state["act_contrato_main"]         = "Semestral"
                     st.session_state["monto_inicial_main"]        = 80000.0
                     st.session_state["alquiler_ultimo_main"]      = 80000.0
@@ -5534,7 +5534,11 @@ if tab_carga:
                 
             # --- 2. FECHAS, PLAZOS Y DURACIÓN ---
             fecha_primer_dia_actual = datetime.now().replace(day=1).date()
-            fecha_primer_dia_vencimiento = fecha_primer_dia_actual + dateutil.relativedelta.relativedelta(years=2)
+            # Fin de contrato: último día del mes anterior a 2 años desde inicio
+            # Ej: inicio 01/09/2026 → fin 31/08/2028
+            import calendar as _cal
+            _fin_2a = fecha_primer_dia_actual + dateutil.relativedelta.relativedelta(years=2, days=-1)
+            fecha_primer_dia_vencimiento = _fin_2a
 
             # Inicializar session_state con defaults si no existen aún
             if "inicio_contrato_main" not in st.session_state:
@@ -6057,7 +6061,7 @@ if tab_carga:
             # --- BOTÓN GUARDAR FINAL ---
             st.markdown("---")
                 
-            boton_deshabilitado = (not permitir_edicion) or bloqueo_por_actualizacion or necesita_renovacion
+            boton_deshabilitado = (not permitir_edicion) or bloqueo_por_actualizacion or (necesita_renovacion and state_contrato == "Activo")
             texto_boton = "💾 Actualizar Contrato Existente" if (contrato_previo and "Actualizar" in modo_guardado) else "💾 Guardar y Registrar Contrato Completo"
                 
             btn_guardar_final = st.button(texto_boton, disabled=boton_deshabilitado, type="primary", key="btn_guardar_contrato_final_main")
