@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.173"
+APP_VERSION = "v1.174"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3921,8 +3921,7 @@ if tab_pagos:
                     _ultima_act_dt = prox_actualizacion_calculada - dateutil.relativedelta.relativedelta(months=int(meses_a_sumar))
                     _delta_ultima = dateutil.relativedelta.relativedelta(_ultima_act_dt, inicio_contrato_dt)
                     _meses_hasta_ultima_act = (_delta_ultima.years * 12) + _delta_ultima.months
-                    if _meses_hasta_ultima_act <= 0:
-                        _meses_hasta_ultima_act = int(meses_a_sumar)
+                    # No forzar a meses_a_sumar si es 0 — significa que aún no hubo actualización
             except Exception:
                 _meses_hasta_ultima_act = int(meses_a_sumar)
 
