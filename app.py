@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.176"
+APP_VERSION = "v1.177"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2119,11 +2119,10 @@ else:
         with _pg_conn() as _conn_wa_s:
             with _conn_wa_s.cursor() as _cur_wa_s:
                 _cur_wa_s.execute(
-                    "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
+                    "SELECT id FROM permisos_usuario WHERE username = %s AND pestana = 'whatsapp'",
                     (st.session_state.get("usuario_actual", ""),)
                 )
-                _row_wa_s = _cur_wa_s.fetchone()
-                st.session_state["usr_whatsapp_habilitado"] = bool(_row_wa_s["whatsapp_habilitado"]) if _row_wa_s else False
+                st.session_state["usr_whatsapp_habilitado"] = _cur_wa_s.fetchone() is not None
     except Exception:
         st.session_state["usr_whatsapp_habilitado"] = False
 
@@ -2251,133 +2250,6 @@ if (
 
     except Exception as _e_rec_auto:
         logging.warning(f"[Recordatorio] Error en proceso automático: {_e_rec_auto}")
-    except Exception:
-        st.session_state["usr_whatsapp_habilitado"] = False
-
-# ── Envío automático de recordatorios WhatsApp ─────────────────────────
-# Se ejecuta una vez por día por sesión si WhatsApp está habilitado
-_hoy_rec = datetime.now().date()
-_key_rec_hoy = f"recordatorios_enviados_{_hoy_rec}"
-if (
-    st.session_state.get("cfg_whatsapp_habilitado", False) and
-    not st.session_state.get(_key_rec_hoy, False)
-):
-    try:
-        _eid_rec = st.session_state.get("empresa_id", 0)
-        _dia_hoy = _hoy_rec.day
-
-        # Verificar si hoy hay recordatorios activos configurados
-        with _pg_conn() as _conn_rec_auto:
-            with _conn_rec_auto.cursor() as _cur_rec_auto:
-                _cur_rec_auto.execute(
-                    "SELECT tipo FROM whatsapp_recordatorios WHERE empresa_id = %s AND dia_del_mes = %s AND activo = TRUE",
-                    (_eid_rec, _dia_hoy)
-                )
-                _tipos_hoy = [r["tipo"] for r in _cur_rec_auto.fetchall()]
-
-        if _tipos_hoy:
-            _wa_creds_rec = _get_wa_credenciales(_eid_rec)
-
-            if _wa_creds_rec:
-                # Obtener contratos activos con datos necesarios
-                with _pg_conn() as _conn_c_rec:
-                    with _conn_c_rec.cursor() as _cur_c_rec:
-                        _cur_c_rec.execute("""
-                            SELECT c.codigo, c.fin_contrato, c.prox_actualizacion, c.indice,
-                                   i.nombres, i.apellidos, i.telefono,
-                                   p.calle, p.numero, p.departamento
-                            FROM contratos c
-                            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-                            JOIN inquilinos i ON c.dni_inquilino = i.dni
-                            WHERE c.empresa_id = %s AND c.estado = 'Activo'
-                        """, (_eid_rec,))
-                        _contratos_rec = _cur_c_rec.fetchall()
-
-                _fecha_hoy_str = _hoy_rec.strftime("%d/%m/%Y")
-                _enviados = 0
-
-                for _cr in _contratos_rec:
-                    _tel = str(_cr["telefono"] or "").strip().replace(" ","").replace("-","")
-                    if not _tel:
-                        continue
-
-                    _nombre = f"{_cr['nombres']} {_cr['apellidos']}".strip()
-                    _dir = f"{_cr['calle']} {_cr['numero']}"
-                    if _cr.get("departamento"):
-                        _dir += f" Dto. {_cr['departamento']}"
-
-                    # Verificar si ya se envió hoy este recordatorio
-                    with _pg_conn() as _conn_log:
-                        with _conn_log.cursor() as _cur_log:
-                            _cur_log.execute(
-                                "SELECT id FROM whatsapp_recordatorios_log WHERE empresa_id = %s AND codigo_contrato = %s AND fecha_envio = %s",
-                                (_eid_rec, _cr["codigo"], _fecha_hoy_str)
-                            )
-                            _ya_enviado = _cur_log.fetchone()
-
-                    if _ya_enviado:
-                        continue
-
-                    _enviado_algo = False
-
-                    # Recordatorio vencimiento
-                    if "vencimiento" in _tipos_hoy and _cr["fin_contrato"]:
-                        try:
-                            _fin_d = datetime.strptime(str(_cr["fin_contrato"])[:10], "%Y-%m-%d").date()
-                            _fin_fmt = _fin_d.strftime("%d/%m/%Y")
-                            _ok = _enviar_mensaje_whatsapp(
-                                phone_id=_wa_creds_rec["phone_id"],
-                                token=_wa_creds_rec["token"],
-                                numero_destino=_tel,
-                                template_name="recordatorio_vencimiento_contrato",
-                                variables=[_nombre, _dir, _fin_fmt]
-                            )
-                            if _ok:
-                                _enviado_algo = True
-                                _enviados += 1
-                        except Exception as _e_rv:
-                            logging.warning(f"[WA Recordatorio vencimiento] contrato {_cr['codigo']}: {_e_rv}")
-
-                    # Recordatorio actualización
-                    if "actualizacion" in _tipos_hoy and _cr["prox_actualizacion"]:
-                        try:
-                            _prox_d = datetime.strptime(str(_cr["prox_actualizacion"])[:10], "%Y-%m-%d").date()
-                            _prox_fmt = _prox_d.strftime("%d/%m/%Y")
-                            _indice = str(_cr["indice"] or "ICL")
-                            _ok = _enviar_mensaje_whatsapp(
-                                phone_id=_wa_creds_rec["phone_id"],
-                                token=_wa_creds_rec["token"],
-                                numero_destino=_tel,
-                                template_name="recordatorio_actualizacion_alquiler",
-                                variables=[_nombre, _prox_fmt, _dir, _indice]
-                            )
-                            if _ok:
-                                _enviado_algo = True
-                                _enviados += 1
-                        except Exception as _e_ra:
-                            logging.warning(f"[WA Recordatorio actualizacion] contrato {_cr['codigo']}: {_e_ra}")
-
-                    # Registrar en el log si se envió algo
-                    if _enviado_algo:
-                        try:
-                            with _pg_conn() as _conn_log2:
-                                with _conn_log2.cursor() as _cur_log2:
-                                    _cur_log2.execute(
-                                        "INSERT INTO whatsapp_recordatorios_log (empresa_id, tipo, codigo_contrato, fecha_envio) VALUES (%s, %s, %s, %s)",
-                                        (_eid_rec, ",".join(_tipos_hoy), _cr["codigo"], _fecha_hoy_str)
-                                    )
-                                _conn_log2.commit()
-                        except Exception as _e_log:
-                            logging.warning(f"[WA Log] Error guardando log: {_e_log}")
-
-                if _enviados > 0:
-                    logging.info(f"[WA Recordatorios] {_enviados} mensajes enviados el {_fecha_hoy_str}")
-
-        st.session_state[_key_rec_hoy] = True
-
-    except Exception as _e_rec_auto:
-        logging.warning(f"[WA Recordatorios] Error general: {_e_rec_auto}")
-
 # 2. Definición maestra de pestañas
 pestanas_maestras = {
     "📈 Tablero de Control": "dashboard",
@@ -6602,7 +6474,7 @@ if tab_superadmin:
                     st.markdown("---")
                     if nuevo_rol == "propietario":
                         st.info("🏠 El rol **Propietario** tiene acceso fijo de solo lectura a: Dashboard, Planilla de Contratos, Historial de Caja, Gastos de Propiedades y Rendición a Propietarios. No requiere configuración de permisos.")
-                        p_dash = p_plan = p_pagos = p_hist = p_carga = p_aux = p_gastos = p_rend = False
+                        p_dash = p_plan = p_pagos = p_hist = p_carga = p_aux = p_gastos = p_rend = p_wa = False
                     else:
                         st.markdown("#### 📑 Asignación de Permisos de Pestañas (Para roles 'admin' y 'user')")
 
@@ -6627,26 +6499,14 @@ if tab_superadmin:
                         p_gastos= st.checkbox("🔧 Gastos de Propiedades",            value=("gastos"          in permisos_actuales))
                         p_rend  = st.checkbox("📑 Rendición a Propietarios",         value=("rendicion"       in permisos_actuales))
 
-                        # WhatsApp — solo habilitado si la empresa tiene WhatsApp activo
                         st.markdown("---")
                         st.markdown("#### 📲 WhatsApp Business")
                         _wa_empresa_ok = st.session_state.get("cfg_whatsapp_habilitado", False)
                         if not _wa_empresa_ok:
                             st.caption("Solicitá la funcionalidad de 📲 WhatsApp a tu administrador.")
-                        try:
-                            with _pg_conn() as _conn_wa_u:
-                                with _conn_wa_u.cursor() as _cur_wa_u:
-                                    _cur_wa_u.execute(
-                                        "SELECT whatsapp_habilitado FROM permisos_usuario WHERE username = %s LIMIT 1",
-                                        (user_seleccionado,)
-                                    )
-                                    _row_wa_u = _cur_wa_u.fetchone()
-                                    _wa_user_actual = bool(_row_wa_u["whatsapp_habilitado"]) if _row_wa_u else False
-                        except Exception:
-                            _wa_user_actual = False
-                        _wa_user_nuevo = st.toggle(
-                            "Habilitar envío de mensajes por WhatsApp",
-                            value=_wa_user_actual,
+                        p_wa = st.checkbox(
+                            "📲 Envío de mensajes por WhatsApp",
+                            value=("whatsapp" in permisos_actuales),
                             disabled=not _wa_empresa_ok,
                             key=f"wa_user_{user_seleccionado}",
                             help="Solo disponible si WhatsApp está habilitado para la empresa."
@@ -6693,19 +6553,14 @@ if tab_superadmin:
                                 if p_aux: nuevas_pestanas.append("auxiliares")
                                 if p_gastos: nuevas_pestanas.append("gastos")
                                 if p_rend: nuevas_pestanas.append("rendicion")
+                                if p_wa: nuevas_pestanas.append("whatsapp")
                                     
                                 for p in nuevas_pestanas:
                                     cursor_emp.execute("INSERT INTO permisos_usuario (username, pestana) VALUES (%s, %s) ON CONFLICT (username, pestana) DO NOTHING", (user_seleccionado, p))
-
-                                # Guardar permiso de WhatsApp por usuario
-                                cursor_emp.execute(
-                                    "UPDATE permisos_usuario SET whatsapp_habilitado = %s WHERE username = %s",
-                                    (_wa_user_nuevo, user_seleccionado)
-                                )
                                     
                                 conn_emp.commit()
                                 conn_emp.close()
-                                st.success(f"Permisos de '{user_seleccionado}' actualizados. Se ha forzado la creación de la tabla de permisos.")
+                                st.success(f"Permisos de '{user_seleccionado}' actualizados.")
                                 
                         except Exception as e:
                             st.error(f"Error al sincronizar: {e}")
