@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.179"
+APP_VERSION = "v1.181"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -1480,8 +1480,8 @@ def _cached_contratos_activos(empresa_id: int, propietario_filtro: str = ""):
         SELECT c.codigo, p.alias_propiedad, (i.apellidos || ', ' || i.nombres) as inquilino,
             c.estado, c.fin_contrato, c.prox_actualizacion, c.alquiler, c.mes_contrato, c.act_contrato
         FROM contratos c
-        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+        JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
         WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where}
     '''
     return _query_df(query, _params)
@@ -1522,8 +1522,8 @@ def _cached_planilla_cobranzas_mes(empresa_id: int, mes: int, anio: int, propiet
             p.calle                                     AS calle,
             p.numero                                    AS numero
         FROM contratos c
-        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+        JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
         WHERE c.empresa_id = %s AND c.estado = 'Activo' {_where}
         ORDER BY p.id ASC
     """
@@ -1575,8 +1575,8 @@ def _cached_planilla_contratos(empresa_id: int, propietario_filtro: str = ""):
             c.servicios_total AS "SERVICIOS_TOTAL",
             c.total_pagado AS "TOTAL_ESTIMADO"
         FROM contratos c
-        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-        JOIN inquilinos i ON c.dni_inquilino = i.dni
+        JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
+        JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
         WHERE c.empresa_id = %s AND 1=1 {_where}
         ORDER BY c.codigo DESC
     '''
@@ -2160,7 +2160,7 @@ if (
                                    i.nombres, i.apellidos, i.telefono
                             FROM contratos c
                             JOIN propiedades p ON c.propiedad_id = p.id
-                            JOIN inquilinos i ON c.dni_inquilino = i.dni
+                            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                             WHERE c.empresa_id = %s AND c.estado = 'Activo'
                             AND i.telefono IS NOT NULL AND i.telefono != ''
                         """, (_eid_rec,))
@@ -3248,6 +3248,7 @@ if tab_planilla:
                             if st.session_state.get(_key_prelim_open, False):
                                 try:
                                     _alq_raw = _row.get("alquiler_calculado") or _row.get("ultimo_alquiler") or _row.get("monto_inicial") or 0
+                                    logging.info(f"[Prelim] contrato={_row.get('codigo_contrato')} alq_calc={_row.get('alquiler_calculado')} ult_alq={_row.get('ultimo_alquiler')} monto_ini={_row.get('monto_inicial')} → _alq_raw={_alq_raw}")
                                     _alq_pre = float(_alq_raw) if _alq_raw and str(_alq_raw) not in ("","None","nan") else 0.0
                                 except: _alq_pre = 0.0
                                 _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
@@ -3493,7 +3494,7 @@ if tab_pagos:
                 c.servicios, c.inicio_contrato, c.monto_inicial
             FROM contratos c
             JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
-            JOIN inquilinos i ON c.dni_inquilino = i.dni
+            JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
             WHERE c.empresa_id = %s AND c.estado = 'Activo'
             ORDER BY p.id ASC
         '''
