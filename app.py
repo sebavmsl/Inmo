@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.183"
+APP_VERSION = "v1.184"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2159,7 +2159,7 @@ if (
                                    c.indice, p.calle, p.numero, p.piso, p.departamento,
                                    i.nombres, i.apellidos, i.telefono
                             FROM contratos c
-                            JOIN propiedades p ON c.propiedad_id = p.id
+                            JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad AND p.empresa_id = c.empresa_id
                             JOIN inquilinos i ON c.dni_inquilino = i.dni AND i.empresa_id = c.empresa_id
                             WHERE c.empresa_id = %s AND c.estado = 'Activo'
                             AND i.telefono IS NOT NULL AND i.telefono != ''
@@ -2250,6 +2250,7 @@ if (
 
     except Exception as _e_rec_auto:
         logging.warning(f"[Recordatorio] Error en proceso automático: {_e_rec_auto}")
+        st.session_state[_flag_rec] = True  # evitar reintentos infinitos en la misma sesión
 # 2. Definición maestra de pestañas
 pestanas_maestras = {
     "📈 Tablero de Control": "dashboard",
