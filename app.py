@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.182"
+APP_VERSION = "v1.183"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2675,8 +2675,14 @@ if tab_planilla:
                                 if not _tel_m:
                                     continue
                                 try:
-                                    _alq_raw = _rm.get("alquiler_calculado") or _rm.get("ultimo_alquiler") or _rm.get("monto_inicial") or 0
-                                    _alq_m = float(_alq_raw) if _alq_raw and str(_alq_raw) not in ("","None","nan") else 0.0
+                                    import pandas as _pd2
+                                    def _safe_alq_m(v):
+                                        if v is None: return None
+                                        try:
+                                            if _pd2.isna(v): return None
+                                        except: pass
+                                        return float(v) if str(v) not in ('','None','nan','NaN') else None
+                                    _alq_m = _safe_alq_m(_rm.get("alquiler_calculado")) or _safe_alq_m(_rm.get("ultimo_alquiler")) or _safe_alq_m(_rm.get("monto_inicial")) or 0.0
                                 except: _alq_m = 0.0
                                 _coch_m = float(_rm["cochera"]) if _rm["cochera"] and str(_rm["cochera"]) not in ("","None","nan") else 0.0
                                 _exp_m  = st.session_state.get(f"plan_exp_{_rm['codigo_contrato']}", 0.0)
@@ -3250,9 +3256,14 @@ if tab_planilla:
                             # Preview del mensaje
                             if st.session_state.get(_key_prelim_open, False):
                                 try:
-                                    _alq_raw = _row.get("alquiler_calculado") or _row.get("ultimo_alquiler") or _row.get("monto_inicial") or 0
-                                    logging.info(f"[Prelim] contrato={_row.get('codigo_contrato')} alq_calc={_row.get('alquiler_calculado')} ult_alq={_row.get('ultimo_alquiler')} monto_ini={_row.get('monto_inicial')} → _alq_raw={_alq_raw}")
-                                    _alq_pre = float(_alq_raw) if _alq_raw and str(_alq_raw) not in ("","None","nan") else 0.0
+                                    import pandas as _pd
+                                    def _safe_alq(v):
+                                        if v is None: return None
+                                        try:
+                                            if _pd.isna(v): return None
+                                        except: pass
+                                        return float(v) if str(v) not in ('','None','nan','NaN') else None
+                                    _alq_pre = _safe_alq(_row.get('alquiler_calculado')) or _safe_alq(_row.get('ultimo_alquiler')) or _safe_alq(_row.get('monto_inicial')) or 0.0
                                 except: _alq_pre = 0.0
                                 _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
                                 _exp_pre  = st.session_state.get(_key_exp_plan, 0.0)
