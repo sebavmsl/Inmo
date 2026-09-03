@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.177"
+APP_VERSION = "v1.178"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2667,7 +2667,7 @@ if tab_planilla:
                         if _wa_creds_masivo:
                             _enviados_masivo = 0
                             _errores_masivo = 0
-                            for _, _rm in df_pendientes.iterrows():
+                            for _, _rm in df_cob[df_cob["pagado_mes"] == False].iterrows():
                                 _key_ver_m = f"datos_verificados_{_rm['codigo_contrato']}"
                                 if not st.session_state.get(_key_ver_m, False):
                                     continue
