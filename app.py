@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.181"
+APP_VERSION = "v1.182"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3239,6 +3239,9 @@ if tab_planilla:
                             _key_prelim_open = f"prelim_open_{_row['codigo_contrato']}"
                             if _key_prelim_open not in st.session_state:
                                 st.session_state[_key_prelim_open] = False
+                            
+                            # Log diagnóstico
+                            logging.info(f"[Prelim row] cod={_row.get('codigo_contrato')} alq={_row.get('ultimo_alquiler')} ini={_row.get('monto_inicial')} calc={_row.get('alquiler_calculado')}")
 
                             if st.button("📋", key=f"btn_prelim_{_row['codigo_contrato']}", help="Ver y enviar recibo preliminar por WhatsApp", use_container_width=False):
                                 st.session_state[_key_prelim_open] = not st.session_state[_key_prelim_open]
