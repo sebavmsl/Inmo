@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.178"
+APP_VERSION = "v1.179"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -2675,7 +2675,8 @@ if tab_planilla:
                                 if not _tel_m:
                                     continue
                                 try:
-                                    _alq_m = float(str(_alquiler_display(_rm)).replace("$ ","").replace(",","")) if _alquiler_display(_rm) != "—" else 0.0
+                                    _alq_raw = _rm.get("alquiler_calculado") or _rm.get("ultimo_alquiler") or _rm.get("monto_inicial") or 0
+                                    _alq_m = float(_alq_raw) if _alq_raw and str(_alq_raw) not in ("","None","nan") else 0.0
                                 except: _alq_m = 0.0
                                 _coch_m = float(_rm["cochera"]) if _rm["cochera"] and str(_rm["cochera"]) not in ("","None","nan") else 0.0
                                 _exp_m  = st.session_state.get(f"plan_exp_{_rm['codigo_contrato']}", 0.0)
@@ -3246,7 +3247,8 @@ if tab_planilla:
                             # Preview del mensaje
                             if st.session_state.get(_key_prelim_open, False):
                                 try:
-                                    _alq_pre = float(str(_alq_display).replace("$ ","").replace(",","")) if _alq_display != "—" else 0.0
+                                    _alq_raw = _row.get("alquiler_calculado") or _row.get("ultimo_alquiler") or _row.get("monto_inicial") or 0
+                                    _alq_pre = float(_alq_raw) if _alq_raw and str(_alq_raw) not in ("","None","nan") else 0.0
                                 except: _alq_pre = 0.0
                                 _coch_pre = float(_row["cochera"]) if _row["cochera"] and str(_row["cochera"]) not in ("","None","nan") else 0.0
                                 _exp_pre  = st.session_state.get(_key_exp_plan, 0.0)
