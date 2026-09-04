@@ -23,7 +23,7 @@ from contextlib import contextmanager
 # últimos 3 dígitos en cada nueva versión generada (v1.001 → v1.002 →
 # v1.003 ...). Se muestra como sello fijo en la esquina inferior derecha.
 # =====================================================================
-APP_VERSION = "v1.184"
+APP_VERSION = "v1.185"
 
 TERMINOS_TEXTO = """
 ## Términos y Condiciones de Uso
@@ -3414,7 +3414,7 @@ if tab_planilla:
                                                     phone_id=_wa_creds_cobro["phone_id"],
                                                     token=_wa_creds_cobro["token"],
                                                     numero_destino=_tel_cobro,
-                                                    template_name="comprobante_pago_alquiler",
+                                                    template_name="comprobante_pago_con_pdf",
                                                     variables=[
                                                         _row["inquilino"], _periodo_cobro, _dir_cobro,
                                                         f"{_abonado_cobro:,.0f}",
@@ -4692,7 +4692,7 @@ if tab_pagos:
                                         phone_id=_wa_creds["phone_id"],
                                         token=_wa_creds["token"],
                                         numero_destino=_tel_inq,
-                                        template_name="comprobante_pago_alquiler",
+                                        template_name="comprobante_pago_con_pdf",
                                         variables=[
                                             _nombre_inq,
                                             mes_periodo_texto,
@@ -4700,8 +4700,9 @@ if tab_pagos:
                                             f"{monto_abonado:,.0f}",
                                             datetime.now().strftime("%d/%m/%Y"),
                                             metodo_pago,
-                                        ]
-                                        # documento_bytes=_pdf_bytes — habilitar cuando comprobante_pago_con_pdf esté aprobada
+                                        ],
+                                        documento_bytes=_pdf_bytes,
+                                        documento_nombre=f"comprobante_{c_datos['codigo']}_{mes_periodo_texto.replace(' ','_')}.pdf"
                                     )
                                     if _ok_wa:
                                         st.success("✅ Comprobante enviado por WhatsApp.")
