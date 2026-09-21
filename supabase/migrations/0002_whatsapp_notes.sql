@@ -1,0 +1,39 @@
+-- =====================================================================
+-- 0002_whatsapp_notes.sql
+--
+-- Nota técnica (no ejecutable) de lo que encontramos al revisar app.py
+-- antes de portar los Módulos 3 y 8 (WhatsApp) a v2. Los tres hallazgos
+-- de abajo ya fueron corregidos en v1 (v1.184) — se deja el detalle como
+-- referencia de diseño, porque el criterio que terminó usando v1 es
+-- justamente el que hay que replicar en v2.
+-- =====================================================================
+
+-- HALLAZGO 1 (RESUELTO en v1.184) — Recordatorios automáticos rotos
+-- ─────────────────────────────────────────────────────────────────────
+-- Versión con bug: dos bloques duplicados de "envío automático de
+-- recordatorios", uno de ellos con JOIN propiedades p ON c.propiedad_id
+-- = p.id — columna que ni siquiera existe en `contratos` (confirmado en
+-- ESQUEMAS_VALIDOS). Fix aplicado: un solo bloque, con
+--     JOIN propiedades p ON c.alias_propiedad = p.alias_propiedad
+--       AND p.empresa_id = c.empresa_id
+--
+-- → Regla para v2: la relación contratos↔propiedades es SIEMPRE por
+--   `alias_propiedad`, nunca por un id numérico. Así está modelado en
+--   lib/types/database.types.ts.
+
+-- HALLAZGO 2 (RESUELTO en v1.184) — permiso de WhatsApp denormalizado
+-- ─────────────────────────────────────────────────────────────────────
+-- Versión con bug: `whatsapp_habilitado` era una columna booleana en
+-- `permisos_usuario` (tabla con PK compuesta username+pestana), pisada
+-- con un UPDATE sin filtro de pestana después de cada DELETE+INSERT de
+-- permisos — funcionaba solo por el orden de las operaciones.
+--
+-- Fix aplicado: "whatsapp" pasó a ser una pestaña más dentro de
+-- `permisos_usuario` (misma fila PK username+pestana que dashboard,
+-- planilla, etc.), sin columna aparte.
+--
+-- → Regla para v2: tratar "whatsapp" como una clave más en
+--   pestanas_maestras / permisos_usuario (ver lib/auth/permissions.ts),
+--   NO como una columna booleana separada. Esto es más simple que lo que
+--   habíamos planeado antes (columna en usuarios_central) y mantiene v2
+--   alineado 1:1 con el modelo de permisos que ya usa v1.
