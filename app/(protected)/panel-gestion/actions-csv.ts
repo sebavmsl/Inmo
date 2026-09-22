@@ -110,7 +110,11 @@ export async function exportarTablaCsv(empresaId: number, tabla: TablaExportable
     if (error) return { ok: false, error: error.message };
 
     const filas = (data ?? []).map((fila) => {
-      const registro = fila as Record<string, unknown>;
+      // `select()` recibe un string armado en runtime (no un literal), así
+      // que Supabase no puede inferir el tipo de fila y devuelve
+      // GenericStringError. Hace falta pasar por `unknown` antes de forzar
+      // a Record<string, unknown>.
+      const registro = fila as unknown as Record<string, unknown>;
       const salida: Record<string, unknown> = {};
       for (const columna of columnas) salida[columna.encabezado] = registro[columna.campo] ?? "";
       return salida;
