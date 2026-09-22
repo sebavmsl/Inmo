@@ -1,56 +1,34 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
-import { getInquilinoContratos } from "@/lib/inquilino/session";
 
-/**
- * Subir comprobante — NO carga un pago real en pagos_historial
- * automáticamente (ver docs/DESIGN_LOG.md, Módulo 9). Queda pendiente
- * de revisión para que el staff lo registre por el flujo normal.
- */
-export async function subirComprobante(
-  codigoContrato: string,
-  montoDeclarado: number,
-  archivo: File
-): Promise<{ ok: boolean; error?: string }> {
-  const contratos = await getInquilinoContratos();
-  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
-  if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
-
-  const supabase = await createClient();
-  const path = `${contrato.empresaId}/${codigoContrato}/${Date.now()}-${archivo.name}`;
-
-  const { error: errorUpload } = await supabase.storage.from("comprobantes-inquilino").upload(path, archivo);
-  if (errorUpload) return { ok: false, error: errorUpload.message };
-
-  const { error } = await supabase.from("comprobantes_inquilino").insert({
-    empresa_id: contrato.empresaId,
-    codigo_contrato: codigoContrato,
-    storage_path: path,
-    monto_declarado: montoDeclarado,
-    estado: "pendiente",
-  });
-
-  if (error) return { ok: false, error: error.message };
-  revalidatePath("/portal/subir-comprobante");
-  return { ok: true };
+export interface LoginPortalState {
+  error: string | null;
 }
 
-export async function crearReclamo(codigoContrato: string, descripcion: string): Promise<{ ok: boolean; error?: string }> {
-  const contratos = await getInquilinoContratos();
-  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
-  if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
+/**
+ * Login del Portal del Inquilino — más simple que el del staff (Módulo
+ * 1): acá se loguea directo por email, sin la resolución
+ * username→email que necesita el staff (v1 loguea por username; los
+ * inquilinos nunca tuvieron ese concepto, entran directo con su email).
+ */
+export async function loginPortal(_prevState: LoginPortalState, formData: FormData): Promise<LoginPortalState> {
+  const email = formData.get("email") as string;
+  const password = formData.get("password") as string;
+
+  if (!email || !password) return { error: "Completá email y contraseña." };
 
   const supabase = await createClient();
-  const { error } = await supabase.from("reclamos_inquilino").insert({
-    empresa_id: contrato.empresaId,
-    codigo_contrato: codigoContrato,
-    descripcion,
-    estado: "abierto",
-  });
+  const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-  if (error) return { ok: false, error: error.message };
-  revalidatePath("/portal/reclamos");
-  return { ok: true };
+  if (error) return { error: "Email o contraseña incorrectos." };
+
+  redirect("/portal/mi-cuenta");
+}
+
+export async function logoutPortal() {
+  const supabase = await createClient();
+  await supabase.auth.signOut();
+  redirect("/portal/login");
 }

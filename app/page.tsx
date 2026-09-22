@@ -1,7 +1,7 @@
-import { redirect } from "next/navigation";
-import { getSessionProfile } from "@/lib/auth/session";
+import { requireInquilinoContratos } from "@/lib/inquilino/session";
+import { FormularioReclamo } from "@/components/portal/FormularioReclamo";
 
-export default async function RootPage() {
-  const perfil = await getSessionProfile();
-  redirect(perfil ? "/dashboard" : "/login");
+export default async function ReclamosPage() {
+  const contratos = await requireInquilinoContratos();
+  return <FormularioReclamo contratos={contratos} />;
 }

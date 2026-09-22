@@ -84,13 +84,22 @@ function PlanillaPdf({ filas, empresa }: { filas: FilaPlanilla[]; empresa: strin
   );
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   const perfil = await requireSessionProfileConPermiso("planilla");
 
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
 
-  const filas = await getCobranzasDelMes(propietarioFiltro);
+  // Mismo criterio que app/(protected)/planilla/page.tsx: superadmin no
+  // tiene empresa_id propio, así que sin ?empresa= en la URL el PDF trae
+  // los contratos sin empresa asignada (nunca todas mezcladas), reflejando
+  // exactamente lo que superadmin está viendo en pantalla al hacer clic
+  // en "Descargar PDF".
+  const empresaParam = new URL(request.url).searchParams.get("empresa");
+  const empresaFiltro: number | null | undefined =
+    perfil.rol === "superadmin" ? (empresaParam ? Number(empresaParam) : null) : undefined;
+
+  const filas = await getCobranzasDelMes(propietarioFiltro, empresaFiltro);
   const buffer = await renderToBuffer(<PlanillaPdf filas={filas} empresa={perfil.nombreEmpresa} />);
 
   return new NextResponse(new Uint8Array(buffer), {

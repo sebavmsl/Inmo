@@ -8,7 +8,19 @@ export function periodoActual(): string {
   return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
 }
 
-export async function getCobranzasDelMes(propietarioFiltro?: string): Promise<FilaPlanilla[]> {
+/**
+ * @param empresaFiltro Filtro explícito por empresa, solo relevante para
+ *   superadmin (los demás roles ya quedan acotados a su propia empresa por
+ *   RLS, así que pasan `undefined` = sin filtro adicional acá). superadmin
+ *   no tiene `empresa_id` propio, así que por defecto (ver page.tsx) se le
+ *   pasa `null` acá para mostrarle los contratos "huérfanos" (sin empresa
+ *   asignada) en vez de mezclar todas las inmobiliarias en una sola tabla;
+ *   eligiendo una empresa del desplegable se pasa su id numérico.
+ */
+export async function getCobranzasDelMes(
+  propietarioFiltro?: string,
+  empresaFiltro?: number | null
+): Promise<FilaPlanilla[]> {
   const supabase = await createClient();
   const periodo = periodoActual();
 
@@ -17,6 +29,10 @@ export async function getCobranzasDelMes(propietarioFiltro?: string): Promise<Fi
   //    para la explicación de por qué no usamos embeds de PostgREST).
   let propiedadesQuery = supabase.from("propiedades").select("alias_propiedad, propietario, calle, numero");
   if (propietarioFiltro) propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades, error: errProp } = await propiedadesQuery;
   if (errProp) throw new Error(`[Planilla] Error cargando propiedades: ${errProp.message}`);
 
@@ -33,6 +49,10 @@ export async function getCobranzasDelMes(propietarioFiltro?: string): Promise<Fi
     .or("estado.eq.Activo,and(finalizado_por.eq.auto_vencimiento,archivado.eq.false)");
 
   if (aliasPermitidos) contratosQuery = contratosQuery.in("alias_propiedad", Array.from(aliasPermitidos));
+  if (empresaFiltro !== undefined) {
+    contratosQuery =
+      empresaFiltro === null ? contratosQuery.is("empresa_id", null) : contratosQuery.eq("empresa_id", empresaFiltro);
+  }
 
   const { data: contratos, error: errCont } = await contratosQuery;
   if (errCont) throw new Error(`[Planilla] Error cargando contratos: ${errCont.message}`);

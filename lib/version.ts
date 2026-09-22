@@ -29,5 +29,12 @@
  *   - Panel de Gestión: migración masiva por CSV (importar/exportar
  *     Propiedades, Inquilinos, Contratos, Gastos; exportar además Pagos
  *     y Permisos), y selector de empresa agregado a Borrado en Bloque.
+ *
+ * V2.003 — tercera entrega:
+ *   - Planilla de Contratos: para superadmin (que no tiene empresa_id
+ *     propio) ya no se mezclan los contratos de todas las inmobiliarias
+ *     en una sola tabla — por defecto se muestran los contratos sin
+ *     empresa asignada ("huérfanos"), con un desplegable para elegir una
+ *     empresa puntual. El PDF ("Descargar PDF") respeta el mismo filtro.
  */
-export const APP_VERSION = "V2.002";
+export const APP_VERSION = "V2.003";
