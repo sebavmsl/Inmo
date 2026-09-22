@@ -1,34 +1,56 @@
 "use server";
 
-import { redirect } from "next/navigation";
+import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-
-export interface LoginPortalState {
-  error: string | null;
-}
+import { getInquilinoContratos } from "@/lib/inquilino/session";
 
 /**
- * Login del Portal del Inquilino — más simple que el del staff (Módulo
- * 1): acá se loguea directo por email, sin la resolución
- * username→email que necesita el staff (v1 loguea por username; los
- * inquilinos nunca tuvieron ese concepto, entran directo con su email).
+ * Subir comprobante — NO carga un pago real en pagos_historial
+ * automáticamente (ver docs/DESIGN_LOG.md, Módulo 9). Queda pendiente
+ * de revisión para que el staff lo registre por el flujo normal.
  */
-export async function loginPortal(_prevState: LoginPortalState, formData: FormData): Promise<LoginPortalState> {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-
-  if (!email || !password) return { error: "Completá email y contraseña." };
+export async function subirComprobante(
+  codigoContrato: string,
+  montoDeclarado: number,
+  archivo: File
+): Promise<{ ok: boolean; error?: string }> {
+  const contratos = await getInquilinoContratos();
+  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
+  if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const path = `${contrato.empresaId}/${codigoContrato}/${Date.now()}-${archivo.name}`;
 
-  if (error) return { error: "Email o contraseña incorrectos." };
+  const { error: errorUpload } = await supabase.storage.from("comprobantes-inquilino").upload(path, archivo);
+  if (errorUpload) return { ok: false, error: errorUpload.message };
 
-  redirect("/portal/mi-cuenta");
+  const { error } = await supabase.from("comprobantes_inquilino").insert({
+    empresa_id: contrato.empresaId,
+    codigo_contrato: codigoContrato,
+    storage_path: path,
+    monto_declarado: montoDeclarado,
+    estado: "pendiente",
+  });
+
+  if (error) return { ok: false, error: error.message };
+  revalidatePath("/portal/subir-comprobante");
+  return { ok: true };
 }
 
-export async function logoutPortal() {
+export async function crearReclamo(codigoContrato: string, descripcion: string): Promise<{ ok: boolean; error?: string }> {
+  const contratos = await getInquilinoContratos();
+  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
+  if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
+
   const supabase = await createClient();
-  await supabase.auth.signOut();
-  redirect("/portal/login");
+  const { error } = await supabase.from("reclamos_inquilino").insert({
+    empresa_id: contrato.empresaId,
+    codigo_contrato: codigoContrato,
+    descripcion,
+    estado: "abierto",
+  });
+
+  if (error) return { ok: false, error: error.message };
+  revalidatePath("/portal/reclamos");
+  return { ok: true };
 }

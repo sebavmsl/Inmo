@@ -48,5 +48,16 @@
  *     captura de regex (`d`, `m`) usados sin fallback.
  *   - csv-migracion/parseCsv.ts: mismo patrón en el filtro de líneas en
  *     blanco (`f[0]`).
+ *
+ * V2.005 — quinta entrega (segundo fix de build de Vercel): otro error
+ *   real de compilación en el mismo módulo (actions-csv.ts,
+ *   exportarTablaCsv): el `.select()` de la rama de tablas importables
+ *   arma la lista de campos en runtime (`camposSql.join(", ")`), y
+ *   Supabase no puede validar esa lista contra el schema en tiempo de
+ *   compilación — tipa el resultado como "GenericStringError" en vez de
+ *   la fila real, así que el cast directo a `Record<string, unknown>`
+ *   fallaba. Se corrige pasando por `unknown` primero. Se revisó el
+ *   resto del proyecto buscando el mismo patrón (`.select()` con string
+ *   armado en runtime) y no aparece en ningún otro lugar.
  */
-export const APP_VERSION = "V2.004";
+export const APP_VERSION = "V2.005";

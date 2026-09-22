@@ -110,7 +110,12 @@ export async function exportarTablaCsv(empresaId: number, tabla: TablaExportable
     if (error) return { ok: false, error: error.message };
 
     const filas = (data ?? []).map((fila) => {
-      const registro = fila as Record<string, unknown>;
+      // El .select() de arriba arma la lista de campos en runtime
+      // (camposSql.join(", ")), así que Supabase no puede validarla contra
+      // el schema en tiempo de compilación y tipa el resultado como
+      // "GenericStringError" en vez de la fila real — de ahí el cast en
+      // dos pasos (unknown primero) en vez de uno directo a Record.
+      const registro = fila as unknown as Record<string, unknown>;
       const salida: Record<string, unknown> = {};
       for (const columna of columnas) salida[columna.encabezado] = registro[columna.campo] ?? "";
       return salida;
