@@ -188,5 +188,18 @@
  *   En los cuatro casos, si el registro no pertenece a la empresa activa
  *   la acción ahora devuelve un error explícito en vez de fallar en
  *   silencio o tocar el registro equivocado.
+ *
+ * V2.011 — onceava entrega: diagnóstico de "Editar Contrato" (Carga)
+ *   colgado en "Cargando…" tras habilitar el selector global. La causa
+ *   de fondo era de base de datos (ver migraciones 0019 y 0020, no
+ *   versionan acá porque no son código de la app):
+ *   - components/carga/EditarContrato.tsx: bug de UI que ya existía
+ *     antes de esta sesión (mismo patrón en GestionUsuarios.tsx,
+ *     FormularioGrupo.tsx, EditarPropiedad.tsx, EditarInquilino.tsx, no
+ *     tocados todavía) — si `listarContratos()` tira un error, no había
+ *     catch, así que el estado "cargando" quedaba en true para siempre:
+ *     un error real se veía IDÉNTICO a una consulta lenta, sin ningún
+ *     mensaje. Se agrega try/catch + mensaje de error + botón
+ *     "Reintentar", para que de acá en más un error se vea como error.
  */
-export const APP_VERSION = "V2.010";
+export const APP_VERSION = "V2.011";

@@ -34,12 +34,24 @@ const CAMPOS_CARGO: { campo: keyof DatosEditarContrato; label: string }[] = [
 export function EditarContrato() {
   const [contratos, setContratos] = useState<ContratoEditable[]>([]);
   const [cargando, setCargando] = useState(true);
+  const [errorCarga, setErrorCarga] = useState<string | null>(null);
   const [editando, setEditando] = useState<ContratoEditable | null>(null);
 
+  // Antes, si listarContratos() tiraba una excepción (error de red, de
+  // RLS/permisos, lo que sea), el catch faltante dejaba `cargando` en
+  // true para siempre — el "Cargando…" quedaba pegado sin ningún
+  // mensaje, indistinguible de una consulta lenta de verdad. Con el
+  // try/catch, un error real se ve como error (no como carga eterna).
   async function recargar() {
     setCargando(true);
-    setContratos(await listarContratos());
-    setCargando(false);
+    setErrorCarga(null);
+    try {
+      setContratos(await listarContratos());
+    } catch (e) {
+      setErrorCarga(e instanceof Error ? e.message : "Error cargando los contratos.");
+    } finally {
+      setCargando(false);
+    }
   }
 
   useEffect(() => {
@@ -52,6 +64,16 @@ export function EditarContrato() {
 
       {cargando ? (
         <p className="text-sm text-brand-400">Cargando…</p>
+      ) : errorCarga ? (
+        <div className="space-y-2">
+          <p className="text-sm text-red-600">⚠️ {errorCarga}</p>
+          <button
+            onClick={recargar}
+            className="rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50"
+          >
+            Reintentar
+          </button>
+        </div>
       ) : contratos.length === 0 ? (
         <p className="text-sm text-brand-500">No hay contratos registrados para editar.</p>
       ) : (
