@@ -72,5 +72,18 @@
  *   clave genérica sobre un estado de tipos mixtos) y no aparece en
  *   ningún otro lugar — el único otro caso similar (FormularioConceptos,
  *   Pagos) usa un estado con todos los campos `number`, sin este problema.
+ *
+ * V2.007 — cuarto fix de build: GestionUsuarios.tsx llama a
+ *   actualizarUsuario() o a crearUsuarioEnEmpresa() según haya o no
+ *   `usuario` (edición vs. alta), y después lee `res.conflicto` sobre el
+ *   resultado de cualquiera de las dos — pero crearUsuarioEnEmpresa()
+ *   nunca declaraba ese campo en su tipo de retorno (un alta no puede
+ *   tener conflicto de edición concurrente, no hay fila previa), así que
+ *   el tipo unión de `res` no lo tenía. Se agrega `conflicto?: boolean`
+ *   a su tipo de retorno (siempre undefined en la práctica, solo para
+ *   que ambos tipos calcen). Se revisó el resto del proyecto buscando el
+ *   mismo patrón (un handler que llama a una de dos Server Actions según
+ *   una condición y lee un campo del resultado) y no aparece en ningún
+ *   otro lugar.
  */
-export const APP_VERSION = "V2.006";
+export const APP_VERSION = "V2.007";

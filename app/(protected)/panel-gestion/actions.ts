@@ -287,7 +287,14 @@ export async function crearUsuarioEnEmpresa(datos: {
   rol: Rol;
   propietarioFiltro: string | null;
   permisos: string[];
-}): Promise<{ ok: boolean; error?: string }> {
+}): Promise<{ ok: boolean; error?: string; conflicto?: boolean }> {
+  // `conflicto` no aplica acá (un alta no puede chocar con ediciones
+  // concurrentes, no hay fila previa) — se declara igual, siempre
+  // undefined, solo para que el tipo coincida con actualizarUsuario():
+  // GestionUsuarios.tsx llama a una u otra desde el mismo handleSubmit
+  // (usuario ? actualizarUsuario(...) : crearUsuarioEnEmpresa(...)) y
+  // después lee res.conflicto sobre el resultado de cualquiera de las
+  // dos, así que ambas deben poder tener ese campo.
   const perfil = await requireSessionProfile();
   if (perfil.rol !== "superadmin" && perfil.rol !== "admin") {
     return { ok: false, error: "No tenés permiso para esta acción." };
