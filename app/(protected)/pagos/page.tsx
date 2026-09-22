@@ -24,8 +24,9 @@ export default async function PagosPage({
     );
   }
 
-  const contratos = await getContratosActivosParaSelector();
-  const contratoSeleccionado = codigoSeleccionado ? await getContratoParaPago(codigoSeleccionado) : null;
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  const contratos = await getContratosActivosParaSelector(empresaFiltro);
+  const contratoSeleccionado = codigoSeleccionado ? await getContratoParaPago(codigoSeleccionado, empresaFiltro) : null;
 
   const hoy = new Date();
   const periodoSugerido = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;

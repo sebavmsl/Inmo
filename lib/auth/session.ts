@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { puedeAcceder } from "@/lib/auth/permissions";
+import { EMPRESA_ACTIVA_COOKIE } from "@/lib/auth/empresaActivaCookie";
 import type { Rol } from "@/lib/types/database.types";
 
 export interface SessionProfile {
@@ -16,10 +18,17 @@ export interface SessionProfile {
   /**
    * Minutos de inactividad antes del cierre automático de sesión (ver
    * InactivityGuard.tsx). Configurable por empresa
-   * (configuraciones_empresa.timeout_inactividad_minutos); superadmin no
-   * tiene empresa_id, así que usa el default parejo (30 min).
+   * (configuraciones_empresa.timeout_inactividad_minutos); si superadmin
+   * no tiene empresa activa elegida, usa el default parejo (30 min).
    */
   timeoutInactividadMinutos: number;
+  /**
+   * Solo relevante para superadmin: true si `empresaId`/`nombreEmpresa`
+   * vienen de la empresa que eligió en el selector global (ver
+   * SelectorEmpresaActiva.tsx), no de su propia fila. Para los demás
+   * roles siempre false (ya vienen scopeados a la suya).
+   */
+  empresaActivaElegida: boolean;
 }
 
 const TIMEOUT_INACTIVIDAD_DEFAULT_MINUTOS = 30;
@@ -62,12 +71,45 @@ export async function getSessionProfile(): Promise<SessionProfile | null> {
     permisos = (filas ?? []).map((f) => f.pestana);
   }
 
+  // superadmin no tiene empresa_id propio: opera "como" la empresa que
+  // eligió en el selector global (SelectorEmpresaActiva.tsx, guardado en
+  // la cookie EMPRESA_ACTIVA_COOKIE, seteada por
+  // app/(protected)/actions.ts::seleccionarEmpresaActiva). Por defecto
+  // (sin cookie, o empresa borrada/inválida) trabaja con el grupo "sin
+  // empresa asignada" (empresa_id IS NULL) — mismo criterio en TODOS los
+  // módulos, no solo lectura: las Server Actions de alta/edición usan
+  // este mismo `empresaId` para saber en qué empresa escribir, así que
+  // este es el ÚNICO lugar donde hace falta resolver esto.
+  let empresaId = perfil.empresa_id;
+  let nombreEmpresa = perfil.nombre_empresa;
+  let empresaActivaElegida = false;
+  if (perfil.rol === "superadmin") {
+    const cookieStore = await cookies();
+    const valorCookie = cookieStore.get(EMPRESA_ACTIVA_COOKIE)?.value;
+    const empresaIdCookie = valorCookie ? Number(valorCookie) : null;
+    if (empresaIdCookie !== null && !Number.isNaN(empresaIdCookie)) {
+      const { data: empresaActiva } = await supabase
+        .from("empresas")
+        .select("nombre_comercial")
+        .eq("id", empresaIdCookie)
+        .maybeSingle();
+      if (empresaActiva) {
+        empresaId = empresaIdCookie;
+        nombreEmpresa = empresaActiva.nombre_comercial;
+        empresaActivaElegida = true;
+      }
+      // si la empresa de la cookie ya no existe (borrada), se ignora
+      // silenciosamente y queda en el default (sin empresa asignada) —
+      // evita que superadmin quede "trabado" con un id inválido.
+    }
+  }
+
   let timeoutInactividadMinutos = TIMEOUT_INACTIVIDAD_DEFAULT_MINUTOS;
-  if (perfil.empresa_id) {
+  if (empresaId) {
     const { data: cfg } = await supabase
       .from("configuraciones_empresa")
       .select("timeout_inactividad_minutos")
-      .eq("empresa_id", perfil.empresa_id)
+      .eq("empresa_id", empresaId)
       .maybeSingle();
     if (cfg) timeoutInactividadMinutos = cfg.timeout_inactividad_minutos;
   }
@@ -76,13 +118,14 @@ export async function getSessionProfile(): Promise<SessionProfile | null> {
     authUserId: user.id,
     email: user.email ?? perfil.email,
     username: perfil.username,
-    nombreEmpresa: perfil.nombre_empresa,
-    empresaId: perfil.empresa_id,
+    nombreEmpresa,
+    empresaId,
     rol: perfil.rol,
     propietarioFiltro: perfil.propietario_filtro,
     terminosAceptados: perfil.terminos_aceptados,
     permisos,
     timeoutInactividadMinutos,
+    empresaActivaElegida,
   };
 }
 

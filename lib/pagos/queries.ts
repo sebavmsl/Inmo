@@ -33,17 +33,24 @@ export interface ContratoParaPago {
  * Acá la elegibilidad es "meses desde la última actualización aplicada"
  * (ver DESIGN_LOG.md).
  */
-export async function getContratoParaPago(codigo: string): Promise<ContratoParaPago | null> {
+export async function getContratoParaPago(codigo: string, empresaFiltro?: number | null): Promise<ContratoParaPago | null> {
   const supabase = await createClient();
 
-  const { data: contrato, error } = await supabase
+  let query = supabase
     .from("contratos")
     .select(
       "codigo, alias_propiedad, dni_inquilino, indice, honorarios, saldo_actual, monto_inicial, inicio_contrato, act_contrato, alquiler, alquiler_calculado, alquiler_calculado_fecha, honorarios_pagados_base, cuotas_honorarios_pagadas_base, garantia_pagada_base, cuotas_deposito_pagadas_base, monto_honorarios, cuota_honorarios, monto_garantia, cuotas_deposito"
     )
     .eq("codigo", codigo)
-    .eq("estado", "Activo")
-    .single();
+    .eq("estado", "Activo");
+  // Defensa en profundidad para superadmin (bypassea RLS): sin esto,
+  // podría ver/operar el contrato de OTRA empresa con solo cambiar el
+  // ?contrato= de la URL, sin que tenga nada que ver con la empresa
+  // elegida en el selector global.
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
+  const { data: contrato, error } = await query.single();
 
   if (error || !contrato) return null;
 
@@ -157,15 +164,15 @@ function sugerirCuota(totalPactado: number, cuotasPactadas: number, yaAbonado: n
 }
 
 /** Lista liviana de contratos activos, para el <select> de la pantalla de Pagos. */
-export async function getContratosActivosParaSelector(): Promise<
-  { codigo: string; aliasPropiedad: string; inquilino: string }[]
-> {
+export async function getContratosActivosParaSelector(
+  empresaFiltro?: number | null
+): Promise<{ codigo: string; aliasPropiedad: string; inquilino: string }[]> {
   const supabase = await createClient();
-  const { data: contratos, error } = await supabase
-    .from("contratos")
-    .select("codigo, alias_propiedad, dni_inquilino")
-    .eq("estado", "Activo")
-    .order("alias_propiedad");
+  let query = supabase.from("contratos").select("codigo, alias_propiedad, dni_inquilino").eq("estado", "Activo").order("alias_propiedad");
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
+  const { data: contratos, error } = await query;
   if (error || !contratos) return [];
 
   const dnis = Array.from(new Set(contratos.map((c) => c.dni_inquilino)));

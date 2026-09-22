@@ -11,7 +11,11 @@ import { TabsPortalInquilino } from "@/components/portal-inquilino/TabsPortalInq
 export default async function PortalInquilinoPage() {
   const perfil = await requireSessionProfileConPermiso("portal_inquilino");
 
-  const [comprobantes, reclamos] = await Promise.all([getComprobantes(), getReclamos()]);
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  const [comprobantes, reclamos] = await Promise.all([
+    getComprobantes(undefined, empresaFiltro),
+    getReclamos(undefined, empresaFiltro),
+  ]);
 
   return (
     <div>

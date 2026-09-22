@@ -19,9 +19,10 @@ export default async function DashboardPage() {
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
 
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
   const [contratos, cajaHistorica] = await Promise.all([
-    getContratosActivosDashboard(propietarioFiltro),
-    getCajaHistorica(propietarioFiltro),
+    getContratosActivosDashboard(propietarioFiltro, empresaFiltro),
+    getCajaHistorica(propietarioFiltro, empresaFiltro),
   ]);
 
   const metricas = calcularMetricasDashboard(contratos, cajaHistorica);

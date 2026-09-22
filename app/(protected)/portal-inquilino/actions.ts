@@ -22,12 +22,26 @@ export async function revisarComprobante(
   const perfil = await requirePermisoAction("portal_inquilino");
   const supabase = await createClient();
 
-  const { error } = await supabase
+  // superadmin bypassea RLS por empresa (auth_rol() = 'superadmin' OR
+  // empresa_id = auth_empresa_id()): sin este filtro podría revisar el
+  // comprobante de CUALQUIER empresa conociendo/adivinando su id, sin
+  // importar cuál tenga elegida en el selector global (Sidebar). Acá se
+  // hace cumplir la empresa activa también en escritura por id — mismo
+  // criterio que ya se usa para lectura en lib/portal-inquilino/queries.ts.
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  let query = supabase
     .from("comprobantes_inquilino")
     .update({ estado: decision, revisado_por: perfil.username, fecha_revision: new Date().toISOString() })
     .eq("id", id);
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
 
+  const { data, error } = await query.select("id");
   if (error) return { ok: false, error: error.message };
+  if (empresaFiltro !== undefined && (!data || data.length === 0)) {
+    return { ok: false, error: "El comprobante no pertenece a la empresa activa." };
+  }
   revalidatePath(RUTA);
   return { ok: true };
 }
@@ -38,15 +52,25 @@ export async function actualizarReclamo(
   estado: EstadoReclamo,
   respuestaStaff: string
 ): Promise<{ ok: boolean; error?: string }> {
-  await requirePermisoAction("portal_inquilino");
+  const perfil = await requirePermisoAction("portal_inquilino");
   const supabase = await createClient();
 
-  const { error } = await supabase
+  // Mismo criterio que revisarComprobante: para superadmin, la empresa
+  // activa del selector global también manda en la escritura por id.
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  let query = supabase
     .from("reclamos_inquilino")
     .update({ estado, respuesta_staff: respuestaStaff || null })
     .eq("id", id);
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
 
+  const { data, error } = await query.select("id");
   if (error) return { ok: false, error: error.message };
+  if (empresaFiltro !== undefined && (!data || data.length === 0)) {
+    return { ok: false, error: "El reclamo no pertenece a la empresa activa." };
+  }
   revalidatePath(RUTA);
   return { ok: true };
 }
@@ -59,11 +83,21 @@ export async function listarGastosRecientesAction(propiedadId: number): Promise<
 
 /** Vincula un reclamo a un gasto YA cargado aparte (ver DESIGN_LOG.md, trazabilidad en los dos sentidos). */
 export async function vincularGastoAReclamo(reclamoId: number, gastoId: number): Promise<{ ok: boolean; error?: string }> {
-  await requirePermisoAction("portal_inquilino");
+  const perfil = await requirePermisoAction("portal_inquilino");
   const supabase = await createClient();
 
-  const { error } = await supabase.from("reclamos_inquilino").update({ gasto_id: gastoId }).eq("id", reclamoId);
+  // Mismo criterio que revisarComprobante/actualizarReclamo.
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  let query = supabase.from("reclamos_inquilino").update({ gasto_id: gastoId }).eq("id", reclamoId);
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
+
+  const { data, error } = await query.select("id");
   if (error) return { ok: false, error: error.message };
+  if (empresaFiltro !== undefined && (!data || data.length === 0)) {
+    return { ok: false, error: "El reclamo no pertenece a la empresa activa." };
+  }
   revalidatePath(RUTA);
   return { ok: true };
 }
@@ -117,9 +151,25 @@ export async function crearGastoDesdeReclamo(
 
   if (errGasto || !gasto) return { ok: false, error: errGasto?.message ?? "No se pudo crear el gasto." };
 
-  const { error: errVinculo } = await supabase.from("reclamos_inquilino").update({ gasto_id: gasto.id }).eq("id", reclamoId);
+  // Mismo criterio que vincularGastoAReclamo: el gasto recién creado
+  // queda en la empresa activa de superadmin (empresa_id: perfil.empresaId
+  // arriba), pero sin este filtro el vínculo al reclamo podría escribir
+  // sobre un reclamo de OTRA empresa si `reclamoId` no fuera de la activa.
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  let queryVinculo = supabase.from("reclamos_inquilino").update({ gasto_id: gasto.id }).eq("id", reclamoId);
+  if (empresaFiltro !== undefined) {
+    queryVinculo =
+      empresaFiltro === null ? queryVinculo.is("empresa_id", null) : queryVinculo.eq("empresa_id", empresaFiltro);
+  }
+  const { data: vinculado, error: errVinculo } = await queryVinculo.select("id");
   if (errVinculo) {
     return { ok: false, error: `El gasto #${gasto.id} se creó, pero no se pudo vincular al reclamo: ${errVinculo.message}` };
+  }
+  if (empresaFiltro !== undefined && (!vinculado || vinculado.length === 0)) {
+    return {
+      ok: false,
+      error: `El gasto #${gasto.id} se creó, pero el reclamo no pertenece a la empresa activa: no se pudo vincular.`,
+    };
   }
 
   revalidatePath(RUTA);

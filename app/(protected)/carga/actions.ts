@@ -12,7 +12,8 @@ export async function listarContratos(): Promise<ContratoEditable[]> {
   const perfil = await requirePermisoAction("carga");
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
-  return listarContratosEditables(propietarioFiltro);
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  return listarContratosEditables(propietarioFiltro, empresaFiltro);
 }
 
 export interface DatosContrato {

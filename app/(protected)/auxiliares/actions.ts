@@ -44,11 +44,22 @@ export interface PropiedadEditable {
   updatedAt: string;
 }
 
-/** RLS (0001_v2_auth_setup.sql) ya restringe por empresa — no hace falta filtrar acá. */
+/**
+ * RLS (0001_v2_auth_setup.sql) ya restringe por empresa para roles
+ * normales — pero superadmin bypassea esa restricción a propósito (ve
+ * todas las empresas), así que acá hace falta filtrar explícitamente por
+ * `perfil.empresaId` (que para superadmin refleja la empresa elegida en
+ * el selector global, o null = huérfanos — ver lib/auth/session.ts) para
+ * no listar propiedades de TODAS las inmobiliarias mezcladas.
+ */
 export async function listarPropiedades(): Promise<PropiedadEditable[]> {
-  await requirePermisoAction("auxiliares");
+  const perfil = await requirePermisoAction("auxiliares");
   const supabase = await createClient();
-  const { data } = await supabase.from("propiedades").select("*").order("alias_propiedad");
+  let query = supabase.from("propiedades").select("*").order("alias_propiedad");
+  if (perfil.rol === "superadmin") {
+    query = perfil.empresaId === null ? query.is("empresa_id", null) : query.eq("empresa_id", perfil.empresaId);
+  }
+  const { data } = await query;
   return (data ?? []).map((p) => ({
     id: p.id,
     aliasPropiedad: p.alias_propiedad,
@@ -80,10 +91,15 @@ export interface InquilinoEditable {
   updatedAt: string;
 }
 
+/** Mismo criterio que listarPropiedades() — ver el comentario ahí arriba. */
 export async function listarInquilinos(): Promise<InquilinoEditable[]> {
-  await requirePermisoAction("auxiliares");
+  const perfil = await requirePermisoAction("auxiliares");
   const supabase = await createClient();
-  const { data } = await supabase.from("inquilinos").select("*").order("apellidos");
+  let query = supabase.from("inquilinos").select("*").order("apellidos");
+  if (perfil.rol === "superadmin") {
+    query = perfil.empresaId === null ? query.is("empresa_id", null) : query.eq("empresa_id", perfil.empresaId);
+  }
+  const { data } = await query;
   return (data ?? []).map((i) => ({
     id: i.id,
     dni: i.dni,

@@ -11,11 +11,19 @@ export default async function GastosPage() {
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
 
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+
   const supabase = await createClient();
+  let propiedadesQuery = supabase.from("propiedades").select("id, alias_propiedad, grupo").order("alias_propiedad");
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
+
   const [{ data: propiedades }, historial, metricas] = await Promise.all([
-    supabase.from("propiedades").select("id, alias_propiedad, grupo").order("alias_propiedad"),
-    getHistorialGastos(propietarioFiltro),
-    getDatosMetricasGastos(propietarioFiltro),
+    propiedadesQuery,
+    getHistorialGastos(propietarioFiltro, empresaFiltro),
+    getDatosMetricasGastos(propietarioFiltro, empresaFiltro),
   ]);
 
   return (

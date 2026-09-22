@@ -54,7 +54,7 @@ export interface FilaHistorial {
 function calcularMesAnio(periodo: string, inicioContrato: string | null): string {
   const match = /^Mes\s+(\d+)\s+de\s+\d+/.exec(periodo);
   if (!match || !inicioContrato) return "";
-  const numMesContrato = Number(match[1]);
+  const numMesContrato = Number(match[1] ?? "0");
   const inicio = new Date(inicioContrato);
   if (Number.isNaN(inicio.getTime())) return "";
   const fecha = new Date(inicio.getFullYear(), inicio.getMonth() + (numMesContrato - 1), inicio.getDate());
@@ -77,15 +77,20 @@ function aUsd(valorArs: number, cotizacion: number | null): number {
  * concepto, domicilio vía join a propiedades, mes/año calculado) para
  * que la tabla y el Reporte de Cobros tengan paridad completa con v1.
  */
-export async function getHistorialPagos(propietarioFiltro?: string): Promise<FilaHistorial[]> {
+export async function getHistorialPagos(propietarioFiltro?: string, empresaFiltro?: number | null): Promise<FilaHistorial[]> {
   const supabase = await createClient();
 
   let propiedadesQuery = supabase.from("propiedades").select("alias_propiedad, propietario, calle, numero, departamento");
   if (propietarioFiltro) propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades, error: errProp } = await propiedadesQuery;
   if (errProp) throw new Error(`[Historial] Error cargando propiedades: ${errProp.message}`);
 
-  const aliasPermitidos = propietarioFiltro ? new Set((propiedades ?? []).map((p) => p.alias_propiedad)) : null;
+  const hayFiltroDePropiedades = Boolean(propietarioFiltro) || empresaFiltro !== undefined;
+  const aliasPermitidos = hayFiltroDePropiedades ? new Set((propiedades ?? []).map((p) => p.alias_propiedad)) : null;
   if (aliasPermitidos && aliasPermitidos.size === 0) return [];
 
   // Domicilio por alias — igual criterio que v1 (calle + número + ", Dto: X"

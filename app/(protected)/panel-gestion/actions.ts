@@ -315,11 +315,25 @@ export async function crearUsuarioEnEmpresa(datos: {
 
   const supabase = await createClient();
 
+  // Hallazgo de esta sesión: acá NO alcanza con perfil.nombreEmpresa —
+  // superadmin puede dar de alta un usuario en CUALQUIER empresa vía el
+  // selector de este mismo Panel (datos.empresaId), independiente de la
+  // empresa que tenga elegida en el selector global (Sidebar). Antes esto
+  // guardaba el nombre de la empresa "activa" de superadmin (o ninguna),
+  // no el de la empresa realmente elegida para el alta — se busca el
+  // nombre real para no guardar `nombre_empresa` incorrecto.
+  const { data: empresaDestino } = await supabase
+    .from("empresas")
+    .select("nombre_comercial")
+    .eq("id", datos.empresaId)
+    .maybeSingle();
+  if (!empresaDestino) return { ok: false, error: "La empresa elegida no existe." };
+
   const { error: errorUsuario } = await supabase.from("usuarios_central").insert({
     username: datos.username,
     email: datos.email,
     telefono: datos.telefono || null,
-    nombre_empresa: perfil.nombreEmpresa,
+    nombre_empresa: empresaDestino.nombre_comercial,
     empresa_id: datos.empresaId,
     rol: datos.rol,
     propietario_filtro: datos.rol === "propietario" ? datos.propietarioFiltro : null,

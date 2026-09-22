@@ -31,13 +31,22 @@ export interface ContratoEditable {
 
 /**
  * Módulo "Carga de Contratos" — lista para el selector de "Editar
- * Contrato". RLS de contratos ya filtra por empresa (0001_v2_auth_setup.sql).
+ * Contrato". RLS de contratos ya filtra por empresa para roles normales
+ * (0001_v2_auth_setup.sql) — `empresaFiltro` es solo para superadmin, que
+ * bypassea esa restricción (ver lib/auth/session.ts).
  */
-export async function listarContratosEditables(propietarioFiltro?: string): Promise<ContratoEditable[]> {
+export async function listarContratosEditables(
+  propietarioFiltro?: string,
+  empresaFiltro?: number | null
+): Promise<ContratoEditable[]> {
   const supabase = await createClient();
 
   let propiedadesQuery = supabase.from("propiedades").select("alias_propiedad, propietario");
   if (propietarioFiltro) propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades } = await propiedadesQuery;
   const aliasPermitidos = propietarioFiltro ? new Set((propiedades ?? []).map((p) => p.alias_propiedad)) : null;
   if (aliasPermitidos && aliasPermitidos.size === 0) return [];
@@ -49,6 +58,10 @@ export async function listarContratosEditables(propietarioFiltro?: string): Prom
     )
     .order("alias_propiedad");
   if (aliasPermitidos) contratosQuery = contratosQuery.in("alias_propiedad", Array.from(aliasPermitidos));
+  if (empresaFiltro !== undefined) {
+    contratosQuery =
+      empresaFiltro === null ? contratosQuery.is("empresa_id", null) : contratosQuery.eq("empresa_id", empresaFiltro);
+  }
 
   const { data: contratos, error } = await contratosQuery;
   if (error) throw new Error(`[Carga] Error cargando contratos: ${error.message}`);

@@ -12,11 +12,13 @@ import type { ContratoActivoDashboardRow } from "@/lib/dashboard/types";
  * de romper inserts si hay algún mismatch de mayúsculas/espacios en
  * datos viejos), resolvemos el join acá con 3 queries simples.
  *
- * RLS ya filtra por empresa en las tres tablas (ver auth_empresa_id() en
- * la migración 0001), así que no repetimos `WHERE empresa_id = ...`.
+ * RLS ya filtra por empresa en las tres tablas para roles normales (ver
+ * auth_empresa_id() en la migración 0001) — `empresaFiltro` es solo para
+ * superadmin, que bypassea esa restricción (ver lib/auth/session.ts).
  */
 export async function getContratosActivosDashboard(
-  propietarioFiltro?: string
+  propietarioFiltro?: string,
+  empresaFiltro?: number | null
 ): Promise<ContratoActivoDashboardRow[]> {
   const supabase = await createClient();
 
@@ -24,14 +26,17 @@ export async function getContratosActivosDashboard(
   if (propietarioFiltro) {
     propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
   }
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades, error: errProp } = await propiedadesQuery;
   if (errProp) throw new Error(`[Dashboard] Error cargando propiedades: ${errProp.message}`);
 
-  // Si hay filtro de propietario y no tiene propiedades, cortamos acá:
-  // ningún contrato puede matchear.
-  const aliasPermitidos = propietarioFiltro
-    ? new Set((propiedades ?? []).map((p) => p.alias_propiedad))
-    : null;
+  // Si hay filtro (propietario y/o empresa) y no matchea ninguna
+  // propiedad, cortamos acá: ningún contrato puede matchear.
+  const hayFiltroDePropiedades = Boolean(propietarioFiltro) || empresaFiltro !== undefined;
+  const aliasPermitidos = hayFiltroDePropiedades ? new Set((propiedades ?? []).map((p) => p.alias_propiedad)) : null;
   if (aliasPermitidos && aliasPermitidos.size === 0) return [];
 
   let contratosQuery = supabase
@@ -77,18 +82,21 @@ export async function getContratosActivosDashboard(
  * histórica de `monto_abonado` en `pagos_historial`, opcionalmente
  * restringida a las propiedades de un propietario.
  */
-export async function getCajaHistorica(propietarioFiltro?: string): Promise<number> {
+export async function getCajaHistorica(propietarioFiltro?: string, empresaFiltro?: number | null): Promise<number> {
   const supabase = await createClient();
 
-  if (propietarioFiltro) {
-    const { data: propiedadesDelPropietario, error: errProp } = await supabase
-      .from("propiedades")
-      .select("alias_propiedad")
-      .eq("propietario", propietarioFiltro);
+  if (propietarioFiltro || empresaFiltro !== undefined) {
+    let propiedadesQuery = supabase.from("propiedades").select("alias_propiedad");
+    if (propietarioFiltro) propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
+    if (empresaFiltro !== undefined) {
+      propiedadesQuery =
+        empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+    }
+    const { data: propiedadesFiltradas, error: errProp } = await propiedadesQuery;
 
     if (errProp) throw new Error(`[Dashboard] Error resolviendo propiedades: ${errProp.message}`);
 
-    const alias = (propiedadesDelPropietario ?? []).map((p) => p.alias_propiedad);
+    const alias = (propiedadesFiltradas ?? []).map((p) => p.alias_propiedad);
     if (alias.length === 0) return 0;
 
     const { data, error } = await supabase

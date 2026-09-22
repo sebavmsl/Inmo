@@ -26,16 +26,21 @@ export interface FilaGasto {
  * con un join manual contra `propiedades`, igual criterio que
  * lib/historial/queries.ts.
  */
-export async function getHistorialGastos(propietarioFiltro?: string): Promise<FilaGasto[]> {
+export async function getHistorialGastos(propietarioFiltro?: string, empresaFiltro?: number | null): Promise<FilaGasto[]> {
   const supabase = await createClient();
 
   let propiedadesQuery = supabase.from("propiedades").select("id, alias_propiedad, propietario");
   if (propietarioFiltro) propiedadesQuery = propiedadesQuery.eq("propietario", propietarioFiltro);
+  if (empresaFiltro !== undefined) {
+    propiedadesQuery =
+      empresaFiltro === null ? propiedadesQuery.is("empresa_id", null) : propiedadesQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades, error: errProp } = await propiedadesQuery;
   if (errProp) throw new Error(`[Gastos] Error cargando propiedades: ${errProp.message}`);
 
+  const hayFiltroDePropiedades = Boolean(propietarioFiltro) || empresaFiltro !== undefined;
   const mapaPropiedades = new Map((propiedades ?? []).map((p) => [p.id, p]));
-  if (propietarioFiltro && mapaPropiedades.size === 0) return [];
+  if (hayFiltroDePropiedades && mapaPropiedades.size === 0) return [];
 
   let gastosQuery = supabase
     .from("gastos_propiedades")
@@ -43,7 +48,7 @@ export async function getHistorialGastos(propietarioFiltro?: string): Promise<Fi
       "id, propiedad_id, fecha, categoria, descripcion, monto, cotizacion_usd, proveedor, comprobante, pagado_por, tipo_gasto, observaciones"
     )
     .order("fecha", { ascending: false });
-  if (propietarioFiltro) gastosQuery = gastosQuery.in("propiedad_id", Array.from(mapaPropiedades.keys()));
+  if (hayFiltroDePropiedades) gastosQuery = gastosQuery.in("propiedad_id", Array.from(mapaPropiedades.keys()));
 
   const { data: gastos, error } = await gastosQuery;
   if (error) throw new Error(`[Gastos] Error cargando gastos: ${error.message}`);

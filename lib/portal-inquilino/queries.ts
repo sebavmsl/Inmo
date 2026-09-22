@@ -66,7 +66,10 @@ async function mapaContratosInquilinos(codigosContrato: string[]) {
  * pago real: aprobar acá solo cambia el estado, el staff sigue teniendo
  * que registrar el cobro por Pagos si corresponde.
  */
-export async function getComprobantes(estadoFiltro?: EstadoComprobante): Promise<FilaComprobante[]> {
+export async function getComprobantes(
+  estadoFiltro?: EstadoComprobante,
+  empresaFiltro?: number | null
+): Promise<FilaComprobante[]> {
   const supabase = await createClient();
 
   let query = supabase
@@ -74,6 +77,9 @@ export async function getComprobantes(estadoFiltro?: EstadoComprobante): Promise
     .select("id, codigo_contrato, storage_path, monto_declarado, fecha_subida, estado, revisado_por, fecha_revision")
     .order("fecha_subida", { ascending: false });
   if (estadoFiltro) query = query.eq("estado", estadoFiltro);
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
 
   const { data: comprobantes, error } = await query;
   if (error) throw new Error(`[Portal Inquilino] Error cargando comprobantes: ${error.message}`);
@@ -108,7 +114,10 @@ export async function getComprobantes(estadoFiltro?: EstadoComprobante): Promise
  * Bandeja de reclamos de inquilinos, con el gasto vinculado (si lo hay)
  * para trazabilidad en los dos sentidos (ver DESIGN_LOG.md).
  */
-export async function getReclamos(estadoFiltro?: EstadoReclamo): Promise<FilaReclamo[]> {
+export async function getReclamos(
+  estadoFiltro?: EstadoReclamo,
+  empresaFiltro?: number | null
+): Promise<FilaReclamo[]> {
   const supabase = await createClient();
 
   let query = supabase
@@ -116,6 +125,9 @@ export async function getReclamos(estadoFiltro?: EstadoReclamo): Promise<FilaRec
     .select("id, codigo_contrato, descripcion, estado, fecha, respuesta_staff, gasto_id")
     .order("fecha", { ascending: false });
   if (estadoFiltro) query = query.eq("estado", estadoFiltro);
+  if (empresaFiltro !== undefined) {
+    query = empresaFiltro === null ? query.is("empresa_id", null) : query.eq("empresa_id", empresaFiltro);
+  }
 
   const { data: reclamos, error } = await query;
   if (error) throw new Error(`[Portal Inquilino] Error cargando reclamos: ${error.message}`);

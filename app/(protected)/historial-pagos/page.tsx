@@ -9,7 +9,8 @@ export default async function HistorialPagosPage() {
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
 
-  const filas = await getHistorialPagos(propietarioFiltro);
+  const empresaFiltro = perfil.rol === "superadmin" ? perfil.empresaId : undefined;
+  const filas = await getHistorialPagos(propietarioFiltro, empresaFiltro);
 
   return (
     <div className="space-y-4">

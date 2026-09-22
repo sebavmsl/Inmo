@@ -44,14 +44,22 @@ export interface DatosMetricasGastos {
  * ya usaba `fecha` real en los dos lados, así que la comparación es
  * consistente.
  */
-export async function getDatosMetricasGastos(propietarioFiltro?: string): Promise<DatosMetricasGastos> {
+export async function getDatosMetricasGastos(
+  propietarioFiltro?: string,
+  empresaFiltro?: number | null
+): Promise<DatosMetricasGastos> {
   const supabase = await createClient();
 
   let propQuery = supabase.from("propiedades").select("id, alias_propiedad, propietario, grupo");
   if (propietarioFiltro) propQuery = propQuery.eq("propietario", propietarioFiltro);
+  if (empresaFiltro !== undefined) {
+    propQuery = empresaFiltro === null ? propQuery.is("empresa_id", null) : propQuery.eq("empresa_id", empresaFiltro);
+  }
   const { data: propiedades, error: errProp } = await propQuery;
   if (errProp) throw new Error(`[Métricas Gastos] Error cargando propiedades: ${errProp.message}`);
-  if (propietarioFiltro && (!propiedades || propiedades.length === 0)) {
+
+  const hayFiltroDePropiedades = Boolean(propietarioFiltro) || empresaFiltro !== undefined;
+  if (hayFiltroDePropiedades && (!propiedades || propiedades.length === 0)) {
     return { ingresos: [], gastos: [], propiedades: [] };
   }
 
@@ -61,12 +69,12 @@ export async function getDatosMetricasGastos(propietarioFiltro?: string): Promis
   let pagosQuery = supabase
     .from("pagos_historial")
     .select("propiedad, fecha, monto_alquiler, monto_cochera, monto_expensas, monto_gasto_admin, monto_imp_inmobiliario, cotizacion_usd");
-  if (propietarioFiltro) pagosQuery = pagosQuery.in("propiedad", Array.from(mapaPorAlias.keys()));
+  if (hayFiltroDePropiedades) pagosQuery = pagosQuery.in("propiedad", Array.from(mapaPorAlias.keys()));
   const { data: pagos, error: errPagos } = await pagosQuery;
   if (errPagos) throw new Error(`[Métricas Gastos] Error cargando pagos: ${errPagos.message}`);
 
   let gastosQuery = supabase.from("gastos_propiedades").select("propiedad_id, fecha, monto, cotizacion_usd");
-  if (propietarioFiltro) gastosQuery = gastosQuery.in("propiedad_id", Array.from(mapaPorId.keys()));
+  if (hayFiltroDePropiedades) gastosQuery = gastosQuery.in("propiedad_id", Array.from(mapaPorId.keys()));
   const { data: gastos, error: errGastos } = await gastosQuery;
   if (errGastos) throw new Error(`[Métricas Gastos] Error cargando gastos: ${errGastos.message}`);
 
