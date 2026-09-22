@@ -59,5 +59,18 @@
  *   fallaba. Se corrige pasando por `unknown` primero. Se revisó el
  *   resto del proyecto buscando el mismo patrón (`.select()` con string
  *   armado en runtime) y no aparece en ningún otro lugar.
+ *
+ * V2.006 — sexto fix de build: bug preexistente (de antes de esta
+ *   sesión, en EditarPropiedad.tsx y FormularioPropiedad.tsx) — el
+ *   helper `input()` de cada formulario aceptaba como clave CUALQUIER
+ *   campo del estado, incluido el único que es boolean (el checkbox de
+ *   "expensas administradas por el propietario"), así que `datos[k]`
+ *   tipaba "string | boolean" y `<input value=...>` no acepta boolean.
+ *   Se corrige acotando el tipo de la clave a los campos de texto
+ *   (Exclude<..., "expensasAdministradaPorPropietario">). Se revisó el
+ *   resto del proyecto buscando el mismo patrón (helper de input con
+ *   clave genérica sobre un estado de tipos mixtos) y no aparece en
+ *   ningún otro lugar — el único otro caso similar (FormularioConceptos,
+ *   Pagos) usa un estado con todos los campos `number`, sin este problema.
  */
-export const APP_VERSION = "V2.005";
+export const APP_VERSION = "V2.006";

@@ -38,7 +38,11 @@ export function FormularioPropiedad() {
     if (res.ok) setDatos(CAMPO_VACIO);
   }
 
-  const input = (placeholder: string, campoKey: keyof typeof CAMPO_VACIO) => (
+  // Excluye el único campo no-texto (el checkbox de expensas, más abajo)
+  // — si `campoKey` pudiera ser esa clave, datos[campoKey] tipa
+  // "string | boolean" y <input value=...> no acepta boolean.
+  type CampoTexto = Exclude<keyof typeof CAMPO_VACIO, "expensasAdministradaPorPropietario">;
+  const input = (placeholder: string, campoKey: CampoTexto) => (
     <input
       placeholder={placeholder}
       value={datos[campoKey]}

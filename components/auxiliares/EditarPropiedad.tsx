@@ -118,7 +118,11 @@ function FormularioEditarPropiedad({
     onGuardado();
   }
 
-  const input = (label: string, k: keyof typeof datos) => (
+  // Excluye el único campo no-texto (el checkbox de expensas, más abajo)
+  // — si `k` pudiera ser esa clave, datos[k] tipa "string | boolean" y
+  // <input value=...> no acepta boolean.
+  type CampoTexto = Exclude<keyof typeof datos, "expensasAdministradaPorPropietario">;
+  const input = (label: string, k: CampoTexto) => (
     <label className="block text-sm">
       <span className="mb-1 block text-brand-700">{label}</span>
       <input value={datos[k]} onChange={(e) => campo(k, e.target.value)} className="w-full rounded border border-brand-100 px-2 py-1.5" />
