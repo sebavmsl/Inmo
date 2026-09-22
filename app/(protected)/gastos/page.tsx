@@ -1,28 +1,38 @@
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { esSoloLectura } from "@/lib/auth/permissions";
 import { createClient } from "@/lib/supabase/server";
-import { FormularioGasto } from "@/components/gastos/FormularioGasto";
+import { getHistorialGastos } from "@/lib/gastos/queries";
+import { getDatosMetricasGastos } from "@/lib/gastos/metricas";
+import { TabsGastos } from "@/components/gastos/TabsGastos";
 
 export default async function GastosPage() {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("gastos");
   const soloLectura = esSoloLectura(perfil.rol);
+  const propietarioFiltro =
+    perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
 
   const supabase = await createClient();
-  const { data: propiedades } = await supabase
-    .from("propiedades")
-    .select("id, alias_propiedad, grupo")
-    .order("alias_propiedad");
+  const [{ data: propiedades }, historial, metricas] = await Promise.all([
+    supabase.from("propiedades").select("id, alias_propiedad, grupo").order("alias_propiedad"),
+    getHistorialGastos(propietarioFiltro),
+    getDatosMetricasGastos(propietarioFiltro),
+  ]);
 
   return (
     <div>
       <h1 className="mb-1 text-xl font-semibold text-brand-900">🔧 Gastos de Propiedades</h1>
-      <p className="mb-4 text-sm text-brand-500">{perfil.nombreEmpresa}</p>
+      <p className="mb-4 text-sm text-brand-500">
+        {perfil.nombreEmpresa}
+        {propietarioFiltro && ` · filtrado a ${propietarioFiltro}`}
+      </p>
 
-      {!soloLectura && (
-        <FormularioGasto
-          propiedades={(propiedades ?? []).map((p) => ({ id: p.id, aliasPropiedad: p.alias_propiedad, grupo: p.grupo }))}
-        />
-      )}
+      <TabsGastos
+        mostrarAlta={!soloLectura}
+        propiedades={(propiedades ?? []).map((p) => ({ id: p.id, aliasPropiedad: p.alias_propiedad, grupo: p.grupo }))}
+        historial={historial}
+        metricas={metricas}
+        ocultarFiltroPropietario={!!propietarioFiltro}
+      />
     </div>
   );
 }

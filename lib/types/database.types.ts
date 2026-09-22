@@ -61,6 +61,10 @@ export interface UsuariosCentralRow {
   propietario_filtro: string | null;
   terminos_aceptados: boolean;
   terminos_fecha: string | null;
+  /** Agregado en 0013_panel_gestion_usuarios.sql (Módulo 1). */
+  telefono: string | null;
+  /** Optimistic locking (Módulo transversal "Ediciones simultáneas", 0014). */
+  updated_at: string;
 }
 
 export interface PermisosUsuarioRow {
@@ -85,6 +89,11 @@ export interface ConfiguracionesEmpresaRow {
   whatsapp_numero_id: number | null; // FK -> whatsapp_numeros.id
   // Módulo 3 — motor de índices (migración 0004)
   cron_indices_habilitado: boolean;
+  /** Cierre de sesión por inactividad (0015_inactividad.sql). */
+  timeout_inactividad_minutos: number;
+  /** Módulo 4 — Cotización USD (0016_cotizacion_usd.sql). Ver lib/cotizacion/queries.ts. */
+  ultima_cotizacion_usd: number | null;
+  ultima_cotizacion_fecha: string | null;
 }
 
 export interface WhatsappNumerosRow {
@@ -124,6 +133,23 @@ export interface PropiedadesRow {
   departamento: string | null;
   propietario: string;
   grupo: string | null; // texto libre, agrupa propiedades para gastos compartidos (Módulo 7)
+  /** Optimistic locking (Módulo transversal "Ediciones simultáneas", 0014). */
+  updated_at: string;
+  /** Agregadas en 0017_auxiliares_completo.sql (Módulo 3) — ya existían en el alta de v1, faltaban acá. */
+  ciudad: string | null;
+  provincia: string | null;
+  tipo: string | null;
+  nis: string | null;
+  cuenta_gas: string | null;
+  finca: string | null;
+  cuenta_ooss: string | null;
+  nro_padron: string | null;
+  /**
+   * Agregado en 0018_rendicion_expensas_flag.sql (Módulo 7, continuación)
+   * — sin equivalente en v1. TRUE = las expensas cobradas acá son
+   * informativas, no suman al Neto a Rendir (ver esa migración).
+   */
+  expensas_administrada_por_propietario: boolean;
 }
 
 export interface InquilinosRow {
@@ -135,6 +161,8 @@ export interface InquilinosRow {
   telefono: string | null;
   email: string | null;
   auth_user_id: string | null; // Módulo 9 — Portal del Inquilino. Puede repetirse entre filas (multi-tenencia, ver DESIGN_LOG.md)
+  /** Optimistic locking (Módulo transversal "Ediciones simultáneas", 0014). */
+  updated_at: string;
 }
 
 export interface ComprobantesInquilinoRow {
@@ -244,6 +272,8 @@ export interface ContratosRow {
   cochera: number | null;
   calc_duracion: number | null; // duración total en meses, usado para la regla de renovación
   mes_contrato: number | null; // "mes vivo" actual del contrato
+  /** Optimistic locking (Módulo transversal "Ediciones simultáneas", 0014). */
+  updated_at: string;
 }
 
 export interface PagosHistorialRow {
@@ -318,6 +348,19 @@ export interface LiquidacionesPropietariosRow {
   saldo_pendiente: number;
   fecha_liquidacion: string;
   registrado_por: string;
+}
+
+/**
+ * Presencia en vivo para el módulo transversal "Ediciones simultáneas"
+ * (0014_edicion_concurrente.sql). Ver lib/concurrencia/.
+ */
+export interface EdicionesPresenciaRow {
+  id: number;
+  empresa_id: number;
+  tabla: string;
+  registro_id: string;
+  username: string;
+  actualizado_en: string;
 }
 
 // =====================================================================
@@ -424,6 +467,12 @@ export type Database = {
         Row: LiquidacionesPropietariosRow;
         Insert: Partial<LiquidacionesPropietariosRow>;
         Update: Partial<LiquidacionesPropietariosRow>;
+        Relationships: [];
+      };
+      ediciones_presencia: {
+        Row: EdicionesPresenciaRow;
+        Insert: Partial<EdicionesPresenciaRow>;
+        Update: Partial<EdicionesPresenciaRow>;
         Relationships: [];
       };
     };

@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requirePermisoAction } from "@/lib/auth/session";
+import { registrarCotizacionUsada } from "@/lib/cotizacion/queries";
 
 export interface DatosGasto {
   propiedadId: number | null; // null si es compartido (usa grupo en su lugar)
@@ -26,7 +27,7 @@ export interface DatosGasto {
  * negocio, se porta directo (ver DESIGN_LOG.md, Módulo 7).
  */
 export async function crearGasto(datos: DatosGasto): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requireSessionProfile();
+  const perfil = await requirePermisoAction("gastos");
   const supabase = await createClient();
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
 
@@ -84,5 +85,6 @@ export async function crearGasto(datos: DatosGasto): Promise<{ ok: boolean; erro
   }
 
   revalidatePath("/gastos");
+  await registrarCotizacionUsada(perfil.empresaId, datos.cotizacionUsd);
   return { ok: true };
 }

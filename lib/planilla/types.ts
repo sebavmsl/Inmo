@@ -1,4 +1,5 @@
-export type UrgenciaFila = "actualizar_este_mes" | "actualizar_mes_proximo" | "renovar" | "normal";
+import type { UrgenciaFila } from "@/lib/contratos/urgencia";
+export type { UrgenciaFila };
 
 export interface FilaPlanilla {
   codigo: string;

@@ -4,6 +4,40 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminAuthClient } from "@/lib/supabase/admin";
 import { requireSessionProfile } from "@/lib/auth/session";
+import { PESTANAS_MAESTRAS, PERMISOS_TRANSVERSALES } from "@/lib/auth/permissions";
+import { verificarConflicto } from "@/lib/concurrencia/queries";
+import type { Rol } from "@/lib/types/database.types";
+
+/** Todas las claves de permiso administrables desde este editor (pestañas + transversales). */
+const CLAVES_PERMISO_VALIDAS = [
+  ...PESTANAS_MAESTRAS.map((p) => p.clave),
+  ...PERMISOS_TRANSVERSALES.map((p) => p.clave),
+];
+
+/**
+ * "El admin solo puede otorgar los permisos que él mismo tiene" —
+ * regla confirmada por el usuario (ver docs/DESIGN_LOG.md). Se valida
+ * acá ADEMÁS de en la UI (que ya deshabilita los checkboxes que el
+ * admin no tiene) y además de la policy de RLS sobre permisos_usuario
+ * (0013_panel_gestion_usuarios.sql) — tres capas de la misma regla.
+ */
+function permisosSonSubconjunto(permisosPedidos: string[], permisosDeQuienOtorga: string[]): boolean {
+  return permisosPedidos.every((p) => permisosDeQuienOtorga.includes(p));
+}
+
+/**
+ * admin: solo puede crear/editar usuarios "user" o "propietario" — no
+ * puede crearse a sí mismo pares (otro admin) ni superadmins.
+ * superadmin: puede asignar cualquier rol salvo "superadmin" (ese único
+ * caso especial sigue viviendo en crearEmpresaConAdmin, que además crea
+ * la empresa).
+ */
+function puedeAsignarRol(rolDeQuienOtorga: Rol, rolPedido: Rol): boolean {
+  if (rolPedido === "superadmin") return false;
+  if (rolDeQuienOtorga === "superadmin") return true;
+  if (rolDeQuienOtorga === "admin") return rolPedido === "user" || rolPedido === "propietario";
+  return false;
+}
 
 /**
  * Alta de empresa + primer admin — puerto del flujo diseñado en
@@ -158,24 +192,273 @@ export async function eliminarEmpresa(empresaId: number, confirmacionNombre: str
   return { ok: true };
 }
 
+/**
+ * `empresaId` viaja explícito desde el selector del componente (mismo
+ * patrón que la Migración CSV) — antes se usaba `perfil.empresaId`
+ * directo, lo que ataba esta herramienta a la empresa propia del
+ * superadmin y no dejaba operar sobre ninguna otra empresa de la
+ * plataforma (corregido esta sesión, a pedido del usuario).
+ */
 export async function borrarEnBloque(
+  empresaId: number,
   tabla: "contratos" | "inquilinos" | "propiedades" | "pagos_historial",
   ids: number[],
   confirmacion: string
 ): Promise<{ ok: boolean; eliminados?: number; error?: string }> {
   const perfil = await requireSessionProfile();
   if (perfil.rol !== "superadmin") return { ok: false, error: "Solo superadmin puede usar esta herramienta." };
-  if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
 
   const supabase = await createClient();
   const { data, error } = await supabase.rpc("eliminar_registros_bloque", {
     p_tabla: tabla,
     p_ids: ids,
-    p_empresa_id: perfil.empresaId,
+    p_empresa_id: empresaId,
     p_confirmacion: confirmacion,
   });
 
   if (error) return { ok: false, error: error.message };
   revalidatePath("/panel-gestion");
   return { ok: true, eliminados: data as number };
+}
+
+// =====================================================================
+// Módulo 1 — Gestión de Usuarios (alta, edición, permisos)
+//
+// A diferencia de crearEmpresaConAdmin/enviarLinkAcceso, estas acciones
+// usan el cliente normal (con sesión) — la autorización real la hacen
+// las policies de RLS de 0013_panel_gestion_usuarios.sql, y acá se
+// repiten los mismos chequeos para poder devolver un mensaje de error
+// claro en vez de que la fila simplemente no se inserte/actualice.
+//
+// El alta acá NO crea la cuenta de Auth (auth_user_id queda null) — para
+// eso se usa el botón "Enviar Link de Acceso" ya existente
+// (enviarLinkAcceso), que sí necesita service_role.
+// =====================================================================
+
+export interface UsuarioEditable {
+  id: number;
+  username: string;
+  email: string | null;
+  telefono: string | null;
+  rol: Rol;
+  propietarioFiltro: string | null;
+  tieneAcceso: boolean; // auth_user_id !== null
+  permisos: string[];
+  /** Optimistic locking — ver actualizarUsuario() y lib/concurrencia/queries.ts. */
+  updatedAt: string;
+}
+
+export async function listarUsuariosEditables(empresaId: number): Promise<UsuarioEditable[]> {
+  const perfil = await requireSessionProfile();
+  if (perfil.rol !== "superadmin" && perfil.rol !== "admin") return [];
+  if (perfil.rol === "admin" && perfil.empresaId !== empresaId) return [];
+
+  const supabase = await createClient();
+  const { data: usuarios } = await supabase
+    .from("usuarios_central")
+    .select("id, username, email, telefono, rol, propietario_filtro, auth_user_id, updated_at")
+    .eq("empresa_id", empresaId)
+    .order("username");
+  if (!usuarios) return [];
+
+  const { data: permisos } = await supabase
+    .from("permisos_usuario")
+    .select("username, pestana")
+    .in("username", usuarios.map((u) => u.username));
+
+  return usuarios.map((u) => ({
+    id: u.id,
+    username: u.username,
+    email: u.email,
+    telefono: u.telefono,
+    rol: u.rol,
+    propietarioFiltro: u.propietario_filtro,
+    tieneAcceso: u.auth_user_id !== null,
+    permisos: (permisos ?? []).filter((p) => p.username === u.username).map((p) => p.pestana),
+    updatedAt: u.updated_at,
+  }));
+}
+
+export async function crearUsuarioEnEmpresa(datos: {
+  empresaId: number;
+  username: string;
+  email: string;
+  telefono: string;
+  rol: Rol;
+  propietarioFiltro: string | null;
+  permisos: string[];
+}): Promise<{ ok: boolean; error?: string }> {
+  const perfil = await requireSessionProfile();
+  if (perfil.rol !== "superadmin" && perfil.rol !== "admin") {
+    return { ok: false, error: "No tenés permiso para esta acción." };
+  }
+  if (perfil.rol === "admin" && perfil.empresaId !== datos.empresaId) {
+    return { ok: false, error: "No podés crear usuarios fuera de tu empresa." };
+  }
+  if (!puedeAsignarRol(perfil.rol, datos.rol)) {
+    return { ok: false, error: "No tenés permiso para asignar ese rol." };
+  }
+  const permisosInvalidos = datos.permisos.filter((p) => !CLAVES_PERMISO_VALIDAS.includes(p));
+  if (permisosInvalidos.length > 0) {
+    return { ok: false, error: `Permiso desconocido: ${permisosInvalidos.join(", ")}` };
+  }
+  if (perfil.rol === "admin" && !permisosSonSubconjunto(datos.permisos, perfil.permisos)) {
+    return { ok: false, error: "No podés otorgar un permiso que vos mismo no tenés." };
+  }
+
+  const supabase = await createClient();
+
+  const { error: errorUsuario } = await supabase.from("usuarios_central").insert({
+    username: datos.username,
+    email: datos.email,
+    telefono: datos.telefono || null,
+    nombre_empresa: perfil.nombreEmpresa,
+    empresa_id: datos.empresaId,
+    rol: datos.rol,
+    propietario_filtro: datos.rol === "propietario" ? datos.propietarioFiltro : null,
+    terminos_aceptados: false,
+  });
+  if (errorUsuario) return { ok: false, error: errorUsuario.message };
+
+  if (datos.permisos.length > 0) {
+    const { error: errorPermisos } = await supabase
+      .from("permisos_usuario")
+      .insert(datos.permisos.map((pestana) => ({ username: datos.username, pestana })));
+    if (errorPermisos) return { ok: false, error: errorPermisos.message };
+  }
+
+  revalidatePath("/panel-gestion");
+  return { ok: true };
+}
+
+export async function actualizarUsuario(datos: {
+  id: number;
+  username: string;
+  telefono: string;
+  rol: Rol;
+  propietarioFiltro: string | null;
+  permisos: string[];
+  /** updated_at que tenía el formulario al abrirse — ver módulo "Ediciones simultáneas". */
+  updatedAtEsperado: string;
+}): Promise<{ ok: boolean; error?: string; conflicto?: boolean; updatedAtActual?: string }> {
+  const perfil = await requireSessionProfile();
+  if (perfil.rol !== "superadmin" && perfil.rol !== "admin") {
+    return { ok: false, error: "No tenés permiso para esta acción." };
+  }
+  if (!puedeAsignarRol(perfil.rol, datos.rol)) {
+    return { ok: false, error: "No tenés permiso para asignar ese rol." };
+  }
+  const permisosInvalidos = datos.permisos.filter((p) => !CLAVES_PERMISO_VALIDAS.includes(p));
+  if (permisosInvalidos.length > 0) {
+    return { ok: false, error: `Permiso desconocido: ${permisosInvalidos.join(", ")}` };
+  }
+  if (perfil.rol === "admin" && !permisosSonSubconjunto(datos.permisos, perfil.permisos)) {
+    return { ok: false, error: "No podés otorgar un permiso que vos mismo no tenés." };
+  }
+
+  // Optimistic locking (ver docs/DESIGN_LOG.md, "Ediciones simultáneas")
+  // — bloquea el guardado por igual a cualquier rol, incluido superadmin,
+  // si alguien más guardó cambios sobre esta misma fila mientras se
+  // editaba acá.
+  const conflicto = await verificarConflicto("usuarios_central", String(datos.id), datos.updatedAtEsperado);
+  if (conflicto.hayConflicto) {
+    return {
+      ok: false,
+      conflicto: true,
+      updatedAtActual: conflicto.updatedAtActual,
+      error: "Alguien más guardó cambios sobre este usuario mientras lo editabas. Actualizá y volvé a intentar.",
+    };
+  }
+
+  const supabase = await createClient();
+
+  // empresa_id no se toca acá — RLS ("admin_edita_usuarios_empresa")
+  // ya impide que un admin edite una fila fuera de su empresa o una
+  // fila de rol superadmin; si igual se coló un id inválido, el update
+  // simplemente afecta 0 filas y supabase-js no lo reporta como error,
+  // así que se verifica explícitamente.
+  const { data: actualizado, error: errorUsuario } = await supabase
+    .from("usuarios_central")
+    .update({
+      telefono: datos.telefono || null,
+      rol: datos.rol,
+      propietario_filtro: datos.rol === "propietario" ? datos.propietarioFiltro : null,
+    })
+    .eq("id", datos.id)
+    .select("id")
+    .maybeSingle();
+  if (errorUsuario) return { ok: false, error: errorUsuario.message };
+  if (!actualizado) return { ok: false, error: "No se pudo editar ese usuario (¿permisos?)." };
+
+  // Reemplazo completo de permisos: borrar todos los actuales e
+  // insertar los nuevos, más simple y menos propenso a bugs que un
+  // diff, y el volumen por usuario es chico (< 15 filas).
+  const { error: errorBorrado } = await supabase.from("permisos_usuario").delete().eq("username", datos.username);
+  if (errorBorrado) return { ok: false, error: errorBorrado.message };
+
+  if (datos.permisos.length > 0) {
+    const { error: errorInsercion } = await supabase
+      .from("permisos_usuario")
+      .insert(datos.permisos.map((pestana) => ({ username: datos.username, pestana })));
+    if (errorInsercion) return { ok: false, error: errorInsercion.message };
+  }
+
+  revalidatePath("/panel-gestion");
+  return { ok: true };
+}
+
+// ── Configuraciones de empresa (toggle de WhatsApp y de actualización
+// automática de alquiler) — columnas ya existentes en
+// configuraciones_empresa, edición nueva desde Panel de Gestión. ──────
+export async function obtenerConfiguracionEmpresa(empresaId: number): Promise<{
+  actualizarAlquilerAuto: boolean;
+  whatsappHabilitado: boolean;
+  timeoutInactividadMinutos: number;
+} | null> {
+  const perfil = await requireSessionProfile();
+  if (perfil.rol !== "superadmin" && perfil.rol !== "admin") return null;
+  if (perfil.rol === "admin" && perfil.empresaId !== empresaId) return null;
+
+  const supabase = await createClient();
+  const { data } = await supabase
+    .from("configuraciones_empresa")
+    .select("actualizar_alquiler_auto, whatsapp_habilitado, timeout_inactividad_minutos")
+    .eq("empresa_id", empresaId)
+    .maybeSingle();
+  if (!data) return null;
+  return {
+    actualizarAlquilerAuto: data.actualizar_alquiler_auto,
+    whatsappHabilitado: data.whatsapp_habilitado,
+    timeoutInactividadMinutos: data.timeout_inactividad_minutos,
+  };
+}
+
+export async function actualizarConfiguracionEmpresa(
+  empresaId: number,
+  cambios: Partial<{
+    actualizar_alquiler_auto: boolean;
+    whatsapp_habilitado: boolean;
+    timeout_inactividad_minutos: number;
+  }>
+): Promise<{ ok: boolean; error?: string }> {
+  if (
+    cambios.timeout_inactividad_minutos !== undefined &&
+    (!Number.isInteger(cambios.timeout_inactividad_minutos) || cambios.timeout_inactividad_minutos < 1)
+  ) {
+    return { ok: false, error: "El tiempo de inactividad tiene que ser un número entero mayor a 0." };
+  }
+  const perfil = await requireSessionProfile();
+  if (perfil.rol !== "superadmin" && perfil.rol !== "admin") {
+    return { ok: false, error: "No tenés permiso para esta acción." };
+  }
+  if (perfil.rol === "admin" && perfil.empresaId !== empresaId) {
+    return { ok: false, error: "No podés editar la configuración de otra empresa." };
+  }
+
+  const supabase = await createClient();
+  const { error } = await supabase.from("configuraciones_empresa").update(cambios).eq("empresa_id", empresaId);
+  if (error) return { ok: false, error: error.message };
+
+  revalidatePath("/panel-gestion");
+  return { ok: true };
 }

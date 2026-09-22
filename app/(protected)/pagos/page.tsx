@@ -1,4 +1,4 @@
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { esSoloLectura } from "@/lib/auth/permissions";
 import { getContratoParaPago, getContratosActivosParaSelector } from "@/lib/pagos/queries";
 import { SelectorContrato } from "@/components/pagos/SelectorContrato";
@@ -13,7 +13,7 @@ export default async function PagosPage({
 }: {
   searchParams: Promise<{ contrato?: string }>;
 }) {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("pagos");
   const { contrato: codigoSeleccionado } = await searchParams;
 
   if (esSoloLectura(perfil.rol)) {

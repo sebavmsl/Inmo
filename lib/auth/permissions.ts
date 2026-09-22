@@ -21,6 +21,7 @@ export const PESTANAS_MAESTRAS: Pestana[] = [
   { clave: "auxiliares", icono: "⚙️", label: "Cargar Inquilinos / Propiedades", href: "/auxiliares" },
   { clave: "gastos", icono: "🔧", label: "Gastos de Propiedades", href: "/gastos" },
   { clave: "rendicion", icono: "📑", label: "Rendición a Propietarios", href: "/rendicion" },
+  { clave: "portal_inquilino", icono: "📮", label: "Portal Inquilino", href: "/portal-inquilino" },
 ];
 
 /**
@@ -31,6 +32,27 @@ export const PESTANAS_MAESTRAS: Pestana[] = [
  * pestanasVisibles().
  */
 const CLAVE_PERMISO_WHATSAPP = "whatsapp";
+
+/**
+ * "cotizacion_manual" — igual naturaleza que "whatsapp": permiso
+ * transversal (sin pantalla propia), habilita poder editar a mano la
+ * cotización del dólar precargada en los formularios de Pagos/Gastos en
+ * vez de solo poder verla de solo lectura (ver Módulo 4, docs/DESIGN_LOG.md).
+ * superadmin: siempre. admin/user: según permisos_usuario, igual que
+ * cualquier otro permiso transversal.
+ */
+const CLAVE_PERMISO_COTIZACION_MANUAL = "cotizacion_manual";
+
+/**
+ * Permisos transversales: viven en `permisos_usuario` igual que las
+ * pestañas, pero no son rutas navegables y por eso no forman parte de
+ * PESTANAS_MAESTRAS — el Panel de Gestión los muestra en una sección
+ * aparte ("Permisos adicionales") al editar un usuario.
+ */
+export const PERMISOS_TRANSVERSALES = [
+  { clave: CLAVE_PERMISO_WHATSAPP, label: "Enviar por WhatsApp" },
+  { clave: CLAVE_PERMISO_COTIZACION_MANUAL, label: "Editar cotización del dólar a mano" },
+] as const;
 
 const PANEL_GESTION: Pestana = {
   clave: "panel_gestion",
@@ -87,6 +109,26 @@ export function esSoloLectura(rol: Rol): boolean {
 }
 
 /**
+ * Chequeo real de acceso a una pestaña, para usar del lado del servidor
+ * (páginas y Server Actions) — no solo para armar el menú lateral.
+ *
+ * Bug de seguridad corregido acá (ver docs/DESIGN_LOG.md): hasta ahora
+ * ninguna page.tsx ni action.ts validaba `permisos_usuario` — solo el
+ * sidebar ocultaba el link. Cualquiera con sesión podía escribir la URL
+ * de un módulo que no tenía habilitado (o llamar su Server Action
+ * directo) y usarlo igual. Esta función es el chequeo real, del lado
+ * del servidor, que hay que llamar en las dos capas.
+ */
+export function puedeAcceder(rol: Rol, permisosUsuario: string[], pestana: string): boolean {
+  if (pestana === "terminos") return true;
+  if (rol === "superadmin") return true;
+  if (rol === "propietario") return CLAVES_PROPIETARIO.includes(pestana);
+  // admin y user: sin acceso automático — depende de permisos_usuario,
+  // igual criterio que ya usa pestanasVisibles() para armar el menú.
+  return permisosUsuario.includes(pestana);
+}
+
+/**
  * ¿Puede este usuario ver los botones de envío por WhatsApp?
  * Requiere DOS condiciones, igual que v1:
  *   1. La empresa tiene WhatsApp habilitado (configuraciones_empresa.whatsapp_habilitado)
@@ -100,4 +142,15 @@ export function tieneWhatsapp(
   if (!empresaWhatsappHabilitado) return false;
   if (rol === "superadmin") return true;
   return permisosUsuario.includes(CLAVE_PERMISO_WHATSAPP);
+}
+
+/**
+ * ¿Puede este usuario cargar a mano la cotización del dólar (en vez de
+ * ver solo el valor traído de BNA)? superadmin: siempre. admin/user:
+ * según permisos_usuario (mismo criterio que tieneWhatsapp(), pero sin
+ * el condicionante de configuración por empresa).
+ */
+export function tieneCotizacionManual(rol: Rol, permisosUsuario: string[]): boolean {
+  if (rol === "superadmin") return true;
+  return permisosUsuario.includes(CLAVE_PERMISO_COTIZACION_MANUAL);
 }

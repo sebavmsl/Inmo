@@ -4,6 +4,7 @@ import { useState, useMemo } from "react";
 import { impactarCobro, type ConceptosPago } from "@/app/(protected)/pagos/actions";
 import { enviarComprobanteWhatsapp } from "@/lib/whatsapp/comprobante";
 import { calcularSaldoNuevo } from "@/lib/pagos/calculo-saldo";
+import { CampoCotizacionUsd } from "@/components/cotizacion/CampoCotizacionUsd";
 import { formatMoneda } from "@/lib/format";
 import type { ContratoParaPago } from "@/lib/pagos/queries";
 import type { TipoPago } from "@/lib/types/database.types";
@@ -27,6 +28,7 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
     conceptoExtra: 0,
   });
   const [diferenciaCorreccion, setDiferenciaCorreccion] = useState(0);
+  const [cotizacionUsd, setCotizacionUsd] = useState(0);
   const [montoAbonado, setMontoAbonado] = useState(0);
   const [metodoPago, setMetodoPago] = useState("Transferencia Bancaria");
   const [comentario, setComentario] = useState("");
@@ -79,7 +81,7 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
       montoAbonado,
       metodoPago,
       comentario,
-      cotizacionUsd: null,
+      cotizacionUsd: cotizacionUsd || null,
     });
     setEnviando(false);
     setResultado(
@@ -190,6 +192,7 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
             className="w-full rounded border border-brand-100 px-2 py-1.5"
           />
         </label>
+        <CampoCotizacionUsd valor={cotizacionUsd} onChange={setCotizacionUsd} />
       </div>
 
       <div className="rounded-lg bg-brand-50 p-3 text-sm">

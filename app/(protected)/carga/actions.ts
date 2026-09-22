@@ -2,9 +2,18 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { requireSessionProfile } from "@/lib/auth/session";
-import { calcularMotivoFinalizacion } from "@/lib/carga/validaciones";
+import { requirePermisoAction } from "@/lib/auth/session";
+import { calcularMotivoFinalizacion, bloqueadoPorActualizacionPendiente } from "@/lib/carga/validaciones";
+import { verificarConflicto } from "@/lib/concurrencia/queries";
+import { listarContratosEditables, type ContratoEditable } from "@/lib/carga/queries";
 import type { IndiceActualizacion } from "@/lib/types/database.types";
+
+export async function listarContratos(): Promise<ContratoEditable[]> {
+  const perfil = await requirePermisoAction("carga");
+  const propietarioFiltro =
+    perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;
+  return listarContratosEditables(propietarioFiltro);
+}
 
 export interface DatosContrato {
   codigo: string;
@@ -47,7 +56,7 @@ export interface DatosContrato {
  * viejo cumplió su curso o se cortó antes de tiempo.
  */
 export async function crearContrato(datos: DatosContrato): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requireSessionProfile();
+  const perfil = await requirePermisoAction("carga");
   const supabase = await createClient();
 
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
@@ -125,19 +134,102 @@ export async function crearContrato(datos: DatosContrato): Promise<{ ok: boolean
   return { ok: true };
 }
 
-/** Edición de un contrato existente — sin la lógica de renovación (eso solo aplica a altas nuevas). */
-export async function editarContrato(codigo: string, datos: Partial<DatosContrato>): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requireSessionProfile();
+export interface DatosEditarContrato {
+  estado: string;
+  dniInquilino: string;
+  fechaInicio: string;
+  finContrato: string | null;
+  calcDuracion: number | null;
+  indice: IndiceActualizacion;
+  frecuenciaMeses: number;
+  honorariosPct: number;
+  montoHonorarios: number | null;
+  cuotaHonorarios: number;
+  montoGarantia: number | null;
+  cuotasDeposito: number;
+  cargoElectricidad: "Inquilino" | "Propietario";
+  cargoGas: "Inquilino" | "Propietario";
+  cargoMunicipalidad: "Inquilino" | "Propietario";
+  cargoOoss: "Inquilino" | "Propietario";
+  cargoExpensas: "Inquilino" | "Propietario";
+  cargoImpInmobiliario: "Inquilino" | "Propietario";
+  cochera: number | null;
+}
+
+/**
+ * Edición de un contrato existente — sin la lógica de renovación (eso
+ * solo aplica a altas nuevas, ver crearContrato). NO toca `monto_inicial`
+ * (histórico del alta) ni `alquiler` (vigente, lo mantiene el motor de
+ * índices de Planilla — ver actualizarIndicesManual()).
+ *
+ * CORRECCIÓN (hallazgo de esta sesión): la versión anterior de esta
+ * función pasaba `datos` (claves en camelCase, ej. `aliasPropiedad`)
+ * directo a `.update()`, que espera nombres de columna reales
+ * (snake_case, ej. `alias_propiedad`) — nunca hubiera actualizado nada
+ * en la base real. No tenía pantalla propia todavía, así que el bug no
+ * se había manifestado. Ahora mapea cada campo explícitamente, igual
+ * criterio que crearContrato().
+ *
+ * Dos capas de protección antes de guardar: optimistic locking (Módulo
+ * transversal "Ediciones simultáneas") y el bloqueo por actualización
+ * de índice pendiente (ver lib/carga/validaciones.ts).
+ */
+export async function editarContrato(
+  codigo: string,
+  datos: DatosEditarContrato,
+  updatedAtEsperado: string
+): Promise<{ ok: boolean; error?: string; conflicto?: boolean; bloqueado?: boolean }> {
+  const perfil = await requirePermisoAction("carga");
   const supabase = await createClient();
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
 
+  const conflicto = await verificarConflicto("contratos", codigo, updatedAtEsperado);
+  if (conflicto.hayConflicto) {
+    return { ok: false, conflicto: true, error: "Alguien más guardó cambios sobre este contrato mientras lo editabas. Actualizá y volvé a intentar." };
+  }
+
+  const { data: actual } = await supabase
+    .from("contratos")
+    .select("fin_contrato, prox_actualizacion")
+    .eq("codigo", codigo)
+    .eq("empresa_id", perfil.empresaId)
+    .maybeSingle();
+
+  const { bloqueado, motivo } = bloqueadoPorActualizacionPendiente({
+    estado: datos.estado,
+    finContrato: actual?.fin_contrato ?? null,
+    proxActualizacion: actual?.prox_actualizacion ?? null,
+  });
+  if (bloqueado) return { ok: false, bloqueado: true, error: motivo ?? "Edición bloqueada." };
+
   const { error } = await supabase
     .from("contratos")
-    .update(datos)
+    .update({
+      estado: datos.estado,
+      dni_inquilino: datos.dniInquilino,
+      inicio_contrato: datos.fechaInicio,
+      fin_contrato: datos.finContrato,
+      calc_duracion: datos.calcDuracion,
+      indice: datos.indice,
+      act_contrato: datos.frecuenciaMeses,
+      honorarios: datos.honorariosPct,
+      monto_honorarios: datos.montoHonorarios,
+      cuota_honorarios: datos.cuotaHonorarios,
+      monto_garantia: datos.montoGarantia,
+      cuotas_deposito: datos.cuotasDeposito,
+      cargo_electricidad: datos.cargoElectricidad,
+      cargo_gas: datos.cargoGas,
+      cargo_municipalidad: datos.cargoMunicipalidad,
+      cargo_ooss: datos.cargoOoss,
+      cargo_expensas: datos.cargoExpensas,
+      cargo_imp_inmobiliario: datos.cargoImpInmobiliario,
+      cochera: datos.cochera,
+    })
     .eq("codigo", codigo)
     .eq("empresa_id", perfil.empresaId);
 
   if (error) return { ok: false, error: error.message };
   revalidatePath("/carga");
+  revalidatePath("/planilla");
   return { ok: true };
 }

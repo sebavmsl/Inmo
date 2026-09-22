@@ -1,10 +1,13 @@
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { esSoloLectura } from "@/lib/auth/permissions";
 import { FormularioPropiedad } from "@/components/carga/FormularioPropiedad";
 import { FormularioInquilino } from "@/components/carga/FormularioInquilino";
+import { FormularioGrupo } from "@/components/auxiliares/FormularioGrupo";
+import { EditarPropiedad } from "@/components/auxiliares/EditarPropiedad";
+import { EditarInquilino } from "@/components/auxiliares/EditarInquilino";
 
 export default async function AuxiliaresPage() {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("auxiliares");
 
   if (esSoloLectura(perfil.rol)) {
     return (
@@ -20,8 +23,17 @@ export default async function AuxiliaresPage() {
         <h1 className="mb-1 text-xl font-semibold text-brand-900">⚙️ Cargar Inquilinos / Propiedades</h1>
         <p className="mb-4 text-sm text-brand-500">{perfil.nombreEmpresa}</p>
       </div>
-      <FormularioPropiedad />
       <FormularioInquilino />
+      <FormularioPropiedad />
+      <FormularioGrupo />
+
+      <div>
+        <h2 className="mb-3 mt-2 text-base font-semibold text-brand-900">🔄 Modificar Datos Existentes</h2>
+        <div className="space-y-6">
+          <EditarInquilino />
+          <EditarPropiedad />
+        </div>
+      </div>
     </div>
   );
 }

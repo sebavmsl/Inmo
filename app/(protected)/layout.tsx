@@ -1,6 +1,7 @@
 import { requireSessionProfile } from "@/lib/auth/session";
 import { pestanasVisibles } from "@/lib/auth/permissions";
 import { Sidebar } from "@/components/layout/Sidebar";
+import { InactivityGuard } from "@/components/InactivityGuard";
 
 /**
  * Layout para todo lo que requiere sesión iniciada. Arma el menú lateral
@@ -24,6 +25,7 @@ export default async function ProtectedLayout({
     <div className="flex min-h-screen bg-brand-50">
       <Sidebar pestanas={pestanas} nombreEmpresa={perfil.nombreEmpresa} username={perfil.username} />
       <main className="flex-1 p-6">{children}</main>
+      <InactivityGuard timeoutMinutos={perfil.timeoutInactividadMinutos} />
     </div>
   );
 }

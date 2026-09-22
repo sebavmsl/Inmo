@@ -1,4 +1,4 @@
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { getContratosActivosDashboard, getCajaHistorica } from "@/lib/dashboard/queries";
 import { calcularMetricasDashboard } from "@/lib/dashboard/metrics";
 import { formatMoneda } from "@/lib/format";
@@ -14,7 +14,7 @@ import { ListaAlertasVencimiento, ListaAlertasActualizacion } from "@/components
  * pandas — RLS ya se encarga del aislamiento por empresa.
  */
 export default async function DashboardPage() {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("dashboard");
 
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;

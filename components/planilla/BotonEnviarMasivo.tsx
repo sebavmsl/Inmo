@@ -11,8 +11,12 @@ export function BotonEnviarMasivo() {
     setCargando(true);
     setResultado(null);
     try {
-      const { enviados, errores } = await enviarRecibosPreliminaresMasivo();
-      setResultado(`${enviados} enviados` + (errores > 0 ? `, ${errores} con error` : ""));
+      const { enviados, errores, omitidos } = await enviarRecibosPreliminaresMasivo();
+      setResultado(
+        `${enviados} enviados` +
+          (errores > 0 ? `, ${errores} con error` : "") +
+          (omitidos > 0 ? `, ${omitidos} omitidos (ya pagaron o sin teléfono)` : "")
+      );
     } catch (e) {
       setResultado(e instanceof Error ? e.message : "Error al enviar.");
     } finally {

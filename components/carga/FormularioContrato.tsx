@@ -3,18 +3,20 @@
 import { useState } from "react";
 import { crearContrato, type DatosContrato } from "@/app/(protected)/carga/actions";
 
-const INDICES = ["ICL", "IPC", "UVA", "Otro"] as const;
+export const INDICES = ["ICL", "IPC", "UVA", "Otro"] as const;
 // contratos.act_contrato guarda directamente la cantidad de meses (integer),
-// no un enum de texto — ver DatosContrato.frecuenciaMeses.
-const FRECUENCIAS: { meses: number; label: string }[] = [
+// no un enum de texto — ver DatosContrato.frecuenciaMeses. Exportado para
+// reusar en EditarContrato.tsx (misma lista, incluye Bianual).
+export const FRECUENCIAS: { meses: number; label: string }[] = [
   { meses: 1, label: "Mensual" },
   { meses: 2, label: "Bimestral" },
   { meses: 3, label: "Trimestral" },
   { meses: 4, label: "Cuatrimestral" },
   { meses: 6, label: "Semestral" },
   { meses: 12, label: "Anual" },
+  { meses: 24, label: "Bianual" },
 ];
-const CARGOS = ["Inquilino", "Propietario"] as const;
+export const CARGOS = ["Inquilino", "Propietario"] as const;
 
 const CAMPOS_CARGO: { campo: keyof DatosContrato; label: string }[] = [
   { campo: "cargoElectricidad", label: "Electricidad" },

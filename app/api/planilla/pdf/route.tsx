@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { renderToBuffer } from "@react-pdf/renderer";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { getCobranzasDelMes } from "@/lib/planilla/queries";
 import { formatMoneda } from "@/lib/format";
 import type { FilaPlanilla } from "@/lib/planilla/types";
@@ -85,7 +85,7 @@ function PlanillaPdf({ filas, empresa }: { filas: FilaPlanilla[]; empresa: strin
 }
 
 export async function GET() {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("planilla");
 
   const propietarioFiltro =
     perfil.rol === "propietario" && perfil.propietarioFiltro ? perfil.propietarioFiltro : undefined;

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { crearGasto } from "@/app/(protected)/gastos/actions";
+import { CampoCotizacionUsd } from "@/components/cotizacion/CampoCotizacionUsd";
 
 const PAGADO_POR = ["Inmobiliaria", "Propietario", "Inquilino", "Otro"] as const;
 
@@ -24,6 +25,7 @@ export function FormularioGasto({ propiedades }: { propiedades: Propiedad[] }) {
   const [pagadoPor, setPagadoPor] = useState<(typeof PAGADO_POR)[number]>("Propietario");
   const [tipoGasto, setTipoGasto] = useState("Ordinario");
   const [observaciones, setObservaciones] = useState("");
+  const [cotizacionUsd, setCotizacionUsd] = useState(0);
   const [enviando, setEnviando] = useState(false);
   const [resultado, setResultado] = useState<string | null>(null);
 
@@ -43,7 +45,7 @@ export function FormularioGasto({ propiedades }: { propiedades: Propiedad[] }) {
       pagadoPor,
       observaciones,
       tipoGasto,
-      cotizacionUsd: null,
+      cotizacionUsd: cotizacionUsd || null,
     });
     setEnviando(false);
     setResultado(res.ok ? "Gasto registrado." : res.error ?? "Error al registrar el gasto.");
@@ -110,6 +112,7 @@ export function FormularioGasto({ propiedades }: { propiedades: Propiedad[] }) {
           <span className="mb-1 block text-brand-700">N° Comprobante</span>
           <input value={comprobante} onChange={(e) => setComprobante(e.target.value)} className="w-full rounded border border-brand-100 px-2 py-1.5" />
         </label>
+        <CampoCotizacionUsd valor={cotizacionUsd} onChange={setCotizacionUsd} />
       </div>
 
       <label className="block text-sm">

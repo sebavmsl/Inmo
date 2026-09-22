@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { puedeAcceder } from "@/lib/auth/permissions";
 import type { Rol } from "@/lib/types/database.types";
 
 export interface SessionProfile {
@@ -12,7 +13,16 @@ export interface SessionProfile {
   propietarioFiltro: string | null;
   terminosAceptados: boolean;
   permisos: string[];
+  /**
+   * Minutos de inactividad antes del cierre automático de sesión (ver
+   * InactivityGuard.tsx). Configurable por empresa
+   * (configuraciones_empresa.timeout_inactividad_minutos); superadmin no
+   * tiene empresa_id, así que usa el default parejo (30 min).
+   */
+  timeoutInactividadMinutos: number;
 }
+
+const TIMEOUT_INACTIVIDAD_DEFAULT_MINUTOS = 30;
 
 /**
  * Equivalente a la sección "INICIALIZACIÓN DE SESIÓN" de app.py, pero para
@@ -52,6 +62,16 @@ export async function getSessionProfile(): Promise<SessionProfile | null> {
     permisos = (filas ?? []).map((f) => f.pestana);
   }
 
+  let timeoutInactividadMinutos = TIMEOUT_INACTIVIDAD_DEFAULT_MINUTOS;
+  if (perfil.empresa_id) {
+    const { data: cfg } = await supabase
+      .from("configuraciones_empresa")
+      .select("timeout_inactividad_minutos")
+      .eq("empresa_id", perfil.empresa_id)
+      .maybeSingle();
+    if (cfg) timeoutInactividadMinutos = cfg.timeout_inactividad_minutos;
+  }
+
   return {
     authUserId: user.id,
     email: user.email ?? perfil.email,
@@ -62,6 +82,7 @@ export async function getSessionProfile(): Promise<SessionProfile | null> {
     propietarioFiltro: perfil.propietario_filtro,
     terminosAceptados: perfil.terminos_aceptados,
     permisos,
+    timeoutInactividadMinutos,
   };
 }
 
@@ -69,5 +90,37 @@ export async function getSessionProfile(): Promise<SessionProfile | null> {
 export async function requireSessionProfile(): Promise<SessionProfile> {
   const perfil = await getSessionProfile();
   if (!perfil) redirect("/login");
+  return perfil;
+}
+
+/**
+ * Igual que requireSessionProfile(), pero además exige el permiso de la
+ * pestaña indicada — este es el chequeo real que faltaba (ver bug de
+ * seguridad en docs/DESIGN_LOG.md). Cada page.tsx de un módulo debe
+ * usar esta función en vez de requireSessionProfile() a secas.
+ * Sin el permiso: redirige a /dashboard (no a /login, ya tiene sesión
+ * válida, solo no le corresponde esa pestaña).
+ */
+export async function requireSessionProfileConPermiso(pestana: string): Promise<SessionProfile> {
+  const perfil = await requireSessionProfile();
+  if (!puedeAcceder(perfil.rol, perfil.permisos, pestana)) {
+    redirect("/dashboard");
+  }
+  return perfil;
+}
+
+/**
+ * Para usar al principio de cada Server Action de escritura — misma
+ * validación que requireSessionProfileConPermiso(), pero lanza un error
+ * en vez de redirigir (una action no navega, y el cliente ya sabe
+ * mostrar el mensaje de error de una action fallida). Segunda capa de
+ * la misma defensa: aunque alguien invoque la action directo sin pasar
+ * por la página, igual se valida acá.
+ */
+export async function requirePermisoAction(pestana: string): Promise<SessionProfile> {
+  const perfil = await requireSessionProfile();
+  if (!puedeAcceder(perfil.rol, perfil.permisos, pestana)) {
+    throw new Error("No tenés permiso para esta acción.");
+  }
   return perfil;
 }

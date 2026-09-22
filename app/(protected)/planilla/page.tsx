@@ -1,4 +1,4 @@
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { esSoloLectura, tieneWhatsapp } from "@/lib/auth/permissions";
 import { getCobranzasDelMes } from "@/lib/planilla/queries";
 import { createClient } from "@/lib/supabase/server";
@@ -12,7 +12,7 @@ import { BotonEnviarMasivo } from "@/components/planilla/BotonEnviarMasivo";
  * vencimiento automático, archivado, verificación persistida).
  */
 export default async function PlanillaPage() {
-  const perfil = await requireSessionProfile();
+  const perfil = await requireSessionProfileConPermiso("planilla");
   const soloLectura = esSoloLectura(perfil.rol);
 
   const propietarioFiltro =

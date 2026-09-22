@@ -1,36 +1,11 @@
 import { createClient } from "@/lib/supabase/server";
-import type { FilaPlanilla, UrgenciaFila } from "@/lib/planilla/types";
+import type { FilaPlanilla } from "@/lib/planilla/types";
+import { clasificarUrgencia } from "@/lib/contratos/urgencia";
 
 /** 'YYYY-MM' del mes actual, para planilla_verificaciones y para clasificar urgencia. */
 export function periodoActual(): string {
   const hoy = new Date();
   return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
-}
-
-/**
- * Clasifica la urgencia de una fila, mismo criterio de colores que v1:
- * amarillo (actualizar este mes) / celeste (mes próximo) / rojo (RENOVAR:
- * la próxima actualización cae después del fin del contrato) / normal.
- * Réplica del criterio ya usado en lib/dashboard/metrics.ts, adaptado a
- * clasificación por fila en vez de alertas agregadas.
- */
-function clasificarUrgencia(finContrato: string | null, proxActualizacion: string | null): UrgenciaFila {
-  if (!proxActualizacion) return "normal";
-
-  const hoy = new Date();
-  const mesActual = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
-  const mesProximo = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 1);
-  const prox = new Date(proxActualizacion);
-  const proxMes = new Date(prox.getFullYear(), prox.getMonth(), 1);
-
-  if (finContrato) {
-    const fin = new Date(finContrato);
-    if (prox > fin) return "renovar"; // la próxima actualización cae después de que termina el contrato
-  }
-
-  if (proxMes.getTime() === mesActual.getTime()) return "actualizar_este_mes";
-  if (proxMes.getTime() === mesProximo.getTime()) return "actualizar_mes_proximo";
-  return "normal";
 }
 
 export async function getCobranzasDelMes(propietarioFiltro?: string): Promise<FilaPlanilla[]> {

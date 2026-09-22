@@ -1,7 +1,13 @@
 import { LoginForm } from "@/components/auth/LoginForm";
 import { APP_VERSION } from "@/lib/version";
 
-export default function LoginPage() {
+export default async function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ motivo?: string }>;
+}) {
+  const { motivo } = await searchParams;
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-brand-50 px-4">
       <div className="w-full max-w-sm">
@@ -11,6 +17,12 @@ export default function LoginPage() {
           </h1>
           <p className="mt-1 text-sm text-brand-600">Ingresá con tu usuario para continuar</p>
         </div>
+
+        {motivo === "inactividad" && (
+          <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-center text-xs text-amber-700">
+            Se cerró tu sesión por inactividad. Volvé a ingresar para continuar.
+          </p>
+        )}
 
         <div className="rounded-xl border border-brand-100 bg-white p-6 shadow-sm">
           <LoginForm />

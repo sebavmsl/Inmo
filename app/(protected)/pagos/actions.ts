@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requirePermisoAction } from "@/lib/auth/session";
+import { registrarCotizacionUsada } from "@/lib/cotizacion/queries";
 import type { TipoPago } from "@/lib/types/database.types";
 
 export interface ConceptosPago {
@@ -47,7 +48,7 @@ export interface ResultadoImpactarCobro {
  * Supabase-js — hallazgo de esta sesión).
  */
 export async function impactarCobro(params: ImpactarCobroParams): Promise<ResultadoImpactarCobro> {
-  const perfil = await requireSessionProfile();
+  const perfil = await requirePermisoAction("pagos");
   const supabase = await createClient();
 
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
@@ -85,6 +86,10 @@ export async function impactarCobro(params: ImpactarCobroParams): Promise<Result
 
   revalidatePath("/pagos");
   revalidatePath("/planilla");
+
+  // Best-effort, no bloquea la respuesta si falla (ver doc-comment de
+  // registrarCotizacionUsada) — el cobro ya se guardó.
+  await registrarCotizacionUsada(perfil.empresaId, params.cotizacionUsd);
 
   return { ok: true, nroComprobante: fila.nro_comprobante, saldoNuevo: fila.saldo_nuevo };
 }

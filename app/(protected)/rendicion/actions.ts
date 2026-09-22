@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requirePermisoAction } from "@/lib/auth/session";
 import type { ResumenRendicion } from "@/lib/rendicion/queries";
 
 /**
@@ -14,7 +14,7 @@ export async function registrarLiquidacion(
   resumen: ResumenRendicion,
   montoLiquidado: number
 ): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requireSessionProfile();
+  const perfil = await requirePermisoAction("rendicion");
   const supabase = await createClient();
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
 

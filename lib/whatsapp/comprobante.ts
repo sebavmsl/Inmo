@@ -1,7 +1,7 @@
 "use server";
 
 import { createClient } from "@/lib/supabase/server";
-import { requireSessionProfile } from "@/lib/auth/session";
+import { requirePermisoAction } from "@/lib/auth/session";
 import { getCredencialesWhatsapp, enviarMensajeWhatsapp } from "@/lib/whatsapp/enviar";
 import { tieneWhatsapp } from "@/lib/auth/permissions";
 import { generarPdfComprobante } from "@/lib/pagos/pdf";
@@ -13,7 +13,7 @@ import { generarPdfComprobante } from "@/lib/pagos/pdf";
  * docs/DESIGN_LOG.md.
  */
 export async function enviarComprobanteWhatsapp(nroComprobante: string): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requireSessionProfile();
+  const perfil = await requirePermisoAction("pagos");
   const supabase = await createClient();
 
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };

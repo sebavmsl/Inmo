@@ -1,6 +1,7 @@
 "use client";
 
 import { useFormState, useFormStatus } from "react-dom";
+import { useSearchParams } from "next/navigation";
 import { loginPortal, type LoginPortalState } from "@/app/portal/login/actions";
 
 const initialState: LoginPortalState = { error: null };
@@ -20,6 +21,8 @@ function BotonIngresar() {
 
 export default function PortalLoginPage() {
   const [state, formAction] = useFormState(loginPortal, initialState);
+  const searchParams = useSearchParams();
+  const motivo = searchParams.get("motivo");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-brand-50 px-4">
@@ -28,6 +31,12 @@ export default function PortalLoginPage() {
           <h1 className="text-2xl font-semibold text-brand-900">Portal del Inquilino</h1>
           <p className="mt-1 text-sm text-brand-600">Consultá tu contrato y tus pagos</p>
         </div>
+
+        {motivo === "inactividad" && (
+          <p className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-center text-xs text-amber-700">
+            Se cerró tu sesión por inactividad. Volvé a ingresar para continuar.
+          </p>
+        )}
 
         <div className="rounded-xl border border-brand-100 bg-white p-6 shadow-sm">
           <form action={formAction} className="space-y-4">

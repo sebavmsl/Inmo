@@ -5,7 +5,8 @@ import { borrarEnBloque } from "@/app/(protected)/panel-gestion/actions";
 
 const TABLAS = ["contratos", "inquilinos", "propiedades", "pagos_historial"] as const;
 
-export function BorradoEnBloque() {
+export function BorradoEnBloque({ empresas }: { empresas: { id: number; nombreComercial: string }[] }) {
+  const [empresaId, setEmpresaId] = useState<number | null>(empresas[0]?.id ?? null);
   const [tabla, setTabla] = useState<(typeof TABLAS)[number]>("contratos");
   const [idsTexto, setIdsTexto] = useState("");
   const [confirmacion, setConfirmacion] = useState("");
@@ -20,9 +21,10 @@ export function BorradoEnBloque() {
   const frasePendiente = `FORZAR BORRADO ${ids.length} FILAS`;
 
   async function handleSubmit() {
+    if (!empresaId) return;
     setEnviando(true);
     setResultado(null);
-    const res = await borrarEnBloque(tabla, ids, confirmacion);
+    const res = await borrarEnBloque(empresaId, tabla, ids, confirmacion);
     setEnviando(false);
     setResultado(res.ok ? `${res.eliminados} filas eliminadas.` : res.error ?? "Error al borrar.");
     if (res.ok) {
@@ -36,7 +38,18 @@ export function BorradoEnBloque() {
       <h2 className="text-sm font-semibold text-red-800">🗑️ Eliminar Filas / Registros en Bloque</h2>
       <p className="text-xs text-red-600">Acción irreversible. Solo superadmin.</p>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <select
+          value={empresaId ?? ""}
+          onChange={(e) => setEmpresaId(e.target.value ? Number(e.target.value) : null)}
+          className="rounded border border-brand-100 px-2 py-1.5 text-sm"
+        >
+          {empresas.map((e) => (
+            <option key={e.id} value={e.id}>
+              {e.nombreComercial}
+            </option>
+          ))}
+        </select>
         <select value={tabla} onChange={(e) => setTabla(e.target.value as typeof tabla)} className="rounded border border-brand-100 px-2 py-1.5 text-sm">
           {TABLAS.map((t) => (
             <option key={t} value={t}>
@@ -69,7 +82,7 @@ export function BorradoEnBloque() {
 
       <button
         onClick={handleSubmit}
-        disabled={enviando || ids.length === 0 || confirmacion !== frasePendiente}
+        disabled={enviando || !empresaId || ids.length === 0 || confirmacion !== frasePendiente}
         className="rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
       >
         {enviando ? "Borrando…" : "Borrar Definitivamente"}
