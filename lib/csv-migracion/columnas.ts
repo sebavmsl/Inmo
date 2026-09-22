@@ -126,8 +126,8 @@ export function parsearFechaFlexible(crudo: string): string | null {
   const conBarras = /^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/.exec(valor);
   if (conBarras) {
     const [, d, m, a] = conBarras;
-    const dia = d.padStart(2, "0");
-    const mes = m.padStart(2, "0");
+    const dia = (d ?? "").padStart(2, "0");
+    const mes = (m ?? "").padStart(2, "0");
     if (Number(mes) < 1 || Number(mes) > 12 || Number(dia) < 1 || Number(dia) > 31) return null;
     return `${a}-${mes}-${dia}`;
   }

@@ -62,7 +62,7 @@ function aFilas(texto: string, delimitador: string): string[][] {
     filas.push(fila);
   }
 
-  return filas.filter((f) => !(f.length === 1 && f[0].trim() === "")); // saltea líneas en blanco sueltas
+  return filas.filter((f) => !(f.length === 1 && (f[0] ?? "").trim() === "")); // saltea líneas en blanco sueltas
 }
 
 export interface CsvParseado {

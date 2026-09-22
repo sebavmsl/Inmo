@@ -36,5 +36,17 @@
  *     en una sola tabla — por defecto se muestran los contratos sin
  *     empresa asignada ("huérfanos"), con un desplegable para elegir una
  *     empresa puntual. El PDF ("Descargar PDF") respeta el mismo filtro.
+ *
+ * V2.004 — cuarta entrega (fix de build de Vercel): 3 errores reales de
+ *   `tsconfig.json` (`strict` + `noUncheckedIndexedAccess`) que rompían
+ *   `npm run build` — no se pueden detectar sin compilar de verdad, y en
+ *   este entorno de trabajo no hay acceso a npm install, así que no
+ *   salieron hasta el build real en Vercel:
+ *   - actions-csv.ts (exportarTablaCsv, pagos_historial): `Object.keys`
+ *     sobre `filas[0]` sin confirmar que existe.
+ *   - csv-migracion/columnas.ts (parsearFechaFlexible): grupos de
+ *     captura de regex (`d`, `m`) usados sin fallback.
+ *   - csv-migracion/parseCsv.ts: mismo patrón en el filtro de líneas en
+ *     blanco (`f[0]`).
  */
-export const APP_VERSION = "V2.003";
+export const APP_VERSION = "V2.004";
