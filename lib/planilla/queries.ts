@@ -1,6 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import type { FilaPlanilla } from "@/lib/planilla/types";
 import { clasificarUrgencia } from "@/lib/contratos/urgencia";
+import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
 
 /** 'YYYY-MM' del mes actual, para planilla_verificaciones y para clasificar urgencia. */
 export function periodoActual(): string {
@@ -44,7 +45,7 @@ export async function getCobranzasDelMes(
   let contratosQuery = supabase
     .from("contratos")
     .select(
-      "codigo, alias_propiedad, dni_inquilino, fin_contrato, prox_actualizacion, indice, alquiler_calculado, alquiler, monto_inicial, cochera, saldo_actual, estado, finalizado_por, archivado"
+      "codigo, alias_propiedad, dni_inquilino, fin_contrato, prox_actualizacion, indice, alquiler_calculado, alquiler_calculado_fecha, alquiler, monto_inicial, cochera, saldo_actual, estado, finalizado_por, archivado"
     )
     .or("estado.eq.Activo,and(finalizado_por.eq.auto_vencimiento,archivado.eq.false)");
 
@@ -80,7 +81,9 @@ export async function getCobranzasDelMes(
   return contratos.map((c): FilaPlanilla => {
     const inquilino = inquilinoPorDni.get(c.dni_inquilino);
     const verif = verifPorCodigo.get(c.codigo);
-    const alquilerMostrar = c.alquiler_calculado ?? c.alquiler ?? c.monto_inicial ?? 0;
+    // V2.013: antes usaba c.alquiler_calculado sin chequear si era del
+    // mes actual — ver lib/indices/alquilerVigente.ts.
+    const alquilerMostrar = calcularAlquilerVigente(c.alquiler_calculado, c.alquiler_calculado_fecha, c.alquiler, c.monto_inicial);
 
     return {
       codigo: c.codigo,

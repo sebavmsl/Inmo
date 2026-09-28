@@ -1,5 +1,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { calcularValorActualizado } from "@/lib/indices/calculo";
+import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
+import { calcularEstadoActualizacion } from "@/lib/indices/ultimaActualizacion";
 import type { IndiceActualizacion } from "@/lib/types/database.types";
 
 export interface ContratoParaPago {
@@ -60,30 +62,52 @@ export async function getContratoParaPago(codigo: string, empresaFiltro?: number
     .eq("dni", contrato.dni_inquilino)
     .single();
 
-  // Recalcular índice en vivo si corresponde (ICL/IPC/UVA, no "Otro")
-  let alquilerSugerido = contrato.alquiler_calculado ?? contrato.alquiler ?? contrato.monto_inicial ?? 0;
+  // V2.013 — bug real encontrado en producción: acá abajo se recalculaba
+  // SIEMPRE contra "inicio_contrato + 1 × frecuencia", un único punto
+  // fijo — para un contrato recién creado eso apunta a una fecha
+  // FUTURA (sin datos de índice todavía), y para uno con más de un
+  // ciclo de historia, a una fecha vieja (no la actualización vigente
+  // real). Además, el valor inicial de alquilerSugerido usaba
+  // alquiler_calculado sin chequear si era del mes actual. Ver
+  // lib/indices/alquilerVigente.ts y lib/indices/ultimaActualizacion.ts
+  // (puerto exacto de la lógica de app.py, Módulo 4).
+  let alquilerSugerido = calcularAlquilerVigente(
+    contrato.alquiler_calculado,
+    contrato.alquiler_calculado_fecha,
+    contrato.alquiler,
+    contrato.monto_inicial
+  );
   if (["ICL", "IPC", "UVA"].includes(contrato.indice)) {
     // contratos.act_contrato ya guarda la frecuencia directamente en
     // meses (1, 2, 3, 4, 6, 12, 24 — confirmado contra app.py, línea
     // ~2559: "opciones_meses"). NO es un enum de texto como se asumió
     // originalmente ("frecuencia_actualizacion" no existe en la base real).
     const frecuenciaMeses = contrato.act_contrato ?? 6;
-    try {
-      const valor = await calcularValorActualizado(
-        contrato.indice as IndiceActualizacion,
-        contrato.monto_inicial,
-        new Date(contrato.inicio_contrato),
-        frecuenciaMeses
-      );
-      if (valor !== null) {
-        alquilerSugerido = valor;
-        await supabase
-          .from("contratos")
-          .update({ alquiler_calculado: valor, alquiler_calculado_fecha: new Date().toISOString().slice(0, 10) })
-          .eq("codigo", codigo);
+    const inicioContrato = new Date(contrato.inicio_contrato);
+    const { mesesHastaUltimaAct, mismoMesInicio } = calcularEstadoActualizacion(inicioContrato, frecuenciaMeses);
+
+    // Igual que v1: si el contrato arrancó este mismo mes, o todavía no
+    // pasó ningún ciclo completo de actualización, no hay nada que
+    // recalcular — se deja alquilerSugerido en alquiler/monto_inicial
+    // (de arriba), en vez de proyectar una fecha que ni siquiera pasó.
+    if (!mismoMesInicio && mesesHastaUltimaAct > 0) {
+      try {
+        const valor = await calcularValorActualizado(
+          contrato.indice as IndiceActualizacion,
+          contrato.monto_inicial,
+          inicioContrato,
+          mesesHastaUltimaAct
+        );
+        if (valor !== null) {
+          alquilerSugerido = valor;
+          await supabase
+            .from("contratos")
+            .update({ alquiler_calculado: valor, alquiler_calculado_fecha: new Date().toISOString().slice(0, 10) })
+            .eq("codigo", codigo);
+        }
+      } catch {
+        // Silencioso, igual que v1 — se usa el valor anterior si falla la fuente externa
       }
-    } catch {
-      // Silencioso, igual que v1 — se usa el valor anterior si falla la fuente externa
     }
   }
 

@@ -21,7 +21,10 @@ function buscarValorMasCercano(
   return null;
 }
 
-function sumarMeses(fecha: Date, meses: number): Date {
+// Exportada (V2.013) para que lib/indices/ultimaActualizacion.ts la
+// reuse — necesita la misma aritmética de fechas para el "avanzar
+// ciclo por ciclo" que replica app.py.
+export function sumarMeses(fecha: Date, meses: number): Date {
   const resultado = new Date(fecha);
   resultado.setMonth(resultado.getMonth() + meses);
   return resultado;

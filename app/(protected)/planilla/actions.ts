@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { requirePermisoAction } from "@/lib/auth/session";
 import { calcularValorActualizado } from "@/lib/indices/calculo";
+import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
 import { periodoActual } from "@/lib/planilla/queries";
 import { enviarMensajeWhatsapp, getCredencialesWhatsapp } from "@/lib/whatsapp/enviar";
 import { tieneWhatsapp } from "@/lib/auth/permissions";
@@ -173,7 +174,9 @@ export async function enviarRecibosPreliminaresMasivo() {
   for (const v of verificados ?? []) {
     const { data: contrato } = await supabase
       .from("contratos")
-      .select("codigo, alias_propiedad, dni_inquilino, alquiler_calculado, alquiler, monto_inicial, cochera, saldo_actual")
+      .select(
+        "codigo, alias_propiedad, dni_inquilino, alquiler_calculado, alquiler_calculado_fecha, alquiler, monto_inicial, cochera, saldo_actual"
+      )
       .eq("codigo", v.codigo_contrato)
       .eq("empresa_id", perfil.empresaId)
       .single();
@@ -206,7 +209,15 @@ export async function enviarRecibosPreliminaresMasivo() {
       continue;
     }
 
-    const alquiler = contrato.alquiler_calculado ?? contrato.alquiler ?? contrato.monto_inicial ?? 0;
+    // V2.013: antes usaba contrato.alquiler_calculado sin chequear si
+    // era del mes actual — podía mandarle al inquilino un monto
+    // inflado por WhatsApp. Ver lib/indices/alquilerVigente.ts.
+    const alquiler = calcularAlquilerVigente(
+      contrato.alquiler_calculado,
+      contrato.alquiler_calculado_fecha,
+      contrato.alquiler,
+      contrato.monto_inicial
+    );
     // Bug #2 corregido: el adicional suma cochera + expensas ad-hoc.
     const adicional = (contrato.cochera ?? 0) + (v.expensas_adhoc ?? 0);
     const total = alquiler + adicional;

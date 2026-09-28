@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { requireInquilinoContratos } from "@/lib/inquilino/session";
 import { createClient } from "@/lib/supabase/server";
 import { formatMoneda } from "@/lib/format";
+import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
 
 export default async function MiCuentaPage({
   searchParams,
@@ -22,7 +23,7 @@ export default async function MiCuentaPage({
   const supabase = await createClient();
   const { data: contratoDetalle } = await supabase
     .from("contratos")
-    .select("saldo_actual, fin_contrato, alquiler, alquiler_calculado")
+    .select("saldo_actual, fin_contrato, alquiler, alquiler_calculado, alquiler_calculado_fecha, monto_inicial")
     .eq("codigo", seleccionado.codigoContrato)
     .single();
 
@@ -34,7 +35,15 @@ export default async function MiCuentaPage({
     .limit(12);
 
   const saldo = contratoDetalle?.saldo_actual ?? 0;
-  const alquilerVigente = contratoDetalle?.alquiler_calculado ?? contratoDetalle?.alquiler ?? 0;
+  // V2.013: antes usaba alquiler_calculado sin chequear si era del mes
+  // actual — el inquilino podía ver directamente un monto viejo/inflado
+  // en su propio portal. Ver lib/indices/alquilerVigente.ts.
+  const alquilerVigente = calcularAlquilerVigente(
+    contratoDetalle?.alquiler_calculado,
+    contratoDetalle?.alquiler_calculado_fecha,
+    contratoDetalle?.alquiler,
+    contratoDetalle?.monto_inicial
+  );
 
   return (
     <div className="space-y-4">

@@ -201,5 +201,57 @@
  *     un error real se veía IDÉNTICO a una consulta lenta, sin ningún
  *     mensaje. Se agrega try/catch + mensaje de error + botón
  *     "Reintentar", para que de acá en más un error se vea como error.
+ *
+ * V2.012 — doceava entrega: causa real del error que tapaba "Editar
+ *   Contrato" ("A 'use server' file can only export async functions,
+ *   found object"). lib/concurrencia/queries.ts (módulo de ediciones
+ *   simultáneas, preexistente — no se tocó en esta sesión hasta ahora)
+ *   exportaba `TABLAS_CON_LOCK`, un array — un archivo "use server"
+ *   SOLO puede exportar funciones async, cualquier otro export (una
+ *   constante, un array, un objeto) rompe el render en producción.
+ *   Se deja de exportar el array (nada fuera del archivo lo necesitaba,
+ *   solo el tipo derivado `TablaConLock`, que sigue exportado — los
+ *   tipos no cuentan para esta regla, se borran en runtime). Se revisó
+ *   el resto del proyecto buscando el mismo patrón en los otros 16
+ *   archivos "use server" y no aparece en ningún otro lugar.
+ *
+ * V2.013 — treceava entrega: dos bugs reales en el cálculo/visualización
+ *   del alquiler actualizado, encontrados comparando directamente contra
+ *   app.py (Módulo 3 y Módulo 4) a partir de un caso real en producción
+ *   (contrato recién creado mostrando un alquiler más del doble del
+ *   esperado). Ninguno de los dos es un bug de la fórmula del índice en
+ *   sí (esa se verificó contra el ICL real del BCRA y está bien) — son
+ *   dos piezas de lógica de v1 que faltaban en el puerto original:
+ *
+ *   1. lib/indices/alquilerVigente.ts (nuevo) — puerto de
+ *      `_alquiler_display()` (app.py línea 3018): v1 solo confía en
+ *      `alquiler_calculado` si `alquiler_calculado_fecha` es del mes
+ *      calendario ACTUAL; si no, cae a `alquiler`/`monto_inicial`. El
+ *      puerto original usaba `alquiler_calculado` siempre que no fuera
+ *      null, sin este chequeo — un valor de un ciclo viejo (o de un
+ *      ciclo que todavía no llegó) quedaba mostrándose indefinidamente.
+ *      Aplicado en los 4 lugares que mostraban/usaban este valor:
+ *      Planilla (lib/planilla/queries.ts), envío masivo de recibo
+ *      preliminar por WhatsApp (app/(protected)/planilla/actions.ts —
+ *      podía mandarle al inquilino un monto inflado), el portal del
+ *      inquilino (app/portal/mi-cuenta/page.tsx), y el monto sugerido
+ *      al registrar un pago (lib/pagos/queries.ts).
+ *
+ *   2. lib/indices/ultimaActualizacion.ts (nuevo) — puerto de la
+ *      sección "REPLICACIÓN DE ALERTAS DE ACTUALIZACIÓN" de app.py
+ *      (Módulo 4, líneas 3569-3813). El bug más importante: al abrir un
+ *      contrato en Pagos, lib/pagos/queries.ts recalculaba SIEMPRE el
+ *      índice contra "inicio_contrato + 1 × frecuencia" — un único
+ *      punto fijo. Para un contrato recién creado (como el del caso
+ *      real) eso apunta a una fecha FUTURA sin datos de índice
+ *      publicados todavía; para uno con más de un ciclo de historia,
+ *      apunta a una fecha vieja, no a la actualización vigente real. v1
+ *      en cambio avanza la "próxima actualización" ciclo por ciclo
+ *      hasta encontrar una fecha que todavía no pasó, retrocede un
+ *      ciclo para obtener la ÚLTIMA actualización ya vencida, y exige
+ *      que haya pasado al menos un ciclo completo antes de calcular
+ *      nada — si no, no calcula, y se muestra alquiler/monto_inicial
+ *      (punto 1). La fórmula de cálculo en sí (lib/indices/calculo.ts)
+ *      no cambió — solo qué fecha se le pasa como objetivo.
  */
-export const APP_VERSION = "V2.011";
+export const APP_VERSION = "V2.013";
