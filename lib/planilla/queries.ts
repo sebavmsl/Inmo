@@ -2,6 +2,7 @@ import { createClient } from "@/lib/supabase/server";
 import type { FilaPlanilla } from "@/lib/planilla/types";
 import { clasificarUrgencia } from "@/lib/contratos/urgencia";
 import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
+import { obtenerUltimoPagoDelMesPorContrato, estaPagadoEsteMes } from "@/lib/pagos/pagoMesActual";
 
 /** 'YYYY-MM' del mes actual, para planilla_verificaciones y para clasificar urgencia. */
 export function periodoActual(): string {
@@ -78,6 +79,11 @@ export async function getCobranzasDelMes(
   if (errVer) throw new Error(`[Planilla] Error cargando verificaciones: ${errVer.message}`);
   const verifPorCodigo = new Map((verificaciones ?? []).map((v) => [v.codigo_contrato, v]));
 
+  // 5. V2.014 — bug real en producción: "pagado" usaba saldo_actual (cuenta
+  //    corriente GLOBAL) en vez de "¿hubo un pago este mes calendario?"
+  //    (igual que v1, app.py línea ~1549). Ver lib/pagos/pagoMesActual.ts.
+  const pagosDelMes = await obtenerUltimoPagoDelMesPorContrato(codigos);
+
   return contratos.map((c): FilaPlanilla => {
     const inquilino = inquilinoPorDni.get(c.dni_inquilino);
     const verif = verifPorCodigo.get(c.codigo);
@@ -96,7 +102,10 @@ export async function getCobranzasDelMes(
       alquilerMostrar,
       cochera: c.cochera ?? null,
       saldoActual: c.saldo_actual ?? 0,
-      pagado: (c.saldo_actual ?? 0) <= 0, // ver DESIGN_LOG.md "¿Pagado? — REDEFINIDO"
+      // V2.014: antes era (c.saldo_actual ?? 0) <= 0 — un contrato saldado
+      // en $0 el mes pasado, sin ningún pago cargado todavía este mes,
+      // aparecía "pagado" igual. Ver lib/pagos/pagoMesActual.ts.
+      pagado: estaPagadoEsteMes(pagosDelMes.get(c.codigo)),
       urgencia: c.estado === "Activo" ? clasificarUrgencia(c.fin_contrato, c.prox_actualizacion) : "normal",
       archivado: c.archivado ?? false,
       estadoVencido: c.finalizado_por === "auto_vencimiento" && !c.archivado,

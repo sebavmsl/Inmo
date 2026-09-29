@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/server";
 import { requirePermisoAction } from "@/lib/auth/session";
 import { calcularValorActualizado } from "@/lib/indices/calculo";
 import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
+import { obtenerUltimoPagoDelMesPorContrato, estaPagadoEsteMes } from "@/lib/pagos/pagoMesActual";
 import { periodoActual } from "@/lib/planilla/queries";
 import { enviarMensajeWhatsapp, getCredencialesWhatsapp } from "@/lib/whatsapp/enviar";
 import { tieneWhatsapp } from "@/lib/auth/permissions";
@@ -123,9 +124,11 @@ export async function actualizarIndicesManual(soloPendientes: boolean) {
  *
  * 1. No filtraba por saldo: mandaba el preliminar a CUALQUIER contrato
  *    con ✓ verificado, incluso si ya había pagado este mes. v1 solo
- *    manda a los que figuran `pagado_mes == False`. Acá se usa
- *    `saldo_actual` (mismo criterio que `FilaPlanilla.pagado`, ver
- *    lib/planilla/queries.ts).
+ *    manda a los que figuran `pagado_mes == False`. [V2.014: acá se usaba
+ *    `saldo_actual` — la cuenta corriente GLOBAL — lo que hacía que TODOS
+ *    los contratos quedaran "omitidos" en cuanto se saldaban una vez.
+ *    Ahora usa el mismo chequeo real de v1 ("¿hubo un pago registrado
+ *    ESTE mes calendario?"), ver lib/pagos/pagoMesActual.ts].
  * 2. No sumaba la cochera al total — solo alquiler + expensas ad-hoc.
  *    v1 arma "adicional" = cochera + expensas, y el total es
  *    alquiler + adicional.
@@ -167,6 +170,11 @@ export async function enviarRecibosPreliminaresMasivo() {
   const nombreMes = nombreMesAnio();
   const fechaLimite = fechaLimiteDia10();
 
+  // V2.014 — mismo fix que lib/planilla/queries.ts: "ya pagó este mes" se
+  // decide con un pago real cargado en pagos_historial este mes calendario,
+  // no con saldo_actual (cuenta corriente global). Ver lib/pagos/pagoMesActual.ts.
+  const pagosDelMes = await obtenerUltimoPagoDelMesPorContrato((verificados ?? []).map((v) => v.codigo_contrato));
+
   let enviados = 0;
   let errores = 0;
   let omitidos = 0; // ya pagaron este mes, o sin teléfono registrado
@@ -174,9 +182,7 @@ export async function enviarRecibosPreliminaresMasivo() {
   for (const v of verificados ?? []) {
     const { data: contrato } = await supabase
       .from("contratos")
-      .select(
-        "codigo, alias_propiedad, dni_inquilino, alquiler_calculado, alquiler_calculado_fecha, alquiler, monto_inicial, cochera, saldo_actual"
-      )
+      .select("codigo, alias_propiedad, dni_inquilino, alquiler_calculado, alquiler_calculado_fecha, alquiler, monto_inicial, cochera")
       .eq("codigo", v.codigo_contrato)
       .eq("empresa_id", perfil.empresaId)
       .single();
@@ -185,9 +191,10 @@ export async function enviarRecibosPreliminaresMasivo() {
       continue;
     }
 
-    // Bug #1 corregido: si ya pagó (saldo_actual <= 0), no se manda el
-    // preliminar aunque haya quedado ✓ verificado de una revisión previa.
-    if ((contrato.saldo_actual ?? 0) <= 0) {
+    // Bug #1 corregido (V2.014): si ya pagó este mes calendario, no se
+    // manda el preliminar aunque haya quedado ✓ verificado de una revisión
+    // previa.
+    if (estaPagadoEsteMes(pagosDelMes.get(contrato.codigo))) {
       omitidos += 1;
       continue;
     }

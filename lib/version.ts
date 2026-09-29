@@ -253,5 +253,36 @@
  *      nada — si no, no calcula, y se muestra alquiler/monto_inicial
  *      (punto 1). La fórmula de cálculo en sí (lib/indices/calculo.ts)
  *      no cambió — solo qué fecha se le pasa como objetivo.
+ *
+ * V2.014 — catorceava entrega: bug real en producción reportado por el
+ *   usuario ("en la version 2, me aparecen pagos todos los contrato"),
+ *   confirmado por contraste directo con v1: en Python, la Planilla
+ *   distingue correctamente pagos de pendientes; en v2, TODOS los
+ *   contratos aparecían "pagado". Causa: el puerto original definía
+ *   `pagado` como `contratos.saldo_actual <= 0` — el saldo de cuenta
+ *   corriente GLOBAL y acumulado del contrato (ver DESIGN_LOG.md,
+ *   "Saldo de contratos — MODELO FINAL"). v1 en cambio (app.py, línea
+ *   ~1549, `_cached_planilla_cobranzas_mes`) define "pagado" como
+ *   "¿existe un pago registrado en `pagos_historial` con `fecha` dentro
+ *   del mes calendario ACTUAL, y ese pago puntual dejó `saldo_pendiente`
+ *   en 0?" — sin ningún pago cargado este mes, es SIEMPRE pendiente, sin
+ *   importar cuánto se haya saldado en meses anteriores. Con `saldo_actual`
+ *   como criterio, un contrato que había quedado en $0 el mes pasado
+ *   (o que arrancó en $0) y todavía no tuvo ningún movimiento cargado
+ *   este mes aparecía "pagado" igual — en la práctica, casi todos los
+ *   contratos, apenas empezando a operar en v2.
+ *
+ *   Fix: nuevo módulo lib/pagos/pagoMesActual.ts, puerto exacto de la
+ *   lógica de v1 — `obtenerUltimoPagoDelMesPorContrato()` busca, por
+ *   contrato, el último pago con `fecha` dentro del mes calendario
+ *   actual, y `estaPagadoEsteMes()` decide en base a ESE pago puntual
+ *   (no en base a `saldo_actual`). Aplicado en los 2 lugares que usaban
+ *   el criterio viejo: la columna "Pagado" de la Planilla
+ *   (lib/planilla/queries.ts) y el filtro de omisión del envío masivo de
+ *   recibo preliminar por WhatsApp (app/(protected)/planilla/actions.ts
+ *   — antes podía omitir el envío a alguien que en realidad no pagó
+ *   nada este mes). La columna "Saldo" sigue mostrando `saldo_actual`
+ *   sin cambios — sigue siendo el criterio correcto para "cuánto se
+ *   debe en total", que es una pregunta distinta de "¿pagó este mes?".
  */
-export const APP_VERSION = "V2.013";
+export const APP_VERSION = "V2.014";
