@@ -69,6 +69,8 @@ export async function GET(request: NextRequest) {
           p_tipo: tipo,
           p_fecha: fecha,
           p_valor: serie[fecha],
+          // V2.015 (0021): upsert_indice exige el secreto del cron.
+          p_secret_cron: secretCron,
         });
         if (!error) puntosGuardados += 1;
       }

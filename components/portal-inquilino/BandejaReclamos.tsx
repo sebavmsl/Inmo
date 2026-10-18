@@ -10,6 +10,7 @@ import {
   type DatosGastoDesdeReclamo,
 } from "@/app/(protected)/portal-inquilino/actions";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 import { CampoCotizacionUsd } from "@/components/cotizacion/CampoCotizacionUsd";
 
 const ETIQUETA_ESTADO: Record<EstadoReclamo, string> = {
@@ -227,7 +228,7 @@ function VinculoGasto({
             <option value="">Seleccionar…</option>
             {gastosRecientes.map((g) => (
               <option key={g.id} value={g.id}>
-                {new Date(g.fecha).toLocaleDateString("es-AR")} · {g.descripcion} · {formatMoneda(g.monto)}
+                {formatearFecha(g.fecha)} · {g.descripcion} · {formatMoneda(g.monto)}
               </option>
             ))}
           </select>

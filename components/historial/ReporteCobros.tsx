@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { FilaHistorial } from "@/lib/historial/queries";
 import { formatMoneda } from "@/lib/format";
+import { claveDia, claveHoy, formatearFecha } from "@/lib/fechas";
 
 const TODOS_LOS_USUARIOS = "Toda la empresa";
 
@@ -23,7 +24,7 @@ const TODOS_LOS_USUARIOS = "Toda la empresa";
  * encabezados distintos. Acá se muestra una sola vez, como "Abonado".
  */
 export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
-  const hoy = new Date().toISOString().slice(0, 10);
+  const hoy = claveHoy();
   const [desde, setDesde] = useState("2020-01-01");
   const [hasta, setHasta] = useState(hoy);
   const [usuario, setUsuario] = useState(TODOS_LOS_USUARIOS);
@@ -34,12 +35,12 @@ export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
   );
 
   const filtradas = useMemo(() => {
-    const desdeDt = new Date(desde);
-    const hastaDt = new Date(hasta);
-    hastaDt.setHours(23, 59, 59, 999);
+    // V2.015: comparación por día ("YYYY-MM-DD") con lib/fechas.ts. Antes
+    // new Date("29/09/2026 01:12") daba Invalid Date y el filtro no
+    // excluía nada.
     return filas.filter((f) => {
-      const fechaDt = new Date(f.fecha);
-      if (fechaDt < desdeDt || fechaDt > hastaDt) return false;
+      const dia = claveDia(f.fecha);
+      if (!dia || dia < desde || dia > hasta) return false;
       if (usuario !== TODOS_LOS_USUARIOS && f.registradoPor !== usuario) return false;
       return true;
     });
@@ -54,7 +55,7 @@ export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
   function exportarCsv() {
     const encabezado = ["Fecha", "Período", "Mes/Año", "Propiedad", "Domicilio", "Inquilino", "Alquiler ($)", "Expensas ($)", "Cochera ($)", "Servicios ($)", "Abonado ($)"];
     const filasCsv = filtradas.map((f) => [
-      new Date(f.fecha).toLocaleDateString("es-AR"),
+      formatearFecha(f.fecha),
       f.periodo,
       f.mesAnio,
       f.propiedad,

@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { claveMesActual } from "@/lib/fechas";
 import type { FilaPlanilla } from "@/lib/planilla/types";
 import { clasificarUrgencia } from "@/lib/contratos/urgencia";
 import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
@@ -6,8 +7,8 @@ import { obtenerUltimoPagoDelMesPorContrato, estaPagadoEsteMes } from "@/lib/pag
 
 /** 'YYYY-MM' del mes actual, para planilla_verificaciones y para clasificar urgencia. */
 export function periodoActual(): string {
-  const hoy = new Date();
-  return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}`;
+  // V2.015: mes calendario en hora argentina (el servidor de Vercel corre en UTC).
+  return claveMesActual();
 }
 
 /**

@@ -236,7 +236,8 @@ export async function borrarEnBloque(
 // =====================================================================
 
 export interface UsuarioEditable {
-  id: number;
+  // V2.015: usuarios_central no tiene columna `id` en la base real — la
+  // clave es `username`.
   username: string;
   email: string | null;
   telefono: string | null;
@@ -256,7 +257,7 @@ export async function listarUsuariosEditables(empresaId: number): Promise<Usuari
   const supabase = await createClient();
   const { data: usuarios } = await supabase
     .from("usuarios_central")
-    .select("id, username, email, telefono, rol, propietario_filtro, auth_user_id, updated_at")
+    .select("username, email, telefono, rol, propietario_filtro, auth_user_id, updated_at")
     .eq("empresa_id", empresaId)
     .order("username");
   if (!usuarios) return [];
@@ -267,7 +268,6 @@ export async function listarUsuariosEditables(empresaId: number): Promise<Usuari
     .in("username", usuarios.map((u) => u.username));
 
   return usuarios.map((u) => ({
-    id: u.id,
     username: u.username,
     email: u.email,
     telefono: u.telefono,
@@ -353,7 +353,6 @@ export async function crearUsuarioEnEmpresa(datos: {
 }
 
 export async function actualizarUsuario(datos: {
-  id: number;
   username: string;
   telefono: string;
   rol: Rol;
@@ -381,7 +380,7 @@ export async function actualizarUsuario(datos: {
   // — bloquea el guardado por igual a cualquier rol, incluido superadmin,
   // si alguien más guardó cambios sobre esta misma fila mientras se
   // editaba acá.
-  const conflicto = await verificarConflicto("usuarios_central", String(datos.id), datos.updatedAtEsperado);
+  const conflicto = await verificarConflicto("usuarios_central", datos.username, datos.updatedAtEsperado);
   if (conflicto.hayConflicto) {
     return {
       ok: false,
@@ -405,8 +404,8 @@ export async function actualizarUsuario(datos: {
       rol: datos.rol,
       propietario_filtro: datos.rol === "propietario" ? datos.propietarioFiltro : null,
     })
-    .eq("id", datos.id)
-    .select("id")
+    .eq("username", datos.username)
+    .select("username")
     .maybeSingle();
   if (errorUsuario) return { ok: false, error: errorUsuario.message };
   if (!actualizado) return { ok: false, error: "No se pudo editar ese usuario (¿permisos?)." };

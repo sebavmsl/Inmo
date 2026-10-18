@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { claveMes } from "@/lib/fechas";
 import { sumarCategoria, montosDesdeFilaPago, type CategoriaConcepto } from "@/lib/conceptos/categorias";
 
 /**
@@ -101,13 +102,6 @@ interface PagoRendicionRaw {
   concepto_extra_desc: string | null;
 }
 
-function rangoDelPeriodo(periodoMes: string): { desde: string; hasta: string } {
-  const [anioStr, mesStr] = periodoMes.split("-");
-  const anio = Number(anioStr ?? new Date().getFullYear());
-  const mes = Number(mesStr ?? new Date().getMonth() + 1);
-  return { desde: `${periodoMes}-01`, hasta: new Date(anio, mes, 0).toISOString().slice(0, 10) };
-}
-
 /**
  * Base compartida de Rendición: pagos + info de cada propiedad
  * (propietario, y si administra sus propias expensas — ver
@@ -141,7 +135,7 @@ async function obtenerPagosParaRendicion(
   const aliasPropiedades = (propiedades ?? []).map((p) => p.alias_propiedad);
   if (aliasPropiedades.length === 0) return { pagos: [], propiedadInfo };
 
-  let pagosQuery = supabase
+  const pagosQuery = supabase
     .from("pagos_historial")
     .select(
       `fecha, codigo_contrato, propiedad, inquilino, periodo,
@@ -152,15 +146,14 @@ async function obtenerPagosParaRendicion(
     .eq("empresa_id", empresaId)
     .in("propiedad", aliasPropiedades);
 
-  if (periodoMes) {
-    const { desde, hasta } = rangoDelPeriodo(periodoMes);
-    pagosQuery = pagosQuery.gte("fecha", desde).lte("fecha", hasta);
-  }
-
   const { data: pagos, error } = await pagosQuery;
   if (error) throw new Error(`[Rendición] Error cargando pagos: ${error.message}`);
 
-  return { pagos: pagos ?? [], propiedadInfo };
+  // V2.015 (decisión R1: Rendición por fecha de cobro): el mes se filtra con
+  // lib/fechas.ts. `fecha` es texto "DD/MM/YYYY HH:MM" (Python), y comparar
+  // ese texto contra "2026-09-01" en la consulta no encontraba ningún pago.
+  const filtrados = periodoMes ? (pagos ?? []).filter((p) => claveMes(p.fecha) === periodoMes) : pagos ?? [];
+  return { pagos: filtrados, propiedadInfo };
 }
 
 /**

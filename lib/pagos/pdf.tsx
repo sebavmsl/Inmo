@@ -2,6 +2,7 @@ import { renderToBuffer } from "@react-pdf/renderer";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import { createClient } from "@/lib/supabase/server";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 
 /**
  * Generación del PDF de comprobante — extraído de
@@ -85,7 +86,7 @@ function ComprobantePdf({
       <Page size="A4" style={styles.page}>
         <Text style={styles.titulo}>Comprobante de Pago</Text>
         <Text style={styles.subtitulo}>
-          {pago.nro_comprobante} · {new Date(pago.fecha).toLocaleDateString("es-AR")}
+          {pago.nro_comprobante} · {formatearFecha(pago.fecha)}
         </Text>
 
         <View style={styles.seccion}>

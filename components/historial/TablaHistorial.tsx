@@ -1,5 +1,6 @@
 import type { FilaHistorial } from "@/lib/historial/queries";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 
 function fmtUsd(valor: number): string {
   return valor > 0 ? `U$S ${valor.toLocaleString("es-AR", { minimumFractionDigits: 2 })}` : "—";
@@ -99,7 +100,7 @@ export function TablaHistorial({ filas }: { filas: FilaHistorial[] }) {
                     "-"
                   )}
                 </td>
-                <td className="whitespace-nowrap px-2 py-1.5">{new Date(f.fecha).toLocaleDateString("es-AR")}</td>
+                <td className="whitespace-nowrap px-2 py-1.5">{formatearFecha(f.fecha)}</td>
                 <td className="whitespace-nowrap px-2 py-1.5">{f.mesAnio || "-"}</td>
                 <td className="px-2 py-1.5">{f.propiedad}</td>
                 <td className="px-2 py-1.5">{f.domicilio}</td>

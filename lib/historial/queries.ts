@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/server";
 import { nombreMesAnio } from "@/lib/format";
+import { parsearFecha } from "@/lib/fechas";
 import { sumarCategoria, montosDesdeFilaPago } from "@/lib/conceptos/categorias";
 
 export interface FilaHistorial {
@@ -55,9 +56,11 @@ function calcularMesAnio(periodo: string, inicioContrato: string | null): string
   const match = /^Mes\s+(\d+)\s+de\s+\d+/.exec(periodo);
   if (!match || !inicioContrato) return "";
   const numMesContrato = Number(match[1] ?? "0");
-  const inicio = new Date(inicioContrato);
-  if (Number.isNaN(inicio.getTime())) return "";
-  const fecha = new Date(inicio.getFullYear(), inicio.getMonth() + (numMesContrato - 1), inicio.getDate());
+  // V2.015: parsearFecha en vez de new Date() — "YYYY-MM-DD" con new Date()
+  // es medianoche UTC, que en hora argentina cae el día anterior.
+  const inicio = parsearFecha(inicioContrato);
+  if (!inicio) return "";
+  const fecha = new Date(inicio.anio, inicio.mes - 1 + (numMesContrato - 1), 1);
   return nombreMesAnio(fecha);
 }
 
@@ -112,8 +115,15 @@ export async function getHistorialPagos(propietarioFiltro?: string, empresaFiltr
        monto_concepto_extra, concepto_extra_desc, monto_abonado, saldo_pendiente,
        monto_gasto_admin, metodo_pago, cotizacion_usd, registrado_por`
     )
-    .order("fecha", { ascending: false });
+    // V2.015: por número de pago, como Python. `fecha` es texto
+    // "DD/MM/YYYY HH:MM" y ordenarla como texto la ordena por día del mes.
+    .order("id", { ascending: false });
 
+  // V2.015: el filtro por empresa va explícito (superadmin bypassea RLS y el
+  // nombre de propiedad puede repetirse entre empresas).
+  if (empresaFiltro !== undefined) {
+    pagosQuery = empresaFiltro === null ? pagosQuery.is("empresa_id", null) : pagosQuery.eq("empresa_id", empresaFiltro);
+  }
   if (aliasPermitidos) pagosQuery = pagosQuery.in("propiedad", Array.from(aliasPermitidos));
 
   const { data: pagos, error } = await pagosQuery;

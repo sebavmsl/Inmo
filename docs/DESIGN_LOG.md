@@ -638,3 +638,17 @@ También se encontró que el cron (sin sesión de usuario) no puede leer `whatsa
 Al implementar el paso 3 del cron ("aplicar índices"), se intentó optimizarlo para leer de `indices_historicos` (ya refrescada por el paso 2) en vez de pegarle de nuevo a BCRA/datos.gob.ar por cada contrato elegible. Se encontró que esto **rompería silenciosamente** la actualización de cualquier contrato con más de ~30 días de antigüedad: el paso 2 solo refresca datos RECIENTES (el año actual), pero calcular el índice de un contrato viejo necesita el valor del índice **en la fecha en que arrancó ese contrato**, que puede ser de años atrás — dato que `indices_historicos` nunca tendría sin un backfill histórico completo (no diseñado, fuera de alcance por ahora).
 
 **Corrección real aplicada**: en vez de una tabla de caché, se agregó una **caché en memoria por año**, dentro de `lib/indices/fuentes.ts`, que vive solo mientras dura una ejecución del cron — evita pedirle el mismo año a BCRA más de una vez por corrida (el problema real que se quería resolver), sin la falla de cobertura histórica de la tabla. `calcularValorActualizado()` sigue siendo una sola función, usada tanto por el botón manual como por el cron — ya no hace falta una versión "de caché" aparte. `indices_historicos` se sigue llenando igual (serie completa, no recortada a 30 días) como registro de referencia para el futuro, pero el cálculo ya no depende de leerla.
+
+---
+
+## Entrega 1 — Base (V2.015, 18/10/2026)
+
+Las decisiones completas de la migración están en el documento "Migración v2 — Decisiones y hallazgos" (Claude Docs). Resumen de lo que entra en esta entrega:
+
+- **Fuente de verdad del esquema:** la base real, no los `.sql` de `supabase/migrations`. Foto al 29/09/2026 en `supabase/foto_base/esquema_2026-09-29.sql` (documentación, no se ejecuta). Se verificó el 18/10/2026 que la base no cambió (mismas cantidades de objetos y misma huella md5 de las 20 funciones).
+- **Seguridad (0021):** las funciones SECURITY DEFINER chequeaban `auth_rol() != 'superadmin'`; para un usuario sin sesión eso da NULL y no bloqueaba. Se usa `coalesce(auth_rol(), '') <> 'superadmin'`. El 29/09 se habían cerrado 8 funciones a `anon`/`authenticated` como medida de emergencia; 0021 las reabre solo a quien corresponde.
+- **saldo_actual:** `revoke update (saldo_actual)` no alcanzaba con el permiso de tabla vigente; ahora el permiso de UPDATE es por columna, todas menos `saldo_actual`.
+- **Fechas:** `pagos_historial.fecha` y `liquidaciones_propietarios.fecha_liquidacion` son texto en formato Python (`DD/MM/YYYY HH:MM`, hora Argentina). La v2 las lee y escribe en ese formato (`lib/fechas.ts`); nunca se compara ni se ordena ese texto en una consulta.
+- **WhatsApp:** el token se lee solo en el servidor con service_role.
+- **Tipos:** `database.types.ts` sigue escrito a mano; solo se corrigió `usuarios_central` (no tiene `id`). La regeneración completa queda pendiente hasta poder compilar (el entorno de trabajo no puede instalar dependencias de npm).
+- **Forma de trabajo:** commits directos sobre `ver2`, con confirmación del usuario antes de cada push; el build se verifica en Vercel.

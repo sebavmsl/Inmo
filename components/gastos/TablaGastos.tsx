@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import type { FilaGasto } from "@/lib/gastos/queries";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 
 /**
  * Módulo 2 (Tier A). Filtros por propiedad/categoría/texto + 4 totales
@@ -159,7 +160,7 @@ export function TablaGastos({ filas }: { filas: FilaGasto[] }) {
               <tr key={f.id} className="border-b border-brand-50">
                 <td className="px-3 py-2">{f.propiedad}</td>
                 <td className="px-3 py-2">{f.propietario}</td>
-                <td className="px-3 py-2">{new Date(f.fecha).toLocaleDateString("es-AR")}</td>
+                <td className="px-3 py-2">{formatearFecha(f.fecha)}</td>
                 <td className="px-3 py-2">{f.categoria}</td>
                 <td className="px-3 py-2">{f.tipoGasto}</td>
                 <td className="px-3 py-2">{f.descripcion}</td>

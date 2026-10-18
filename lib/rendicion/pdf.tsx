@@ -1,6 +1,7 @@
 import { renderToBuffer } from "@react-pdf/renderer";
 import { Document, Page, Text, View, StyleSheet } from "@react-pdf/renderer";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 import { createClient } from "@/lib/supabase/server";
 import {
   getRendicionAgrupada,
@@ -116,7 +117,7 @@ function TablaDetalle({ filas }: { filas: FilaDetalleRendicion[] }) {
       </View>
       {filas.map((f, i) => (
         <View key={`${f.propiedad}-${f.periodo}-${i}`} style={[styles.tablaFila, i % 2 === 1 ? styles.tablaFilaAlt : {}]} wrap={false}>
-          <Text style={[styles.celda, { flex: 1.1, fontSize: 6 }]}>{new Date(f.fecha).toLocaleDateString("es-AR")}</Text>
+          <Text style={[styles.celda, { flex: 1.1, fontSize: 6 }]}>{formatearFecha(f.fecha)}</Text>
           <Text style={[styles.celda, { flex: 1.8, fontSize: 6 }]}>{f.propiedad}</Text>
           <Text style={[styles.celda, { flex: 1.8, fontSize: 6 }]}>{f.inquilino}</Text>
           <Text style={[styles.celda, { flex: 1.3, fontSize: 6 }]}>{f.periodo}</Text>

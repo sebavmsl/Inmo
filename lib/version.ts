@@ -284,5 +284,35 @@
  *   nada este mes). La columna "Saldo" sigue mostrando `saldo_actual`
  *   sin cambios — sigue siendo el criterio correcto para "cuánto se
  *   debe en total", que es una pregunta distinta de "¿pagó este mes?".
+ *
+ * V2.015 — Entrega 1 (base). Ver docs/DESIGN_LOG.md, "Entrega 1".
+ *   NOTA: a diferencia de entradas anteriores, este changelog lista solo
+ *   lo que está en este commit. Se verificó que el arreglo anunciado en
+ *   V2.012 (TABLAS_CON_LOCK) nunca había llegado al código; se aplica acá.
+ *   - supabase/migrations/0021_seguridad_y_fechas.sql (se corre a mano):
+ *     chequeo de rol seguro ante NULL en eliminar_empresa_completa,
+ *     eliminar_registros_bloque, aplicar_actualizacion_individual y
+ *     contratos_elegibles_actualizacion (solo usuarios logueados);
+ *     upsert_indice exige el secreto del cron; tokens de WhatsApp solo para
+ *     service_role; saldo_actual no editable desde la API; auditoría de
+ *     contratos (no tenía `id`) e ignora saldo_actual/updated_at;
+ *     updated_at no cambia si solo cambió el saldo; impactar_cobro y
+ *     registrar_liquidacion_propietario escriben la fecha en formato Python
+ *     ("DD/MM/YYYY HH:MM", hora Argentina).
+ *   - supabase/foto_base/esquema_2026-09-29.sql: foto del esquema real (no
+ *     se ejecuta). supabase/verificacion_0021.sql: consulta de control.
+ *   - lib/fechas.ts (nuevo): lectura/escritura única de fechas. Aplicado en
+ *     "pagado este mes" (Planilla), Historial (orden por número de pago),
+ *     Reporte de Cobros (filtro de fechas), Rendición (filtro de mes),
+ *     métricas de Gastos, Portal del inquilino, PDFs, WhatsApp, export CSV.
+ *   - Historial: filtro explícito por empresa (superadmin).
+ *   - Panel de Gestión: editar usuarios usa `username` (no existe
+ *     usuarios_central.id); presencia/conflicto de edición también.
+ *   - lib/concurrencia/queries.ts: deja de exportar TABLAS_CON_LOCK.
+ *   - WhatsApp: el token se lee solo en el servidor (service_role) y con el
+ *     parámetro correcto (`p_secret_id`; antes fallaba siempre).
+ *   - Cron: pasa el secreto a upsert_indice (el cron sigue desactivado en
+ *     Vercel; su paso de "aplicar índices" se rediseña en el módulo
+ *     WhatsApp y cron).
  */
-export const APP_VERSION = "V2.014";
+export const APP_VERSION = "V2.015";

@@ -89,7 +89,7 @@ export function GestionUsuarios({ empresaId, rolViewer, permisosViewer }: Props)
           </thead>
           <tbody>
             {usuarios.map((u) => (
-              <tr key={u.id} className="border-b border-brand-50">
+              <tr key={u.username} className="border-b border-brand-50">
                 <td className="py-1.5">{u.username}</td>
                 <td className="text-brand-500">{u.email ?? "-"}</td>
                 <td className="capitalize text-brand-500">{u.rol}</td>
@@ -162,7 +162,7 @@ function FormularioUsuario({
   // Presencia en vivo — solo tiene sentido en edición (un alta todavía
   // no tiene id de fila). La lista ya viene filtrada sin el propio
   // usuario y sin superadmin (ver lib/concurrencia/queries.ts).
-  const otrosEditando = usePresencia("usuarios_central", usuario ? String(usuario.id) : null);
+  const otrosEditando = usePresencia("usuarios_central", usuario ? usuario.username : null);
 
   // superadmin puede otorgar cualquier permiso; admin/user solo los que
   // él mismo tiene (regla confirmada, ver DESIGN_LOG.md).
@@ -179,7 +179,6 @@ function FormularioUsuario({
     setConflicto(false);
     const res = usuario
       ? await actualizarUsuario({
-          id: usuario.id,
           username,
           telefono,
           rol,

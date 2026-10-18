@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { createAdminAuthClient } from "@/lib/supabase/admin";
 
 /**
  * Puerto de `_get_wa_credenciales()` (app.py líneas 2370-2415).
@@ -51,8 +52,13 @@ export async function getCredencialesWhatsapp(
 
   if (!secretId || !phoneId) return null;
 
-  const { data: tokenRow, error: tokenError } = await supabase.rpc("leer_token_whatsapp", {
-    secret_id: secretId,
+  // V2.015 (0021): el token solo lo lee el servidor, con la clave de
+  // administrador (service_role). leer_token_whatsapp ya no se puede llamar
+  // con la sesión del usuario. Además el parámetro real es `p_secret_id`
+  // (antes se mandaba `secret_id` y la llamada fallaba siempre).
+  const admin = createAdminAuthClient();
+  const { data: tokenRow, error: tokenError } = await admin.rpc("leer_token_whatsapp", {
+    p_secret_id: secretId,
   });
 
   if (tokenError || !tokenRow) return null;

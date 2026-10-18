@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { claveMes, claveMesActual } from "@/lib/fechas";
 
 /**
  * Puerto de la definición real de "pagado" de v1 (app.py línea 1549,
@@ -22,16 +23,6 @@ import { createClient } from "@/lib/supabase/server";
  * como el criterio de "¿pagado ESTE mes?", que es una pregunta distinta.
  */
 
-function primerYUltimoDiaMesActual(): { desde: string; hasta: string } {
-  const hoy = new Date();
-  const anio = hoy.getFullYear();
-  const mes = hoy.getMonth() + 1; // 1-12
-  const desde = `${anio}-${String(mes).padStart(2, "0")}-01`;
-  const [anioSig, mesSig] = mes === 12 ? [anio + 1, 1] : [anio, mes + 1];
-  const hasta = `${anioSig}-${String(mesSig).padStart(2, "0")}-01`;
-  return { desde, hasta };
-}
-
 /**
  * Para varios contratos a la vez (Planilla, WhatsApp masivo). Devuelve
  * un mapa código de contrato → `saldo_pendiente` del ÚLTIMO pago
@@ -42,18 +33,22 @@ export async function obtenerUltimoPagoDelMesPorContrato(codigos: string[]): Pro
   if (codigos.length === 0) return resultado;
 
   const supabase = await createClient();
-  const { desde, hasta } = primerYUltimoDiaMesActual();
+  // V2.015: `fecha` es texto en formato Python ("29/09/2026 01:12"), así
+  // que el mes NO se puede filtrar comparando el texto en la consulta
+  // (antes: .gte("fecha", "2026-09-01") — nunca encontraba un pago de
+  // Python). Se traen los pagos de estos contratos y se filtra el mes
+  // calendario argentino con lib/fechas.ts.
+  const mesActual = claveMesActual();
 
   const { data, error } = await supabase
     .from("pagos_historial")
     .select("codigo_contrato, saldo_pendiente, fecha, id")
     .in("codigo_contrato", codigos)
-    .gte("fecha", desde)
-    .lt("fecha", hasta)
     .order("id", { ascending: false });
   if (error) throw new Error(`[Pagos] Error cargando pagos del mes actual: ${error.message}`);
 
   for (const p of data ?? []) {
+    if (claveMes(p.fecha) !== mesActual) continue;
     if (!resultado.has(p.codigo_contrato)) resultado.set(p.codigo_contrato, p.saldo_pendiente);
   }
   return resultado;

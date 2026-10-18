@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { claveMes } from "@/lib/fechas";
 
 export interface FilaIngresoMetrica {
   propiedad: string;
@@ -86,7 +87,7 @@ export async function getDatosMetricasGastos(
         propiedad: p.propiedad,
         propietario: prop.propietario,
         grupo: prop.grupo,
-        mes: p.fecha.slice(0, 7),
+        mes: claveMes(p.fecha), // V2.015: fecha de Python es "DD/MM/YYYY HH:MM"
         alquiler: p.monto_alquiler,
         cochera: p.monto_cochera,
         expensas: p.monto_expensas,
@@ -106,7 +107,7 @@ export async function getDatosMetricasGastos(
         propiedad: prop.alias_propiedad,
         propietario: prop.propietario,
         grupo: prop.grupo,
-        mes: g.fecha.slice(0, 7),
+        mes: claveMes(g.fecha),
         totalGasto: g.monto,
         cotizacionUsd: g.cotizacion_usd,
       },

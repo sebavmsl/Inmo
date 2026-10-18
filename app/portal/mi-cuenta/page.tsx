@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { requireInquilinoContratos } from "@/lib/inquilino/session";
 import { createClient } from "@/lib/supabase/server";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 import { calcularAlquilerVigente } from "@/lib/indices/alquilerVigente";
 
 export default async function MiCuentaPage({
@@ -31,7 +32,8 @@ export default async function MiCuentaPage({
     .from("pagos_historial")
     .select("fecha, periodo, monto_abonado, nro_comprobante, tipo_pago")
     .eq("codigo_contrato", seleccionado.codigoContrato)
-    .order("fecha", { ascending: false })
+    // V2.015: por número de pago; `fecha` es texto "DD/MM/YYYY HH:MM".
+    .order("id", { ascending: false })
     .limit(12);
 
   const saldo = contratoDetalle?.saldo_actual ?? 0;
@@ -103,7 +105,7 @@ export default async function MiCuentaPage({
             <tbody>
               {pagos.map((p, i) => (
                 <tr key={i} className="border-t border-brand-50">
-                  <td className="py-1.5">{new Date(p.fecha).toLocaleDateString("es-AR")}</td>
+                  <td className="py-1.5">{formatearFecha(p.fecha)}</td>
                   <td className="py-1.5">{p.periodo}</td>
                   <td className="py-1.5">{p.tipo_pago}</td>
                   <td className="py-1.5">{formatMoneda(p.monto_abonado)}</td>

@@ -125,7 +125,7 @@ export async function exportarTablaCsv(empresaId: number, tabla: TablaExportable
   }
 
   if (tabla === "pagos_historial") {
-    const { data, error } = await supabase.from("pagos_historial").select("*").eq("empresa_id", empresaId).order("fecha", { ascending: false });
+    const { data, error } = await supabase.from("pagos_historial").select("*").eq("empresa_id", empresaId).order("id", { ascending: false });
     if (error) return { ok: false, error: error.message };
     const filas = (data ?? []).map((fila) => {
       const { empresa_id: _empresaId, ...resto } = fila as Record<string, unknown>;

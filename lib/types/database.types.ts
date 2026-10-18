@@ -50,7 +50,7 @@ export interface EmpresasRow {
 }
 
 export interface UsuariosCentralRow {
-  id: number;
+  // V2.015: la base real no tiene `id`; la clave primaria es `username`.
   username: string;
   email: string | null;
   auth_user_id: string | null; // uuid -> auth.users.id (agregado en v2)

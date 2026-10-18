@@ -3,6 +3,7 @@
 import { useState, useTransition } from "react";
 import { registrarLiquidacion } from "@/app/(protected)/rendicion/actions";
 import { formatMoneda } from "@/lib/format";
+import { formatearFechaHora } from "@/lib/fechas";
 import type { ResumenRendicion, LiquidacionExistente } from "@/lib/rendicion/queries";
 
 /**
@@ -67,7 +68,7 @@ export function ResumenLiquidacion({
 
       {liquidacionExistente && (
         <p className="text-xs text-brand-400">
-          ℹ️ Ya hay una liquidación registrada para este período (el {new Date(liquidacionExistente.fechaLiquidacion).toLocaleString("es-AR")}, por{" "}
+          ℹ️ Ya hay una liquidación registrada para este período (el {formatearFechaHora(liquidacionExistente.fechaLiquidacion)}, por{" "}
           {liquidacionExistente.registradoPor}) — podés corregirla y volver a guardar.
         </p>
       )}

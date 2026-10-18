@@ -5,6 +5,7 @@ import { requirePermisoAction } from "@/lib/auth/session";
 import { getCredencialesWhatsapp, enviarMensajeWhatsapp } from "@/lib/whatsapp/enviar";
 import { tieneWhatsapp } from "@/lib/auth/permissions";
 import { generarPdfComprobante } from "@/lib/pagos/pdf";
+import { formatearFecha } from "@/lib/fechas";
 
 /**
  * Envío del comprobante definitivo por WhatsApp — CON el PDF adjunto
@@ -68,7 +69,7 @@ export async function enviarComprobanteWhatsapp(nroComprobante: string): Promise
       pago.periodo,
       pago.propiedad,
       String(pago.monto_abonado),
-      new Date(pago.fecha).toLocaleDateString("es-AR"),
+      formatearFecha(pago.fecha),
       pago.metodo_pago ?? "-",
     ],
     documentoBytes: pdfBuffer,

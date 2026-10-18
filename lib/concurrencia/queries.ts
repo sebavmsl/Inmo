@@ -18,11 +18,13 @@ import { requireSessionProfile } from "@/lib/auth/session";
  * (inquilinos/propiedades) y Carga (contratos) lo comparten.
  */
 
-export const TABLAS_CON_LOCK = ["usuarios_central", "propiedades", "inquilinos", "contratos"] as const;
+// V2.015: NO exportar el array — un archivo "use server" solo puede exportar
+// funciones async (el arreglo anunciado en V2.012 nunca llegó al código).
+const TABLAS_CON_LOCK = ["usuarios_central", "propiedades", "inquilinos", "contratos"] as const;
 export type TablaConLock = (typeof TABLAS_CON_LOCK)[number];
 
 const COLUMNA_ID: Record<TablaConLock, string> = {
-  usuarios_central: "id",
+  usuarios_central: "username", // V2.015: no existe usuarios_central.id
   propiedades: "id",
   inquilinos: "id",
   contratos: "codigo",

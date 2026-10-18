@@ -1,5 +1,6 @@
 import type { FilaDetalleRendicion } from "@/lib/rendicion/queries";
 import { formatMoneda } from "@/lib/format";
+import { formatearFecha } from "@/lib/fechas";
 
 /**
  * "Detalle de Recibos Incluidos" — puerto de app.py líneas 8419-8453.
@@ -49,7 +50,7 @@ export function DetalleRecibosRendicion({ filas }: { filas: FilaDetalleRendicion
               <tbody>
                 {filas.map((f, i) => (
                   <tr key={`${f.propiedad}-${f.periodo}-${i}`} className="border-b border-brand-50">
-                    <td className="whitespace-nowrap px-2 py-1.5">{new Date(f.fecha).toLocaleDateString("es-AR")}</td>
+                    <td className="whitespace-nowrap px-2 py-1.5">{formatearFecha(f.fecha)}</td>
                     <td className="px-2 py-1.5">{f.propiedad}</td>
                     <td className="px-2 py-1.5">{f.inquilino}</td>
                     <td className="whitespace-nowrap px-2 py-1.5">{f.periodo}</td>
