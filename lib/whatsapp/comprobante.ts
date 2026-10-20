@@ -6,6 +6,7 @@ import { getCredencialesWhatsapp, enviarMensajeWhatsapp } from "@/lib/whatsapp/e
 import { tieneWhatsapp } from "@/lib/auth/permissions";
 import { generarPdfComprobante } from "@/lib/pagos/pdf";
 import { formatearFecha } from "@/lib/fechas";
+import { formatMontoEntero } from "@/lib/format";
 
 /**
  * Envío del comprobante definitivo por WhatsApp — CON el PDF adjunto
@@ -38,16 +39,29 @@ export async function enviarComprobanteWhatsapp(nroComprobante: string): Promise
 
   const { data: contrato } = await supabase
     .from("contratos")
-    .select("dni_inquilino")
+    .select("dni_inquilino, alias_propiedad")
     .eq("codigo", pago.codigo_contrato)
     .single();
   if (!contrato) return { ok: false, error: "Contrato no encontrado." };
+
+  // V2.017: igual que Python, la variable de la propiedad es la dirección
+  // (calle y número), no el alias interno.
+  const { data: propiedad } = await supabase
+    .from("propiedades")
+    .select("calle, numero")
+    .eq("alias_propiedad", contrato.alias_propiedad)
+    .eq("empresa_id", perfil.empresaId)
+    .maybeSingle();
+  const direccion = `${propiedad?.calle ?? ""} ${propiedad?.numero ?? ""}`.trim() || pago.propiedad;
 
   const { data: inquilino } = await supabase
     .from("inquilinos")
     .select("nombres, apellidos, telefono")
     .eq("dni", contrato.dni_inquilino)
-    .single();
+    // V2.017: el mismo DNI puede existir en dos empresas; sin este filtro
+    // .single() fallaba y parecía que el inquilino no tenía teléfono.
+    .eq("empresa_id", perfil.empresaId)
+    .maybeSingle();
   if (!inquilino?.telefono) return { ok: false, error: "El inquilino no tiene teléfono cargado." };
 
   const credenciales = await getCredencialesWhatsapp(perfil.empresaId);
@@ -62,13 +76,16 @@ export async function enviarComprobanteWhatsapp(nroComprobante: string): Promise
   const ok = await enviarMensajeWhatsapp({
     phoneId: credenciales.phoneId,
     token: credenciales.token,
-    numeroDestino: inquilino.telefono,
-    templateName: "comprobante_pago_alquiler",
+    // V2.017: mismo número limpio y misma plantilla aprobada que Python
+    // ("comprobante_pago_con_pdf", app.py línea 4695). La v2 pedía
+    // "comprobante_pago_alquiler", que Meta rechazaba.
+    numeroDestino: inquilino.telefono.replace(/[\s-]/g, ""),
+    templateName: "comprobante_pago_con_pdf",
     variables: [
       `${inquilino.nombres} ${inquilino.apellidos}`.trim(),
       pago.periodo,
-      pago.propiedad,
-      String(pago.monto_abonado),
+      direccion,
+      formatMontoEntero(pago.monto_abonado),
       formatearFecha(pago.fecha),
       pago.metodo_pago ?? "-",
     ],

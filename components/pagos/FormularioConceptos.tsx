@@ -30,6 +30,9 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
   const [diferenciaCorreccion, setDiferenciaCorreccion] = useState(0);
   const [cotizacionUsd, setCotizacionUsd] = useState(0);
   const [montoAbonado, setMontoAbonado] = useState(0);
+  // V2.017: mientras no se edite a mano, "Monto abonado" sigue al total a
+  // cubrir (como Python, que lo precarga con el total del mes + saldos).
+  const [montoEditado, setMontoEditado] = useState(false);
   const [metodoPago, setMetodoPago] = useState("Transferencia Bancaria");
   const [comentario, setComentario] = useState("");
   const [enviando, setEnviando] = useState(false);
@@ -52,6 +55,15 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
     return tipoPago === "Normal" ? suma : 0; // Complemento no agrega cargos nuevos
   }, [tipoPago, conceptos, diferenciaCorreccion]);
 
+  // Total sugerido = saldo que arrastra el contrato + cargos de este
+  // movimiento (Normal: conceptos del mes; Complemento: solo el saldo).
+  const totalSugerido = useMemo(() => {
+    if (tipoPago === "Corrección") return 0;
+    const cargos = tipoPago === "Normal" ? Object.values(conceptos).reduce((a, b) => a + b, 0) : 0;
+    return Math.max(0, Math.round((contrato.saldoActual + cargos) * 100) / 100);
+  }, [tipoPago, conceptos, contrato.saldoActual]);
+  const montoAbonadoEfectivo = montoEditado ? montoAbonado : totalSugerido;
+
   const previa = useMemo(
     () =>
       calcularSaldoNuevo({
@@ -59,10 +71,10 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
         saldoActualAntes: contrato.saldoActual,
         conceptos: tipoPago === "Normal" ? conceptos : null,
         diferenciaCorreccion: tipoPago === "Corrección" ? diferenciaCorreccion : null,
-        montoAbonado,
+        montoAbonado: montoAbonadoEfectivo,
         honorariosPct: contrato.honorariosPct,
       }),
-    [tipoPago, conceptos, diferenciaCorreccion, montoAbonado, contrato]
+    [tipoPago, conceptos, diferenciaCorreccion, montoAbonadoEfectivo, contrato]
   );
 
   function setConcepto<K extends keyof ConceptosPago>(campo: K, valor: number) {
@@ -78,7 +90,7 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
       periodo,
       conceptos: tipoPago === "Normal" ? conceptos : null,
       diferenciaCorreccion: tipoPago === "Corrección" ? diferenciaCorreccion : null,
-      montoAbonado,
+      montoAbonado: montoAbonadoEfectivo,
       metodoPago,
       comentario,
       cotizacionUsd: cotizacionUsd || null,
@@ -110,7 +122,10 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
           <span className="mb-1 block text-brand-700">Tipo de pago</span>
           <select
             value={tipoPago}
-            onChange={(e) => setTipoPago(e.target.value as TipoPago)}
+            onChange={(e) => {
+              setTipoPago(e.target.value as TipoPago);
+              setMontoEditado(false);
+            }}
             className="w-full rounded border border-brand-100 px-2 py-1.5"
           >
             {TIPOS_PAGO.map((t) => (
@@ -177,10 +192,22 @@ export function FormularioConceptos({ contrato, periodoSugerido }: { contrato: C
             <span className="mb-1 block text-brand-700">Monto abonado</span>
             <input
               type="number"
-              value={montoAbonado}
-              onChange={(e) => setMontoAbonado(Number(e.target.value))}
+              value={montoAbonadoEfectivo}
+              onChange={(e) => {
+                setMontoAbonado(Number(e.target.value));
+                setMontoEditado(true);
+              }}
               className="w-full rounded border border-brand-100 px-2 py-1.5"
             />
+            <span className="mt-1 block text-xs text-brand-500">
+              {montoEditado ? (
+                <button type="button" onClick={() => setMontoEditado(false)} className="underline">
+                  Volver al total a cubrir ({formatMoneda(totalSugerido)})
+                </button>
+              ) : (
+                "Total a cubrir: saldo anterior + conceptos del mes"
+              )}
+            </span>
           </label>
         )}
         <label className="col-span-2 block text-sm">

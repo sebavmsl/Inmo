@@ -26,7 +26,8 @@ const TODOS_LOS_USUARIOS = "Toda la empresa";
  */
 export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
   const hoy = claveHoy();
-  const [desde, setDesde] = useState("2020-01-01");
+  // V2.017: por defecto, desde el 1 de enero del año actual.
+  const [desde, setDesde] = useState(`${hoy.slice(0, 4)}-01-01`);
   const [hasta, setHasta] = useState(hoy);
   const [usuario, setUsuario] = useState(TODOS_LOS_USUARIOS);
 

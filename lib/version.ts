@@ -332,5 +332,16 @@
  *     arreglo en dos comparaciones del Portal del inquilino.
  *   - Historial: la tabla de pagos usa los mismos filtros (fechas y usuario)
  *     que el Reporte de Cobros.
+ *
+ * V2.017 — arreglos de las pruebas de V2.016 (20/10/2026):
+ *   - Comprobante por WhatsApp: misma plantilla aprobada que Python
+ *     ("comprobante_pago_con_pdf"; la v2 pedía "comprobante_pago_alquiler"
+ *     y Meta la rechazaba), dirección de la propiedad en vez del alias,
+ *     monto formateado y teléfono sin espacios ni guiones.
+ *   - Comprobante y preliminar masivo: el inquilino se busca por DNI dentro
+ *     de la empresa (el mismo DNI puede estar en dos empresas).
+ *   - Pagos: "Monto abonado" se completa con el total a cubrir (saldo que
+ *     arrastra + conceptos del mes) hasta que se edite a mano.
+ *   - Reporte de Cobros: "Desde" arranca el 1 de enero del año actual.
  */
-export const APP_VERSION = "V2.016";
+export const APP_VERSION = "V2.017";

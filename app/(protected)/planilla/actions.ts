@@ -220,7 +220,8 @@ export async function enviarRecibosPreliminaresMasivo(): Promise<{
       .from("inquilinos")
       .select("nombres, apellidos, telefono")
       .eq("dni", contrato.dni_inquilino)
-      .single();
+      .eq("empresa_id", perfil.empresaId) // V2.017: mismo DNI en dos empresas
+      .maybeSingle();
     if (!inquilino?.telefono) {
       omitidos += 1;
       continue;
