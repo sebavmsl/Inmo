@@ -314,5 +314,23 @@
  *   - Cron: pasa el secreto a upsert_indice (el cron sigue desactivado en
  *     Vercel; su paso de "aplicar índices" se rediseña en el módulo
  *     WhatsApp y cron).
+ *
+ * V2.016 — arreglo rápido sobre la Entrega 1 (pruebas del 20/10/2026):
+ *   - WhatsApp: el número del pool (`whatsapp_numeros`, RLS sin políticas)
+ *     se lee en el servidor con service_role, después de validar la
+ *     empresa con la sesión del usuario. Antes la v2 decía "WhatsApp no
+ *     está configurado" y no enviaba preliminares ni comprobantes.
+ *   - Planilla: el envío masivo devuelve el motivo del error en vez de
+ *     tirarlo (en producción solo se veía el error genérico de Next.js), y
+ *     solo toma verificaciones de la empresa activa.
+ *   - supabase/migrations/0022_permisos_sin_recursion.sql (se corre a mano):
+ *     la política admin_gestiona_permisos_empresa se consultaba a sí misma
+ *     ("infinite recursion detected in policy"); ahora usa
+ *     auth_pestanas_propias(). Arregla guardar usuarios en Panel de Gestión.
+ *   - Carga de contratos: el selector de "Editar contrato" compara el código
+ *     como texto (llega como número desde la base y nunca coincidía). Mismo
+ *     arreglo en dos comparaciones del Portal del inquilino.
+ *   - Historial: la tabla de pagos usa los mismos filtros (fechas y usuario)
+ *     que el Reporte de Cobros.
  */
-export const APP_VERSION = "V2.015";
+export const APP_VERSION = "V2.016";

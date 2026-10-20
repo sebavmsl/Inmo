@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { FilaHistorial } from "@/lib/historial/queries";
+import { TablaHistorial } from "@/components/historial/TablaHistorial";
 import { formatMoneda } from "@/lib/format";
 import { claveDia, claveHoy, formatearFecha } from "@/lib/fechas";
 
@@ -88,7 +89,10 @@ export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
     URL.revokeObjectURL(url);
   }
 
+  // V2.016: la tabla del historial usa las mismas filas filtradas que el
+  // reporte (fechas y usuario), así se ve lo que suman los totales.
   return (
+    <>
     <details className="rounded-lg border border-brand-100 bg-white">
       <summary className="cursor-pointer select-none px-4 py-3 text-sm font-semibold text-brand-800">
         📋 Generar Reporte de Cobros
@@ -143,5 +147,7 @@ export function ReporteCobros({ filas }: { filas: FilaHistorial[] }) {
         </button>
       </div>
     </details>
+    <TablaHistorial filas={filtradas} />
+    </>
   );
 }

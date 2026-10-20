@@ -652,3 +652,9 @@ Las decisiones completas de la migración están en el documento "Migración v2 
 - **WhatsApp:** el token se lee solo en el servidor con service_role.
 - **Tipos:** `database.types.ts` sigue escrito a mano; solo se corrigió `usuarios_central` (no tiene `id`). La regeneración completa queda pendiente hasta poder compilar (el entorno de trabajo no puede instalar dependencias de npm).
 - **Forma de trabajo:** commits directos sobre `ver2`, con confirmación del usuario antes de cada push; el build se verifica en Vercel.
+
+### V2.016 (20/10/2026) — arreglos de las pruebas de la Entrega 1
+
+- `whatsapp_numeros` tiene RLS sin políticas: la v2 lo lee solo en el servidor (service_role), igual que el token.
+- Una política RLS no puede consultar su propia tabla (recursión): se usa una función SECURITY DEFINER (`auth_pestanas_propias`, migración 0022).
+- `contratos.codigo` es entero en la base aunque el tipo TS diga `string`: toda comparación con valores de formularios o URLs se hace con `String(...)`.

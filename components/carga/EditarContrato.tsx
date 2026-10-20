@@ -78,8 +78,8 @@ export function EditarContrato() {
         <p className="text-sm text-brand-500">No hay contratos registrados para editar.</p>
       ) : (
         <select
-          value={editando?.codigo ?? ""}
-          onChange={(e) => setEditando(contratos.find((c) => c.codigo === e.target.value) ?? null)}
+          value={editando ? String(editando.codigo) : ""}
+          onChange={(e) => setEditando(contratos.find((c) => String(c.codigo) === e.target.value) ?? null)}
           className="w-full max-w-md rounded border border-brand-100 px-2 py-1.5 text-sm"
         >
           <option value="">Seleccionar contrato…</option>

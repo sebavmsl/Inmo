@@ -11,7 +11,11 @@ export function BotonEnviarMasivo() {
     setCargando(true);
     setResultado(null);
     try {
-      const { enviados, errores, omitidos } = await enviarRecibosPreliminaresMasivo();
+      const { enviados, errores, omitidos, error } = await enviarRecibosPreliminaresMasivo();
+      if (error) {
+        setResultado(error);
+        return;
+      }
       setResultado(
         `${enviados} enviados` +
           (errores > 0 ? `, ${errores} con error` : "") +

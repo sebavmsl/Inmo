@@ -28,8 +28,7 @@ export async function getCredencialesWhatsapp(
       whatsapp_credenciales_propias,
       whatsapp_phone_id,
       whatsapp_token_secret_id,
-      whatsapp_numero_id,
-      whatsapp_numeros ( phone_id, token_secret_id )
+      whatsapp_numero_id
     `
     )
     .eq("empresa_id", empresaId)
@@ -44,8 +43,17 @@ export async function getCredencialesWhatsapp(
     secretId = cfg.whatsapp_token_secret_id;
     phoneId = cfg.whatsapp_phone_id;
   } else {
-    // TS ve whatsapp_numeros como array por el join, pero es 1:1 (FK simple)
-    const pool = Array.isArray(cfg.whatsapp_numeros) ? cfg.whatsapp_numeros[0] : cfg.whatsapp_numeros;
+    // V2.016: `whatsapp_numeros` (pool del superadmin) tiene RLS sin
+    // políticas, así que con la sesión del usuario la tabla se ve vacía y
+    // la empresa parecía "sin WhatsApp configurado". Se lee en el servidor
+    // con service_role, recién después de que la consulta de arriba (con la
+    // sesión del usuario, bajo RLS) confirmó que la empresa es suya.
+    if (!cfg.whatsapp_numero_id) return null;
+    const { data: pool } = await createAdminAuthClient()
+      .from("whatsapp_numeros")
+      .select("phone_id, token_secret_id")
+      .eq("id", cfg.whatsapp_numero_id)
+      .maybeSingle();
     secretId = pool?.token_secret_id ?? null;
     phoneId = pool?.phone_id ?? null;
   }

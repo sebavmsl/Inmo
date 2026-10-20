@@ -138,11 +138,20 @@ export async function actualizarIndicesManual(soloPendientes: boolean) {
  *    adicional, total y fecha límite — un mismatch de cantidad rompe
  *    el envío contra la API real de Meta (las plantillas son rígidas).
  */
-export async function enviarRecibosPreliminaresMasivo() {
+// V2.016: devuelve el error en vez de tirarlo. En producción Next.js oculta
+// el mensaje de un error tirado desde una Server Action y el usuario solo
+// veía "An error occurred in the Server Components render".
+export async function enviarRecibosPreliminaresMasivo(): Promise<{
+  enviados: number;
+  errores: number;
+  omitidos: number;
+  error?: string;
+}> {
   const perfil = await requirePermisoAction("planilla");
   const supabase = await createClient();
+  const fallo = (error: string) => ({ enviados: 0, errores: 0, omitidos: 0, error });
 
-  if (!perfil.empresaId) throw new Error("Usuario sin empresa asociada.");
+  if (!perfil.empresaId) return fallo("Usuario sin empresa asociada.");
 
   const { data: cfg } = await supabase
     .from("configuraciones_empresa")
@@ -153,19 +162,20 @@ export async function enviarRecibosPreliminaresMasivo() {
   if (!tieneWhatsapp(perfil.rol, perfil.permisos, cfg?.whatsapp_habilitado ?? false)) {
     // El caller de la UI ya debería haber ocultado el botón si no
     // corresponde; esto es el resguardo del lado del servidor.
-    throw new Error("No tenés permiso para enviar por WhatsApp.");
+    return fallo("No tenés permiso para enviar por WhatsApp.");
   }
 
   const credenciales = await getCredencialesWhatsapp(perfil.empresaId);
-  if (!credenciales) throw new Error("WhatsApp no está configurado para esta empresa.");
+  if (!credenciales) return fallo("WhatsApp no está configurado para esta empresa.");
 
   const periodo = periodoActual();
   const { data: verificados, error } = await supabase
     .from("planilla_verificaciones")
     .select("codigo_contrato, expensas_adhoc")
     .eq("periodo", periodo)
-    .eq("verificado", true);
-  if (error) throw new Error(error.message);
+    .eq("verificado", true)
+    .eq("empresa_id", perfil.empresaId);
+  if (error) return fallo(error.message);
 
   const nombreMes = nombreMesAnio();
   const fechaLimite = fechaLimiteDia10();

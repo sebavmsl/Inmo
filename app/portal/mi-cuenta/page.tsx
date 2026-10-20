@@ -19,7 +19,7 @@ export default async function MiCuentaPage({
   // "T | undefined" aunque en la práctica nunca lo sea acá).
   const primero = contratos[0];
   if (!primero) redirect("/portal/login");
-  const seleccionado = contratos.find((c) => c.codigoContrato === codigoElegido) ?? primero;
+  const seleccionado = contratos.find((c) => String(c.codigoContrato) === String(codigoElegido)) ?? primero;
 
   const supabase = await createClient();
   const { data: contratoDetalle } = await supabase
@@ -56,7 +56,7 @@ export default async function MiCuentaPage({
               key={c.codigoContrato}
               href={`/portal/mi-cuenta?contrato=${c.codigoContrato}`}
               className={`rounded-full px-3 py-1 text-xs ${
-                c.codigoContrato === seleccionado.codigoContrato ? "bg-brand-600 text-white" : "bg-white text-brand-600"
+                String(c.codigoContrato) === String(seleccionado.codigoContrato) ? "bg-brand-600 text-white" : "bg-white text-brand-600"
               }`}
             >
               {c.nombreEmpresa} — {c.aliasPropiedad}

@@ -15,7 +15,7 @@ export async function subirComprobante(
   archivo: File
 ): Promise<{ ok: boolean; error?: string }> {
   const contratos = await getInquilinoContratos();
-  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
+  const contrato = contratos.find((c) => String(c.codigoContrato) === String(codigoContrato));
   if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
 
   const supabase = await createClient();
@@ -39,7 +39,7 @@ export async function subirComprobante(
 
 export async function crearReclamo(codigoContrato: string, descripcion: string): Promise<{ ok: boolean; error?: string }> {
   const contratos = await getInquilinoContratos();
-  const contrato = contratos.find((c) => c.codigoContrato === codigoContrato);
+  const contrato = contratos.find((c) => String(c.codigoContrato) === String(codigoContrato));
   if (!contrato) return { ok: false, error: "No tenés acceso a ese contrato." };
 
   const supabase = await createClient();

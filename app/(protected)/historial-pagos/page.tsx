@@ -1,6 +1,5 @@
 import { requireSessionProfileConPermiso } from "@/lib/auth/session";
 import { getHistorialPagos } from "@/lib/historial/queries";
-import { TablaHistorial } from "@/components/historial/TablaHistorial";
 import { ReporteCobros } from "@/components/historial/ReporteCobros";
 
 export default async function HistorialPagosPage() {
@@ -21,8 +20,8 @@ export default async function HistorialPagosPage() {
           {propietarioFiltro && ` · filtrado a ${propietarioFiltro}`}
         </p>
       </div>
+      {/* V2.016: ReporteCobros también muestra la tabla, filtrada. */}
       <ReporteCobros filas={filas} />
-      <TablaHistorial filas={filas} />
     </div>
   );
 }
