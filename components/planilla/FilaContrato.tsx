@@ -80,6 +80,11 @@ export function FilaContrato({ fila, soloLectura }: { fila: FilaPlanilla; soloLe
             Ir a Pagos →
           </Link>
         )}
+        {!soloLectura && (fila.urgencia === "renovar" || fila.estadoVencido) && (
+          <Link href={`/carga?renovar=${fila.codigo}#alta`} className="ml-3 text-xs font-medium text-red-700 hover:underline">
+            🔁 Renovar
+          </Link>
+        )}
       </td>
     </tr>
   );

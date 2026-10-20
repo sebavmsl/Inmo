@@ -343,5 +343,24 @@
  *   - Pagos: "Monto abonado" se completa con el total a cubrir (saldo que
  *     arrastra + conceptos del mes) hasta que se edite a mano.
  *   - Reporte de Cobros: "Desde" arranca el 1 de enero del año actual.
+ *
+ * V2.018 — Entrega 2, Carga de contratos (20/10/2026). Requiere la
+ * migración 0023 (columnas nuevas y crear_contrato_v2):
+ *   - Alta nueva: código automático (secuencia de la base, como Python),
+ *     propiedad e inquilino de una lista, estado, día de vencimiento,
+ *     "Sin actualización", honorarios (total, por defecto el monto inicial),
+ *     tipo de garantía con depósito y pagaré, montos de servicios con su
+ *     "a cargo de", cargo general de servicios y cochera con tilde para
+ *     actualizarse con el índice. Duración, mes del contrato y próxima
+ *     actualización se calculan como Python.
+ *   - Contratos que ya empezaron: antes de guardar se listan los meses
+ *     transcurridos con su monto (alquiler con el índice de cada ciclo),
+ *     cada uno Pagado o Adeudado, con ajuste, comisión y "paga ahora". Se
+ *     guarda todo junto (contrato, cierre del anterior y meses) o nada.
+ *   - Renovar: precarga el alta con el contrato anterior (desde Edición y
+ *     desde la alerta RENOVAR de la Planilla).
+ *   - Edición: campos nuevos, inquilino de lista, monto inicial y fechas
+ *     corregibles con aviso.
+ *   - Pagos: el formulario se rearma al cambiar de contrato.
  */
-export const APP_VERSION = "V2.017";
+export const APP_VERSION = "V2.018";

@@ -3,9 +3,28 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { requirePermisoAction } from "@/lib/auth/session";
-import { calcularMotivoFinalizacion, bloqueadoPorActualizacionPendiente } from "@/lib/carga/validaciones";
+import { bloqueadoPorActualizacionPendiente } from "@/lib/carga/validaciones";
 import { verificarConflicto } from "@/lib/concurrencia/queries";
-import { listarContratosEditables, type ContratoEditable } from "@/lib/carga/queries";
+import {
+  listarContratosEditables,
+  listarOpcionesAlta,
+  obtenerDatosRenovacion,
+  type ContratoEditable,
+} from "@/lib/carga/queries";
+import { armarPrevisualizacion, armarRegistroAlta, resumenAlta, validarAlta, validarMeses } from "@/lib/carga/armadoAlta";
+import { hoyArgentina, previsualizarAltaContrato } from "@/lib/carga/mesesTranscurridos";
+import { claveHoy, fechaHoraPythonAhora } from "@/lib/fechas";
+import type { DatosAltaContrato, MesConfirmado, OpcionesAlta, PrevisualizacionAlta } from "@/lib/carga/tipos";
+import type { CargosContrato, ServiciosContrato } from "@/lib/carga/tipos";
+import {
+  aISO,
+  calcularDuracion,
+  calcularProxActualizacion,
+  leerFechaISO,
+  textoServiciosPython,
+  tieneDeposito,
+  tienePagare,
+} from "@/lib/carga/calculoContrato";
 import type { IndiceActualizacion } from "@/lib/types/database.types";
 
 export async function listarContratos(): Promise<ContratoEditable[]> {
@@ -16,123 +35,102 @@ export async function listarContratos(): Promise<ContratoEditable[]> {
   return listarContratosEditables(propietarioFiltro, empresaFiltro);
 }
 
-export interface DatosContrato {
-  codigo: string;
-  aliasPropiedad: string;
-  dniInquilino: string;
-  fechaInicio: string;
-  finContrato: string;
-  calcDuracion: number;
-  indice: IndiceActualizacion;
-  /**
-   * Frecuencia de actualización del alquiler, en cantidad de meses
-   * (1, 2, 3, 4, 6, 12, 24...). Va directo a `contratos.act_contrato`
-   * (integer) — NO existe `frecuencia_actualizacion` en la base real.
-   */
-  frecuenciaMeses: number;
-  montoInicial: number;
-  honorariosPct: number;
-  montoHonorarios: number | null; // total pactado — NULL = usar monto_inicial (ver DESIGN_LOG.md)
-  cuotaHonorarios: number;
-  montoGarantia: number | null;
-  cuotasDeposito: number;
-  honorariosPagadosBase: number;
-  cuotasHonorariosPagadasBase: number;
-  garantiaPagadaBase: number;
-  cuotasDepositoPagadasBase: number;
-  cargoElectricidad: "Inquilino" | "Propietario";
-  cargoGas: "Inquilino" | "Propietario";
-  cargoMunicipalidad: "Inquilino" | "Propietario";
-  cargoOoss: "Inquilino" | "Propietario";
-  cargoExpensas: "Inquilino" | "Propietario";
-  cargoImpInmobiliario: "Inquilino" | "Propietario";
-  cochera: number;
+/** Listas de propiedades e inquilinos de la empresa, para el alta. */
+export async function opcionesAlta(): Promise<OpcionesAlta> {
+  const perfil = await requirePermisoAction("carga");
+  if (!perfil.empresaId) return { propiedades: [], inquilinos: [] };
+  return listarOpcionesAlta(perfil.empresaId);
+}
+
+/** Datos precargados para renovar un contrato (botón "Renovar"). */
+export async function datosRenovacion(codigo: string): Promise<{ ok: boolean; datos?: DatosAltaContrato; error?: string }> {
+  const perfil = await requirePermisoAction("carga");
+  if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
+  const datos = await obtenerDatosRenovacion(codigo, perfil.empresaId);
+  if (!datos) return { ok: false, error: "No se encontró el contrato a renovar." };
+  return { ok: true, datos };
 }
 
 /**
- * Crear contrato nuevo — puerto de app.py líneas 5980-6060. Incluye la
- * regla de auto-finalizado del contrato viejo de la misma propiedad
- * (ver DESIGN_LOG.md): corre SIEMPRE (no solo si el nuevo es Activo,
- * a diferencia de v1), y calcula Finalizado vs Cancelado según si el
- * viejo cumplió su curso o se cortó antes de tiempo.
+ * Paso 1 del alta: valida y calcula duración, mes actual, próxima
+ * actualización, alquiler vigente y los meses ya transcurridos (con el
+ * índice de cada ciclo). No guarda nada.
  */
-export async function crearContrato(datos: DatosContrato): Promise<{ ok: boolean; error?: string }> {
-  const perfil = await requirePermisoAction("carga");
-  const supabase = await createClient();
+export async function previsualizarAlta(
+  datos: DatosAltaContrato
+): Promise<{ ok: boolean; previsualizacion?: PrevisualizacionAlta; error?: string }> {
+  await requirePermisoAction("carga");
+  const error = validarAlta(datos);
+  if (error) return { ok: false, error };
+  try {
+    return { ok: true, previsualizacion: await previsualizarAltaContrato(datos) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : "Error calculando los meses del contrato." };
+  }
+}
 
+/**
+ * Paso 2 del alta: guarda todo en una sola transacción con
+ * `crear_contrato_v2` (migración 0023): cierra el contrato activo
+ * anterior de la propiedad (Finalizado o Cancelado, con motivo
+ * "renovacion"), crea el contrato con el código de la secuencia (igual que
+ * Python) y registra los meses transcurridos en pagos_historial.
+ *
+ * Se vuelve a calcular la previsualización acá (duración, mes actual,
+ * próxima actualización y cantidad de meses) para no confiar en fechas
+ * calculadas en el navegador; los montos de cada mes son los que el
+ * usuario confirmó en pantalla.
+ */
+export async function crearContrato(
+  datos: DatosAltaContrato,
+  meses: MesConfirmado[],
+  alquilerVigenteConfirmado: number
+): Promise<{ ok: boolean; codigo?: string; cerrados?: { codigo: string; estado: string }[]; error?: string }> {
+  const perfil = await requirePermisoAction("carga");
   if (!perfil.empresaId) return { ok: false, error: "Usuario sin empresa asociada." };
 
-  // 1. Buscar contrato Activo existente en la misma propiedad
-  const { data: contratoViejo } = await supabase
-    .from("contratos")
-    .select("codigo, fin_contrato, mes_contrato, calc_duracion")
-    .eq("alias_propiedad", datos.aliasPropiedad)
-    .eq("empresa_id", perfil.empresaId)
-    .eq("estado", "Activo")
-    .maybeSingle();
+  const errorDatos = validarAlta(datos);
+  if (errorDatos) return { ok: false, error: errorDatos };
 
-  // 2. Si existe, finalizarlo SIEMPRE (sin condición sobre el estado del nuevo)
-  if (contratoViejo) {
-    const motivo = calcularMotivoFinalizacion({
-      finContratoViejo: contratoViejo.fin_contrato,
-      mesContratoViejo: contratoViejo.mes_contrato,
-      calcDuracionViejo: contratoViejo.calc_duracion,
-    });
+  const r = resumenAlta(datos, hoyArgentina());
+  const errorMeses = validarMeses(meses, r.cantidadMesesPasados, claveHoy());
+  if (errorMeses) return { ok: false, error: errorMeses };
+  if (!(alquilerVigenteConfirmado > 0)) return { ok: false, error: "El alquiler vigente tiene que ser mayor a 0." };
 
-    const { error: errorFinalizar } = await supabase
-      .from("contratos")
-      .update({
-        estado: motivo,
-        // fecha_finalizacion queda NULL a propósito — solo el auto-
-        // vencimiento por cron completa esa columna (ver DESIGN_LOG.md,
-        // distingue "vencido de hecho" de "renovado").
-        finalizado_por: "renovacion",
-      })
-      .eq("codigo", contratoViejo.codigo)
-      .eq("empresa_id", perfil.empresaId);
-
-    if (errorFinalizar) return { ok: false, error: `Error finalizando el contrato anterior: ${errorFinalizar.message}` };
-  }
-
-  // 3. Insertar el contrato nuevo
-  const { error: errorInsert } = await supabase.from("contratos").insert({
-    empresa_id: perfil.empresaId,
-    codigo: datos.codigo,
-    alias_propiedad: datos.aliasPropiedad,
-    dni_inquilino: datos.dniInquilino,
-    // La columna real en `contratos` es `inicio_contrato`, no `fecha_inicio`
-    // (ver DESIGN_LOG.md — hallazgo de auditoría de esquema real vs. supuesto).
-    inicio_contrato: datos.fechaInicio,
-    fin_contrato: datos.finContrato,
-    calc_duracion: datos.calcDuracion,
-    mes_contrato: 0,
-    indice: datos.indice,
-    act_contrato: datos.frecuenciaMeses,
-    monto_inicial: datos.montoInicial,
-    honorarios: datos.honorariosPct,
-    monto_honorarios: datos.montoHonorarios,
-    cuota_honorarios: datos.cuotaHonorarios,
-    monto_garantia: datos.montoGarantia,
-    cuotas_deposito: datos.cuotasDeposito,
-    honorarios_pagados_base: datos.honorariosPagadosBase,
-    cuotas_honorarios_pagadas_base: datos.cuotasHonorariosPagadasBase,
-    garantia_pagada_base: datos.garantiaPagadaBase,
-    cuotas_deposito_pagadas_base: datos.cuotasDepositoPagadasBase,
-    cargo_electricidad: datos.cargoElectricidad,
-    cargo_gas: datos.cargoGas,
-    cargo_municipalidad: datos.cargoMunicipalidad,
-    cargo_ooss: datos.cargoOoss,
-    cargo_expensas: datos.cargoExpensas,
-    cargo_imp_inmobiliario: datos.cargoImpInmobiliario,
-    cochera: datos.cochera,
-    estado: "Activo",
+  // Previsualización sin consultar índices: alcanza para las fechas; el
+  // alquiler vigente es el que el usuario confirmó.
+  const prev = armarPrevisualizacion(datos, r, new Map());
+  const registro = armarRegistroAlta({ ...datos, alquilerVigente: alquilerVigenteConfirmado }, prev, meses, {
+    empresaId: perfil.empresaId,
+    username: perfil.username,
+    ahora: { iso: claveHoy(), hora: fechaHoraPythonAhora().slice(11) },
   });
 
-  if (errorInsert) return { ok: false, error: `Error al crear el contrato: ${errorInsert.message}` };
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("crear_contrato_v2", {
+    p_contrato: registro.contrato,
+    p_meses: registro.meses,
+  });
+  if (error) {
+    const sinFuncion = /crear_contrato_v2/.test(error.message) && /(not find|does not exist|no existe)/i.test(error.message);
+    return {
+      ok: false,
+      error: sinFuncion
+        ? "Falta aplicar la migración 0023 en Supabase (función crear_contrato_v2)."
+        : `Error al crear el contrato: ${error.message}`,
+    };
+  }
+  const res = (data ?? {}) as { ok?: boolean; codigo?: number; cerrados?: { codigo: number; estado: string }[]; error?: string };
+  if (!res.ok) return { ok: false, error: res.error ?? "No se pudo crear el contrato." };
 
   revalidatePath("/carga");
   revalidatePath("/planilla");
-  return { ok: true };
+  revalidatePath("/pagos");
+  return {
+    ok: true,
+    codigo: String(res.codigo ?? ""),
+    cerrados: (res.cerrados ?? []).map((c) => ({ codigo: String(c.codigo), estado: c.estado })),
+  };
 }
 
 export interface DatosEditarContrato {
@@ -140,36 +138,36 @@ export interface DatosEditarContrato {
   dniInquilino: string;
   fechaInicio: string;
   finContrato: string | null;
-  calcDuracion: number | null;
+  diaVencimiento: number;
+  /** Dato original del alta: se puede corregir, con aviso en pantalla. */
+  montoInicial: number;
   indice: IndiceActualizacion;
   frecuenciaMeses: number;
   honorariosPct: number;
   montoHonorarios: number | null;
   cuotaHonorarios: number;
+  tipoGarantia: string;
   montoGarantia: number | null;
   cuotasDeposito: number;
-  cargoElectricidad: "Inquilino" | "Propietario";
-  cargoGas: "Inquilino" | "Propietario";
-  cargoMunicipalidad: "Inquilino" | "Propietario";
-  cargoOoss: "Inquilino" | "Propietario";
-  cargoExpensas: "Inquilino" | "Propietario";
-  cargoImpInmobiliario: "Inquilino" | "Propietario";
-  cochera: number | null;
+  montoPagare: number;
+  servicios: ServiciosContrato;
+  cargos: CargosContrato;
+  cargoGeneralServicios: number;
+  cochera: number | null; // cochera del mes (vigente)
+  cocheraMontoInicial: number;
+  cocheraActualizaConIndice: boolean;
 }
 
 /**
- * Edición de un contrato existente — sin la lógica de renovación (eso
- * solo aplica a altas nuevas, ver crearContrato). NO toca `monto_inicial`
- * (histórico del alta) ni `alquiler` (vigente, lo mantiene el motor de
- * índices de Planilla — ver actualizarIndicesManual()).
+ * Edición de un contrato existente — corrige datos mal cargados. No es
+ * una renovación (para eso está "Renovar", que crea un contrato nuevo).
  *
- * CORRECCIÓN (hallazgo de esta sesión): la versión anterior de esta
- * función pasaba `datos` (claves en camelCase, ej. `aliasPropiedad`)
- * directo a `.update()`, que espera nombres de columna reales
- * (snake_case, ej. `alias_propiedad`) — nunca hubiera actualizado nada
- * en la base real. No tenía pantalla propia todavía, así que el bug no
- * se había manifestado. Ahora mapea cada campo explícitamente, igual
- * criterio que crearContrato().
+ * No toca `alquiler` (vigente, lo mantienen Pagos y la actualización de
+ * índices de Planilla) ni el saldo. Si cambian las fechas o la
+ * frecuencia, recalcula duración y próxima actualización con la fórmula
+ * de Python. Reescribe `servicios` con el formato de Python porque Python
+ * lee de ahí el alquiler vigente y a cargo de quién va el impuesto
+ * inmobiliario.
  *
  * Dos capas de protección antes de guardar: optimistic locking (Módulo
  * transversal "Ediciones simultáneas") y el bloqueo por actualización
@@ -191,17 +189,42 @@ export async function editarContrato(
 
   const { data: actual } = await supabase
     .from("contratos")
-    .select("fin_contrato, prox_actualizacion")
+    .select("fin_contrato, prox_actualizacion, inicio_contrato, act_contrato, alquiler, monto_inicial, calc_duracion")
     .eq("codigo", codigo)
     .eq("empresa_id", perfil.empresaId)
     .maybeSingle();
+  if (!actual) return { ok: false, error: "No se encontró el contrato." };
 
   const { bloqueado, motivo } = bloqueadoPorActualizacionPendiente({
     estado: datos.estado,
-    finContrato: actual?.fin_contrato ?? null,
-    proxActualizacion: actual?.prox_actualizacion ?? null,
+    finContrato: actual.fin_contrato ?? null,
+    proxActualizacion: actual.prox_actualizacion ?? null,
   });
   if (bloqueado) return { ok: false, bloqueado: true, error: motivo ?? "Edición bloqueada." };
+
+  const inicio = leerFechaISO(datos.fechaInicio);
+  const fin = leerFechaISO(datos.finContrato);
+  if (!inicio || !fin) return { ok: false, error: "Las fechas de inicio y fin tienen que ser válidas." };
+  if (aISO(fin) <= aISO(inicio)) return { ok: false, error: "La fecha de fin tiene que ser posterior a la de inicio." };
+  if (!Number.isInteger(datos.diaVencimiento) || datos.diaVencimiento < 1 || datos.diaVencimiento > 31)
+    return { ok: false, error: "El día de vencimiento tiene que estar entre 1 y 31." };
+  if (!(datos.montoInicial > 0)) return { ok: false, error: "El monto inicial tiene que ser mayor a 0." };
+
+  // Duración y próxima actualización: se recalculan solo si cambió algo que las afecta.
+  const cambiaronFechas =
+    datos.fechaInicio !== actual.inicio_contrato ||
+    datos.finContrato !== actual.fin_contrato ||
+    datos.frecuenciaMeses !== actual.act_contrato;
+  const recalculo = cambiaronFechas
+    ? {
+        calc_duracion: calcularDuracion(inicio, fin),
+        prox_actualizacion: aISO(calcularProxActualizacion(inicio, fin, datos.frecuenciaMeses, hoyArgentina())),
+        mes_actualizacion_contrato: datos.frecuenciaMeses > 0 ? datos.frecuenciaMeses : 1,
+      }
+    : {};
+
+  const alquilerVigente = actual.alquiler && actual.alquiler > 0 ? actual.alquiler : datos.montoInicial;
+  const deposito = tieneDeposito(datos.tipoGarantia) ? (datos.montoGarantia ?? 0) : 0;
 
   const { error } = await supabase
     .from("contratos")
@@ -210,26 +233,43 @@ export async function editarContrato(
       dni_inquilino: datos.dniInquilino,
       inicio_contrato: datos.fechaInicio,
       fin_contrato: datos.finContrato,
-      calc_duracion: datos.calcDuracion,
+      ...recalculo,
+      dia_vencimiento: datos.diaVencimiento,
+      monto_inicial: datos.montoInicial,
       indice: datos.indice,
       act_contrato: datos.frecuenciaMeses,
       honorarios: datos.honorariosPct,
       monto_honorarios: datos.montoHonorarios,
       cuota_honorarios: datos.cuotaHonorarios,
-      monto_garantia: datos.montoGarantia,
+      tipo_de_garantie: datos.tipoGarantia,
+      monto_garantia: deposito,
       cuotas_deposito: datos.cuotasDeposito,
-      cargo_electricidad: datos.cargoElectricidad,
-      cargo_gas: datos.cargoGas,
-      cargo_municipalidad: datos.cargoMunicipalidad,
-      cargo_ooss: datos.cargoOoss,
-      cargo_expensas: datos.cargoExpensas,
-      cargo_imp_inmobiliario: datos.cargoImpInmobiliario,
+      monto_pagare: tienePagare(datos.tipoGarantia) ? datos.montoPagare : 0,
+      expensas: datos.servicios.expensas,
+      edesal: datos.servicios.edesal,
+      gas: datos.servicios.gas,
+      municipalidad: datos.servicios.municipalidad,
+      ooss: datos.servicios.ooss,
+      imp_inmobiliario: datos.servicios.impInmobiliario,
+      cargo_electricidad: datos.cargos.electricidad,
+      cargo_gas: datos.cargos.gas,
+      cargo_municipalidad: datos.cargos.municipalidad,
+      cargo_ooss: datos.cargos.ooss,
+      cargo_expensas: datos.cargos.expensas,
+      cargo_imp_inmobiliario: datos.cargos.impInmobiliario,
+      cargo_general_servicios: datos.cargoGeneralServicios,
       cochera: datos.cochera,
+      cochera_monto_inicial: datos.cocheraMontoInicial,
+      cochera_actualiza_con_indice: datos.cocheraActualizaConIndice && ["ICL", "IPC", "UVA"].includes(datos.indice),
+      servicios: textoServiciosPython({ alquilerVigente, cargos: datos.cargos }),
     })
     .eq("codigo", codigo)
     .eq("empresa_id", perfil.empresaId);
 
-  if (error) return { ok: false, error: error.message };
+  if (error) {
+    const sinColumnas = /dia_vencimiento|cochera_monto_inicial|cargo_general_servicios|monto_pagare/.test(error.message);
+    return { ok: false, error: sinColumnas ? "Falta aplicar la migración 0023 en Supabase." : error.message };
+  }
   revalidatePath("/carga");
   revalidatePath("/planilla");
   return { ok: true };

@@ -272,6 +272,30 @@ export interface ContratosRow {
   cochera: number | null;
   calc_duracion: number | null; // duración total en meses, usado para la regla de renovación
   mes_contrato: number | null; // "mes vivo" actual del contrato
+  // Entrega 2 (0023) — columnas de la v2, invisibles para Python
+  dia_vencimiento: number; // 1-31, 10 por defecto; si el mes tiene menos días se usa el último
+  cochera_monto_inicial: number | null;
+  cochera_actualiza_con_indice: boolean;
+  cargo_general_servicios: number;
+  monto_pagare: number;
+  // Columnas de Python que la v2 completa al crear (ver crear_contrato_v2)
+  mes_actualizacion_contrato: number | null;
+  servicios: string | null;
+  tipo_de_garantie: string | null;
+  garantia: string | null;
+  honorarios_pagados: number | null;
+  cuotas_honorarios_pagadas: number | null;
+  garantia_pagada: number | null;
+  cuotas_deposito_pagadas: number | null;
+  imp_inmobiliario: number | null;
+  expensas: number | null;
+  edesal: number | null;
+  gas: number | null;
+  municipalidad: number | null;
+  ooss: number | null;
+  servicios_total: number | null;
+  alquiler_cobrado: number | null;
+  total_pagado: number | null;
   /** Optimistic locking (Módulo transversal "Ediciones simultáneas", 0014). */
   updated_at: string;
 }
@@ -315,6 +339,9 @@ export interface PagosHistorialRow {
    * desconectado que muestra v1. Ver docs/DESIGN_LOG.md.
    */
   comprobante_referencia: string | null;
+  monto_cargo_general: number; // Entrega 2 (0023) — cargo general de servicios
+  saldos_anteriores: number | null;
+  pestana: string | null;
 }
 
 export interface GastosPropiedadesRow {

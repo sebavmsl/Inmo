@@ -41,7 +41,9 @@ export default async function PagosPage({
       </div>
 
       {contratoSeleccionado ? (
-        <FormularioConceptos contrato={contratoSeleccionado} periodoSugerido={periodoSugerido} />
+        // key: al cambiar de contrato el formulario se rearma desde cero (si no,
+        // React reusa el estado del contrato anterior — bug de las pruebas del 20/10).
+        <FormularioConceptos key={contratoSeleccionado.codigo} contrato={contratoSeleccionado} periodoSugerido={periodoSugerido} />
       ) : codigoSeleccionado ? (
         <p className="text-sm text-red-600">No se encontró el contrato seleccionado.</p>
       ) : (
